@@ -1,0 +1,129 @@
+name: Build iOS App
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    runs-on: macos-15
+    name: iOS Release
+    environment: ios-release
+
+    steps:
+      - name: Check for signing secrets
+        env:
+          HAS_CERT: ${{ secrets.APPLE_CERTIFICATE }}
+        run: |
+          if [ -z "$HAS_CERT" ]; then
+            echo "::error::Apple signing secrets not configured"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Initialize iOS project
+        env:
+          APPLE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_TEAM_ID }}
+        run: npx tauri ios init
+
+      - name: Enable iOS document picker support
+        run: |
+          PLIST="src-tauri/gen/apple/PocketLedger_iOS/Info.plist"
+          if [ -f "$PLIST" ]; then
+            sed -i '' '/<\/dict>/i\
+            <key>UIFileSharingEnabled</key>\
+            <true/>\
+            <key>LSSupportsOpeningDocumentsInPlace</key>\
+            <true/>\
+            <key>UISupportsDocumentBrowser</key>\
+            <true/>' "$PLIST"
+            echo "Patched Info.plist with document picker keys"
+          fi
+
+      - name: Prepare App Store Connect API key
+        env:
+          API_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY }}
+          API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+        run: |
+          if [ -n "$API_KEY" ]; then
+            mkdir -p ~/.private_keys
+            echo -n "$API_KEY" | base64 --decode > ~/.private_keys/AuthKey_${API_KEY_ID}.p8
+            echo "API_KEY_PATH=$HOME/.private_keys/AuthKey_${API_KEY_ID}.p8" >> $GITHUB_ENV
+          fi
+
+      - name: Build iOS release
+        env:
+          APPLE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_TEAM_ID }}
+          IOS_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          IOS_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          IOS_MOBILE_PROVISION: ${{ secrets.APPLE_PROVISIONING_PROFILE }}
+          APPLE_API_ISSUER: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APPLE_API_KEY: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APPLE_API_KEY_PATH: ${{ env.API_KEY_PATH }}
+        run: npx tauri ios build --export-method app-store-connect
+
+      - name: Find IPA
+        id: find-ipa
+        run: |
+          FOUND_IPA=$(find src-tauri/gen/apple ~/Library/Developer/Xcode -name "*.ipa" 2>/dev/null | head -1)
+          if [ -n "$FOUND_IPA" ]; then
+            mkdir -p $RUNNER_TEMP/export
+            cp "$FOUND_IPA" $RUNNER_TEMP/export/PocketLedger.ipa
+            echo "ipa_path=$RUNNER_TEMP/export/PocketLedger.ipa" >> $GITHUB_OUTPUT
+          else
+            echo "::error::No IPA found after build"
+            exit 1
+          fi
+
+      - name: Upload to TestFlight
+        if: env.API_KEY_PATH != ''
+        env:
+          API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+        run: |
+          xcrun altool --upload-app \
+            -f ${{ steps.find-ipa.outputs.ipa_path }} \
+            --type ios \
+            --apiKey "$API_KEY_ID" \
+            --apiIssuer "$API_ISSUER_ID"
+
+      - name: Upload .ipa artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-release-ipa
+          path: ${{ steps.find-ipa.outputs.ipa_path }}
+          retention-days: 90
+
+      - name: Upload IPA to GitHub Release
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: ${{ steps.find-ipa.outputs.ipa_path }}
