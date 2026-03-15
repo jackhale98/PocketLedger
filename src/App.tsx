@@ -56,8 +56,17 @@ function App() {
         if (!path.endsWith(".journal")) {
           path += ".journal";
         }
+        // createJournal loads the journal into app state on the backend.
+        // We just need to sync the frontend store.
         await api.createJournal(path, defaultCurrency);
-        await openJournal(path);
+        const summary = await api.getJournalInfo();
+        const transactions = await api.listTransactions();
+        useJournalStore.setState({
+          isLoaded: true,
+          isLoading: false,
+          summary,
+          transactions,
+        });
       }
     } catch (err) {
       console.error("Create journal error:", err);

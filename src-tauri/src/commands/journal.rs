@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use tauri::{Manager, State};
 
 use hledger_core::ledger::Ledger;
 use hledger_parser::ast::{
@@ -10,6 +10,27 @@ use hledger_parser::ast::{
     SourceSpan, Status, Tag, Transaction,
 };
 use hledger_parser::writer::{self, WriterConfig};
+
+/// Normalize a path that might be a file:// URI (iOS returns these from dialogs)
+/// into a regular filesystem PathBuf.
+fn normalize_path(path: &str) -> PathBuf {
+    if let Some(stripped) = path.strip_prefix("file://") {
+        // Fast path: just strip the scheme and decode percent-encoding
+        if let Ok(decoded) = urlencoding::decode(stripped) {
+            return PathBuf::from(decoded.into_owned());
+        }
+        return PathBuf::from(stripped);
+    }
+    // Also handle url crate for edge cases
+    if path.starts_with("file:") {
+        if let Ok(url) = url::Url::parse(path) {
+            if let Ok(p) = url.to_file_path() {
+                return p;
+            }
+        }
+    }
+    PathBuf::from(path)
+}
 
 pub struct LoadedJournal {
     pub source_path: PathBuf,
@@ -63,18 +84,20 @@ fn make_summary(loaded: &LoadedJournal) -> JournalSummary {
 }
 
 fn load_journal(path: &str) -> Result<LoadedJournal, String> {
-    let source_text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let file_path = normalize_path(path);
+    let source_text = std::fs::read_to_string(&file_path)
+        .map_err(|e| format!("Cannot read {}: {}", file_path.display(), e))?;
     let writer_config = writer::infer_config(&source_text);
     let mut journal = hledger_parser::parse(&source_text).map_err(|e| e.to_string())?;
 
     // Resolve include directives
-    let base_dir = PathBuf::from(path).parent().map(|p| p.to_path_buf());
+    let base_dir = file_path.parent().map(|p| p.to_path_buf());
     resolve_includes(&mut journal, base_dir.as_deref());
 
     let ledger = Ledger::from_journal(&journal).map_err(|e| e.to_string())?;
 
     Ok(LoadedJournal {
-        source_path: PathBuf::from(path),
+        source_path: file_path,
         source_text,
         journal,
         ledger,
@@ -252,13 +275,29 @@ pub async fn add_transaction(
 pub async fn create_journal(
     path: String,
     default_currency: Option<String>,
+    app: tauri::AppHandle,
     state: State<'_, Mutex<crate::AppState>>,
 ) -> Result<JournalSummary, String> {
     let currency = default_currency.unwrap_or_else(|| "$".to_string());
 
+    // On mobile, the save dialog path may not be writable.
+    // Use app_data_dir as fallback when the given path fails.
+    let file_path = normalize_path(&path);
+    let file_path = if cfg!(any(target_os = "ios", target_os = "android")) {
+        // On mobile, always create in app data dir for reliability
+        let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(&data_dir).map_err(|e| e.to_string())?;
+        let filename = file_path
+            .file_name()
+            .unwrap_or_else(|| std::ffi::OsStr::new("finances.journal"));
+        data_dir.join(filename)
+    } else {
+        file_path
+    };
+
     let initial_content = format!(
         "; hledger journal\n\
-         ; Created by hledger mobile app\n\
+         ; Created by PocketHLedger\n\
          \n\
          commodity {currency}1,000.00\n\
          \n\
@@ -281,9 +320,11 @@ pub async fn create_journal(
         currency = currency,
     );
 
-    std::fs::write(&path, &initial_content).map_err(|e| e.to_string())?;
+    std::fs::write(&file_path, &initial_content)
+        .map_err(|e| format!("Cannot write {}: {}", file_path.display(), e))?;
 
-    let loaded = load_journal(&path)?;
+    let path_str = file_path.to_string_lossy().to_string();
+    let loaded = load_journal(&path_str)?;
     let summary = make_summary(&loaded);
 
     let mut app_state = state.lock().map_err(|e| e.to_string())?;

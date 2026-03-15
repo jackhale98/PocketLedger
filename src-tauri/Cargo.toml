@@ -23,3 +23,5 @@ chrono = "0.4"
 rust_decimal = "1"
 hledger-parser = { path = "../crates/hledger-parser" }
 hledger-core = { path = "../crates/hledger-core" }
+url = "2"
+urlencoding = "2"
