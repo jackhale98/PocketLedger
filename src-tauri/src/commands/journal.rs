@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
-use tauri::{Manager, State};
+use tauri::State;
 
 use hledger_core::ledger::Ledger;
 use hledger_parser::ast::{
@@ -275,25 +275,10 @@ pub async fn add_transaction(
 pub async fn create_journal(
     path: String,
     default_currency: Option<String>,
-    app: tauri::AppHandle,
     state: State<'_, Mutex<crate::AppState>>,
 ) -> Result<JournalSummary, String> {
     let currency = default_currency.unwrap_or_else(|| "$".to_string());
-
-    // On mobile, the save dialog path may not be writable.
-    // Use app_data_dir as fallback when the given path fails.
     let file_path = normalize_path(&path);
-    let file_path = if cfg!(any(target_os = "ios", target_os = "android")) {
-        // On mobile, always create in app data dir for reliability
-        let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-        std::fs::create_dir_all(&data_dir).map_err(|e| e.to_string())?;
-        let filename = file_path
-            .file_name()
-            .unwrap_or_else(|| std::ffi::OsStr::new("finances.journal"));
-        data_dir.join(filename)
-    } else {
-        file_path
-    };
 
     let initial_content = format!(
         "; hledger journal\n\
