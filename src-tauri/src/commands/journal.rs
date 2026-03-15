@@ -1,0 +1,477 @@
+use std::path::PathBuf;
+use std::sync::Mutex;
+
+use serde::{Deserialize, Serialize};
+use tauri::State;
+
+use hledger_core::ledger::Ledger;
+use hledger_parser::ast::{
+    AccountName, AmountStyle, Comment, Journal, JournalItem, Posting, PostingAmount, Side,
+    SourceSpan, Status, Tag, Transaction,
+};
+use hledger_parser::writer::{self, WriterConfig};
+
+pub struct LoadedJournal {
+    pub source_path: PathBuf,
+    pub source_text: String,
+    pub journal: Journal,
+    pub ledger: Ledger,
+    pub writer_config: WriterConfig,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JournalSummary {
+    pub file_name: String,
+    pub transaction_count: usize,
+    pub account_count: usize,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewTransaction {
+    pub date: String,
+    pub status: String,
+    pub description: String,
+    pub comment: Option<String>,
+    pub postings: Vec<NewPosting>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewPosting {
+    pub account: String,
+    pub amount: Option<String>,
+    pub commodity: Option<String>,
+    pub comment: Option<String>,
+}
+
+pub fn make_summary_pub(loaded: &LoadedJournal) -> JournalSummary {
+    make_summary(loaded)
+}
+
+fn make_summary(loaded: &LoadedJournal) -> JournalSummary {
+    JournalSummary {
+        file_name: loaded
+            .source_path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default(),
+        transaction_count: loaded.ledger.transaction_count(),
+        account_count: loaded.ledger.account_count(),
+    }
+}
+
+fn load_journal(path: &str) -> Result<LoadedJournal, String> {
+    let source_text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let writer_config = writer::infer_config(&source_text);
+    let mut journal = hledger_parser::parse(&source_text).map_err(|e| e.to_string())?;
+
+    // Resolve include directives
+    let base_dir = PathBuf::from(path).parent().map(|p| p.to_path_buf());
+    resolve_includes(&mut journal, base_dir.as_deref());
+
+    let ledger = Ledger::from_journal(&journal).map_err(|e| e.to_string())?;
+
+    Ok(LoadedJournal {
+        source_path: PathBuf::from(path),
+        source_text,
+        journal,
+        ledger,
+        writer_config,
+    })
+}
+
+fn resolve_includes(journal: &mut Journal, base_dir: Option<&std::path::Path>) {
+    let mut new_items = Vec::new();
+    for item in journal.items.drain(..) {
+        match &item {
+            JournalItem::IncludeDirective(inc) => {
+                let inc_path = if let Some(base) = base_dir {
+                    base.join(&inc.path)
+                } else {
+                    PathBuf::from(&inc.path)
+                };
+                match std::fs::read_to_string(&inc_path) {
+                    Ok(text) => {
+                        if let Ok(mut sub) = hledger_parser::parse(&text) {
+                            resolve_includes(&mut sub, inc_path.parent());
+                            new_items.extend(sub.items);
+                        }
+                    }
+                    Err(e) => eprintln!("Warning: could not include {}: {}", inc.path, e),
+                }
+                new_items.push(item); // Keep the directive for reference
+            }
+            _ => new_items.push(item),
+        }
+    }
+    journal.items = new_items;
+}
+
+#[tauri::command]
+pub async fn open_journal(
+    path: String,
+    state: State<'_, Mutex<crate::AppState>>,
+) -> Result<JournalSummary, String> {
+    let loaded = load_journal(&path)?;
+    let summary = make_summary(&loaded);
+
+    let mut app_state = state.lock().map_err(|e| e.to_string())?;
+    app_state.journal = Some(loaded);
+
+    Ok(summary)
+}
+
+#[tauri::command]
+pub async fn get_journal_info(
+    state: State<'_, Mutex<crate::AppState>>,
+) -> Result<JournalSummary, String> {
+    let app_state = state.lock().map_err(|e| e.to_string())?;
+    let loaded = app_state.journal.as_ref().ok_or("No journal loaded")?;
+    Ok(make_summary(loaded))
+}
+
+#[tauri::command]
+pub async fn save_journal(
+    state: State<'_, Mutex<crate::AppState>>,
+) -> Result<(), String> {
+    let app_state = state.lock().map_err(|e| e.to_string())?;
+    let loaded = app_state.journal.as_ref().ok_or("No journal loaded")?;
+    std::fs::write(&loaded.source_path, &loaded.source_text).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn add_transaction(
+    txn: NewTransaction,
+    state: State<'_, Mutex<crate::AppState>>,
+) -> Result<JournalSummary, String> {
+    let mut app_state = state.lock().map_err(|e| e.to_string())?;
+    let loaded = app_state.journal.as_mut().ok_or("No journal loaded")?;
+
+    // Parse the new transaction into AST
+    let date = chrono::NaiveDate::parse_from_str(&txn.date, "%Y-%m-%d")
+        .map_err(|e| format!("Invalid date: {}", e))?;
+
+    let status = match txn.status.as_str() {
+        "Cleared" | "cleared" | "*" => Status::Cleared,
+        "Pending" | "pending" | "!" => Status::Pending,
+        _ => Status::Unmarked,
+    };
+
+    let mut postings = Vec::new();
+    for p in &txn.postings {
+        let amount = if let Some(amt_str) = &p.amount {
+            let quantity = rust_decimal::Decimal::from_str_exact(amt_str)
+                .map_err(|e| format!("Invalid amount '{}': {}", amt_str, e))?;
+
+            let commodity = p.commodity.clone().unwrap_or_default();
+            let is_sym = commodity.len() == 1
+                && "$€£¥₹₽₿₩₫₴₸₺₦₭"
+                    .contains(commodity.chars().next().unwrap_or('x'));
+
+            Some(PostingAmount {
+                quantity,
+                commodity: commodity.clone(),
+                style: if is_sym {
+                    AmountStyle {
+                        commodity_side: Side::Left,
+                        commodity_spaced: false,
+                        decimal_mark: '.',
+                        precision: 2,
+                    }
+                } else if commodity.is_empty() {
+                    AmountStyle::default()
+                } else {
+                    AmountStyle {
+                        commodity_side: Side::Right,
+                        commodity_spaced: true,
+                        decimal_mark: '.',
+                        precision: 2,
+                    }
+                },
+                cost: None,
+            })
+        } else {
+            None
+        };
+
+        postings.push(Posting {
+            span: SourceSpan { start: 0, end: 0, line: 0 },
+            status: Status::Unmarked,
+            account: AccountName::new(&p.account),
+            amount,
+            balance_assertion: None,
+            comment: p.comment.as_ref().filter(|c| !c.is_empty()).map(|c| Comment {
+                text: c.clone(),
+            }),
+            tags: vec![],
+            is_virtual: false,
+            virtual_balanced: false,
+        });
+    }
+
+    let ast_txn = Transaction {
+        span: SourceSpan { start: 0, end: 0, line: 0 },
+        date,
+        secondary_date: None,
+        status,
+        code: None,
+        description: txn.description,
+        comment: txn.comment.as_ref().filter(|c| !c.is_empty()).map(|c| Comment {
+            text: c.clone(),
+        }),
+        tags: vec![],
+        postings,
+    };
+
+    // Serialize to text
+    let txn_text = writer::write_transaction(&ast_txn, &loaded.writer_config);
+
+    // Append to source text (with blank line separator)
+    if !loaded.source_text.ends_with('\n') {
+        loaded.source_text.push('\n');
+    }
+    loaded.source_text.push('\n');
+    loaded.source_text.push_str(&txn_text);
+
+    // Write to file
+    std::fs::write(&loaded.source_path, &loaded.source_text).map_err(|e| e.to_string())?;
+
+    // Re-parse and re-resolve
+    loaded.journal =
+        hledger_parser::parse(&loaded.source_text).map_err(|e| e.to_string())?;
+    loaded.ledger =
+        Ledger::from_journal(&loaded.journal).map_err(|e| e.to_string())?;
+
+    Ok(make_summary(loaded))
+}
+
+#[tauri::command]
+pub async fn create_journal(
+    path: String,
+    default_currency: Option<String>,
+    state: State<'_, Mutex<crate::AppState>>,
+) -> Result<JournalSummary, String> {
+    let currency = default_currency.unwrap_or_else(|| "$".to_string());
+
+    let initial_content = format!(
+        "; hledger journal\n\
+         ; Created by hledger mobile app\n\
+         \n\
+         commodity {currency}1,000.00\n\
+         \n\
+         account assets\n\
+         account assets:bank:checking\n\
+         account assets:bank:savings\n\
+         account assets:cash\n\
+         account expenses\n\
+         account expenses:food\n\
+         account expenses:housing\n\
+         account expenses:transport\n\
+         account expenses:utilities\n\
+         account income\n\
+         account income:salary\n\
+         account liabilities\n\
+         account liabilities:credit card\n\
+         account equity\n\
+         account equity:opening balances\n\
+         \n",
+        currency = currency,
+    );
+
+    std::fs::write(&path, &initial_content).map_err(|e| e.to_string())?;
+
+    let loaded = load_journal(&path)?;
+    let summary = make_summary(&loaded);
+
+    let mut app_state = state.lock().map_err(|e| e.to_string())?;
+    app_state.journal = Some(loaded);
+
+    Ok(summary)
+}
+
+#[tauri::command]
+pub async fn suggest_accounts(
+    prefix: String,
+    state: State<'_, Mutex<crate::AppState>>,
+) -> Result<Vec<String>, String> {
+    let app_state = state.lock().map_err(|e| e.to_string())?;
+    let loaded = app_state.journal.as_ref().ok_or("No journal loaded")?;
+
+    if prefix.is_empty() {
+        Ok(loaded.ledger.account_names())
+    } else {
+        Ok(loaded.ledger.suggest_accounts(&prefix))
+    }
+}
+
+#[tauri::command]
+pub async fn suggest_descriptions(
+    prefix: String,
+    state: State<'_, Mutex<crate::AppState>>,
+) -> Result<Vec<String>, String> {
+    let app_state = state.lock().map_err(|e| e.to_string())?;
+    let loaded = app_state.journal.as_ref().ok_or("No journal loaded")?;
+
+    if prefix.is_empty() {
+        Ok(loaded.ledger.descriptions())
+    } else {
+        Ok(loaded.ledger.suggest_descriptions(&prefix))
+    }
+}
+
+#[tauri::command]
+pub async fn suggest_payees(
+    prefix: String,
+    state: State<'_, Mutex<crate::AppState>>,
+) -> Result<Vec<String>, String> {
+    let app_state = state.lock().map_err(|e| e.to_string())?;
+    let loaded = app_state.journal.as_ref().ok_or("No journal loaded")?;
+
+    if prefix.is_empty() {
+        Ok(loaded.ledger.descriptions())
+    } else {
+        Ok(loaded.ledger.suggest_payees(&prefix))
+    }
+}
+
+#[tauri::command]
+pub async fn update_transaction(
+    index: usize,
+    txn: NewTransaction,
+    state: State<'_, Mutex<crate::AppState>>,
+) -> Result<JournalSummary, String> {
+    let mut app_state = state.lock().map_err(|e| e.to_string())?;
+    let loaded = app_state.journal.as_mut().ok_or("No journal loaded")?;
+
+    // Find the original transaction's span
+    let original_txn = loaded
+        .journal
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            JournalItem::Transaction(t) => Some(t),
+            _ => None,
+        })
+        .nth(index)
+        .ok_or("Transaction not found")?;
+
+    let span = original_txn.span.clone();
+
+    // Build the new transaction AST (same logic as add_transaction)
+    let date = chrono::NaiveDate::parse_from_str(&txn.date, "%Y-%m-%d")
+        .map_err(|e| format!("Invalid date: {}", e))?;
+
+    let status = match txn.status.as_str() {
+        "Cleared" | "cleared" | "*" => Status::Cleared,
+        "Pending" | "pending" | "!" => Status::Pending,
+        _ => Status::Unmarked,
+    };
+
+    let mut postings = Vec::new();
+    for p in &txn.postings {
+        let amount = if let Some(amt_str) = &p.amount {
+            let quantity = rust_decimal::Decimal::from_str_exact(amt_str)
+                .map_err(|e| format!("Invalid amount '{}': {}", amt_str, e))?;
+            let commodity = p.commodity.clone().unwrap_or_default();
+            let is_sym = commodity.len() == 1
+                && "$€£¥₹₽₿₩₫₴₸₺₦₭".contains(commodity.chars().next().unwrap_or('x'));
+            Some(PostingAmount {
+                quantity,
+                commodity: commodity.clone(),
+                style: if is_sym {
+                    AmountStyle { commodity_side: Side::Left, commodity_spaced: false, decimal_mark: '.', precision: 2 }
+                } else if commodity.is_empty() {
+                    AmountStyle::default()
+                } else {
+                    AmountStyle { commodity_side: Side::Right, commodity_spaced: true, decimal_mark: '.', precision: 2 }
+                },
+                cost: None,
+            })
+        } else {
+            None
+        };
+
+        postings.push(Posting {
+            span: SourceSpan { start: 0, end: 0, line: 0 },
+            status: Status::Unmarked,
+            account: AccountName::new(&p.account),
+            amount,
+            balance_assertion: None,
+            comment: p.comment.as_ref().filter(|c| !c.is_empty()).map(|c| Comment { text: c.clone() }),
+            tags: vec![],
+            is_virtual: false,
+            virtual_balanced: false,
+        });
+    }
+
+    let ast_txn = Transaction {
+        span: SourceSpan { start: 0, end: 0, line: 0 },
+        date,
+        secondary_date: None,
+        status,
+        code: None,
+        description: txn.description,
+        comment: txn.comment.as_ref().filter(|c| !c.is_empty()).map(|c| Comment { text: c.clone() }),
+        tags: vec![],
+        postings,
+    };
+
+    let new_text = writer::write_transaction(&ast_txn, &loaded.writer_config);
+
+    // Patch the source text
+    loaded.source_text = writer::patch_journal(&loaded.source_text, &[(span, new_text)]);
+
+    // Write and re-resolve
+    std::fs::write(&loaded.source_path, &loaded.source_text).map_err(|e| e.to_string())?;
+    loaded.journal = hledger_parser::parse(&loaded.source_text).map_err(|e| e.to_string())?;
+    loaded.ledger = Ledger::from_journal(&loaded.journal).map_err(|e| e.to_string())?;
+
+    Ok(make_summary(loaded))
+}
+
+#[tauri::command]
+pub async fn delete_transaction(
+    index: usize,
+    state: State<'_, Mutex<crate::AppState>>,
+) -> Result<JournalSummary, String> {
+    let mut app_state = state.lock().map_err(|e| e.to_string())?;
+    let loaded = app_state.journal.as_mut().ok_or("No journal loaded")?;
+
+    let original_txn = loaded
+        .journal
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            JournalItem::Transaction(t) => Some(t),
+            _ => None,
+        })
+        .nth(index)
+        .ok_or("Transaction not found")?;
+
+    let span = original_txn.span.clone();
+
+    loaded.source_text = writer::delete_from_journal(&loaded.source_text, &span);
+
+    std::fs::write(&loaded.source_path, &loaded.source_text).map_err(|e| e.to_string())?;
+    loaded.journal = hledger_parser::parse(&loaded.source_text).map_err(|e| e.to_string())?;
+    loaded.ledger = Ledger::from_journal(&loaded.journal).map_err(|e| e.to_string())?;
+
+    Ok(make_summary(loaded))
+}
+
+#[tauri::command]
+pub async fn switch_journal(
+    path: String,
+    state: State<'_, Mutex<crate::AppState>>,
+) -> Result<JournalSummary, String> {
+    let loaded = load_journal(&path)?;
+    let summary = make_summary(&loaded);
+
+    let mut app_state = state.lock().map_err(|e| e.to_string())?;
+    app_state.journal = Some(loaded);
+
+    Ok(summary)
+}

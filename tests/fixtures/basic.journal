@@ -1,0 +1,42 @@
+; Basic test journal for hledger-app
+; Tests core transaction syntax
+
+account assets:bank:checking
+account assets:bank:savings
+account expenses:food
+account expenses:rent
+account expenses:utilities
+account income:salary
+account liabilities:credit card
+
+2024-01-01 * Opening Balance
+    assets:bank:checking  $5000.00
+    equity:opening balances
+
+2024-01-05 Grocery Store
+    expenses:food  $75.50
+    assets:bank:checking
+
+2024-01-10 ! Pending Rent Payment
+    expenses:rent  $1200.00
+    assets:bank:checking
+
+2024-01-15 * (1001) Paycheck ; category:income
+    assets:bank:checking  $3500.00
+    income:salary
+
+2024-01-18 Electric Company
+    expenses:utilities  $95.00
+    assets:bank:checking  $-95.00
+
+2024-01-20 Transfer to Savings
+    assets:bank:savings  $500.00
+    assets:bank:checking
+
+2024-01-22 Restaurant ; tag1:, category:food
+    expenses:food  $42.30
+    liabilities:credit card
+
+2024-01-25 * Gas Station
+    expenses:food  $35.00
+    assets:bank:checking

@@ -1,0 +1,33 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nicegui/Tauri/tauri-v2/crates/tauri-config-schema/schema.json",
+  "productName": "hledger",
+  "version": "0.1.0",
+  "identifier": "com.hledger.app",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [
+      {
+        "title": "hledger",
+        "width": 390,
+        "height": 844,
+        "resizable": true
+      }
+    ]
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.png"
+    ]
+  }
+}

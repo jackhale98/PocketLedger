@@ -1,0 +1,43 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --safe-area-top: env(safe-area-inset-top, 0px);
+  --safe-area-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-area-left: env(safe-area-inset-left, 0px);
+  --safe-area-right: env(safe-area-inset-right, 0px);
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overscroll-behavior: none;
+  overflow: hidden;
+}
+
+.dark body,
+body.dark {
+  color-scheme: dark;
+}
+
+#root {
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Dark mode base styles */
+.dark {
+  background-color: #111827;
+  color: #f3f4f6;
+}
+
+.dark input,
+.dark select,
+.dark textarea {
+  color-scheme: dark;
+}

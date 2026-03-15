@@ -1,0 +1,51 @@
+; Edge case test journal
+; Tests unusual but valid syntax
+
+; Hash comment style
+# Another comment style
+
+; Transaction with secondary date
+2024-01-15=2024-01-16 Backdated Purchase
+    expenses:food  $25.00
+    assets:checking
+
+; Transaction with code and all features
+2024-01-20 * (CHK-1234) Full Featured Transaction ; project:alpha, type:test
+    expenses:office supplies  $150.00
+    expenses:shipping  $12.50
+    assets:checking
+
+; Minimal transaction (two postings, one inferred)
+2024-02-01 Simple
+    expenses:misc  $10
+    assets:cash
+
+; Three posting transaction
+2024-02-05 Split Payment
+    expenses:food  $30.00
+    expenses:drink  $15.00
+    assets:checking
+
+; Large amounts with thousand separators
+2024-02-10 Big Purchase
+    expenses:equipment  $12,500.00
+    assets:checking
+
+; Zero decimal precision
+2024-02-15 Round Number
+    expenses:misc  $100
+    assets:cash
+
+; High precision
+2024-02-20 Crypto Purchase
+    assets:crypto  0.00123456 BTC
+    assets:checking
+
+; Multiple commodities in one account over time
+2024-03-01 USD deposit
+    assets:wallet  $100
+    income:gifts
+
+2024-03-02 EUR deposit
+    assets:wallet  50 EUR
+    income:gifts

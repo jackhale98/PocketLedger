@@ -1,0 +1,44 @@
+; Multi-currency test journal
+; Tests currency conversion, price directives, and mixed commodities
+
+commodity $1,000.00
+commodity EUR 1.000,00
+commodity GBP 1,000.00
+commodity AAPL
+
+; Market prices
+P 2024-01-01 EUR $1.10
+P 2024-01-15 EUR $1.08
+P 2024-01-01 GBP $1.27
+P 2024-01-01 AAPL $185.00
+P 2024-01-15 AAPL $190.00
+P 2024-02-01 AAPL $188.50
+
+2024-01-01 Opening Balance
+    assets:bank:usd  $10000.00
+    equity:opening balances
+
+2024-01-05 Currency Exchange
+    assets:bank:eur  500.00 EUR @ $1.10
+    assets:bank:usd
+
+2024-01-10 Purchase in Europe
+    expenses:travel  200.00 EUR
+    assets:bank:eur
+
+2024-01-15 Stock Purchase
+    assets:investments:aapl  10 AAPL @ $190.00
+    assets:bank:usd
+
+2024-01-20 UK Purchase
+    expenses:shopping  50.00 GBP @@ $63.50
+    assets:bank:usd
+
+2024-02-01 Dividend
+    assets:bank:usd  $15.00
+    income:dividends
+
+2024-02-05 Sell Partial Stock
+    assets:investments:aapl  -5 AAPL @ $188.50
+    assets:bank:usd  $942.50
+    income:capital gains  $-57.50

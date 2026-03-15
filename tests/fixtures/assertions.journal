@@ -1,0 +1,18 @@
+; Balance assertion test journal
+; Tests balance assertions and strong assertions
+
+2024-01-01 Opening Balance
+    assets:checking  $1000.00 = $1000.00
+    equity:opening
+
+2024-01-05 Purchase
+    expenses:food  $50.00
+    assets:checking  $-50.00 = $950.00
+
+2024-01-10 Deposit
+    assets:checking  $200.00 = $1150.00
+    income:freelance
+
+2024-01-15 Another Purchase
+    expenses:rent  $500.00
+    assets:checking  = $650.00

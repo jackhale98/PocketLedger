@@ -1,0 +1,82 @@
+// hledger/ledger journal PEG grammar
+// Reference: https://hledger.org/hledger.html#journal-format
+
+WHITESPACE = _{ " " | "\t" }
+
+// === Top-level ===
+journal = { SOI ~ (line ~ NEWLINE)* ~ line? ~ EOI }
+line = _{ transaction | directive | comment_line | blank_line }
+blank_line = { "" }
+
+// === Dates ===
+date = @{ year ~ date_sep ~ month ~ date_sep ~ day }
+year = @{ ASCII_DIGIT{4} }
+month = @{ ASCII_DIGIT{1,2} }
+day = @{ ASCII_DIGIT{1,2} }
+date_sep = @{ "-" | "/" | "." }
+secondary_date = { "=" ~ date }
+
+// === Status ===
+status = { "!" | "*" }
+
+// === Transactions ===
+transaction = {
+    date ~ secondary_date? ~ status? ~ code? ~ description ~ inline_comment? ~
+    (NEWLINE ~ posting)+
+}
+
+code = { "(" ~ code_text ~ ")" }
+code_text = @{ (!")" ~ !NEWLINE ~ ANY)+ }
+
+description = @{ (!NEWLINE ~ !";" ~ ANY)* }
+
+// === Postings ===
+posting = {
+    indent ~ status? ~ account_name ~ (separator ~ posting_amount)? ~
+    balance_assertion? ~ inline_comment?
+}
+
+indent = @{ (" " | "\t")+ }
+
+// Two or more spaces separate account from amount (hledger rule)
+separator = @{ "  " ~ " "* | "\t" }
+
+account_name = @{
+    (!"  " ~ !"\t" ~ !NEWLINE ~ !";" ~ !"=" ~ ANY)+
+}
+
+// === Amounts ===
+posting_amount = { cost_amount | simple_amount }
+simple_amount = @{ (!";" ~ !"=" ~ !NEWLINE ~ !"@" ~ ANY)+ }
+cost_amount = { simple_amount ~ cost_notation }
+cost_notation = { total_cost | unit_cost }
+unit_cost = { "@" ~ !"@" ~ simple_amount }
+total_cost = { "@@" ~ simple_amount }
+
+// === Balance Assertions ===
+balance_assertion = { strong_assertion | normal_assertion }
+normal_assertion = { "=" ~ !"=" ~ simple_amount }
+strong_assertion = { "==" ~ simple_amount }
+
+// === Comments ===
+comment_line = { comment_marker ~ comment_text }
+inline_comment = { ";" ~ comment_text }
+comment_marker = @{ ";" | "#" | "*" }
+comment_text = @{ (!NEWLINE ~ ANY)* }
+
+// === Directives ===
+directive = {
+    account_directive | commodity_directive | price_directive
+}
+
+account_directive = {
+    "account" ~ account_name ~ inline_comment?
+}
+
+commodity_directive = {
+    "commodity" ~ simple_amount ~ inline_comment?
+}
+
+price_directive = {
+    "P" ~ date ~ simple_amount ~ simple_amount ~ inline_comment?
+}
