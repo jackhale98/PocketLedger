@@ -253,7 +253,7 @@ export function MorePage() {
             About
           </h2>
           <div className="text-sm text-gray-600 dark:text-gray-400 space-y-1">
-            <p>PocketLedger v0.1.0</p>
+            <p>PocketHLedger v0.1.0</p>
             <p className="text-xs text-gray-400 dark:text-gray-500">
               Plain text accounting in your pocket
             </p>

@@ -80,8 +80,8 @@ function App() {
   if (!isLoaded) {
     return (
       <div className="flex flex-col items-center justify-center h-full gap-4 p-8 bg-white dark:bg-gray-900">
-        <img src="/app-icon.svg" alt="PocketLedger" className="w-20 h-20 rounded-2xl" />
-        <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">PocketLedger</h1>
+        <img src="/app-icon.svg" alt="PocketHLedger" className="w-20 h-20 rounded-2xl" />
+        <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">PocketHLedger</h1>
         <p className="text-gray-600 dark:text-gray-400 text-center">
           Plain text accounting in your pocket
         </p>

@@ -55,7 +55,7 @@ jobs:
 
       - name: Enable iOS document picker support
         run: |
-          PLIST="src-tauri/gen/apple/PocketLedger_iOS/Info.plist"
+          PLIST="src-tauri/gen/apple/PocketHLedger_iOS/Info.plist"
           if [ -f "$PLIST" ]; then
             sed -i '' '/<\/dict>/i\
             <key>UIFileSharingEnabled</key>\
@@ -95,8 +95,8 @@ jobs:
           FOUND_IPA=$(find src-tauri/gen/apple ~/Library/Developer/Xcode -name "*.ipa" 2>/dev/null | head -1)
           if [ -n "$FOUND_IPA" ]; then
             mkdir -p $RUNNER_TEMP/export
-            cp "$FOUND_IPA" $RUNNER_TEMP/export/PocketLedger.ipa
-            echo "ipa_path=$RUNNER_TEMP/export/PocketLedger.ipa" >> $GITHUB_OUTPUT
+            cp "$FOUND_IPA" $RUNNER_TEMP/export/PocketHLedger.ipa
+            echo "ipa_path=$RUNNER_TEMP/export/PocketHLedger.ipa" >> $GITHUB_OUTPUT
           else
             echo "::error::No IPA found after build"
             exit 1

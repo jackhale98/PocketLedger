@@ -71,7 +71,7 @@ jobs:
           if [ -n "$APK" ]; then
             SIZE=$(du -h "$APK" | cut -f1)
             echo "Found APK: $APK ($SIZE)"
-            cp "$APK" PocketLedger-android-arm64.apk
+            cp "$APK" PocketHLedger-android-arm64.apk
             echo "found=true" >> "$GITHUB_OUTPUT"
           else
             echo "No APK found"
@@ -82,7 +82,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: android-apk
-          path: PocketLedger-android-arm64.apk
+          path: PocketHLedger-android-arm64.apk
           retention-days: 14
 
       - name: Upload APK to GitHub Release
@@ -90,4 +90,4 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           draft: true
-          files: PocketLedger-android-arm64.apk
+          files: PocketHLedger-android-arm64.apk

@@ -50,4 +50,4 @@ jobs:
         run: cargo test -p hledger-parser -p hledger-core
 
       - name: Check Tauri compilation
-        run: cargo check -p pocketledger
+        run: cargo check -p pockethledger
