@@ -1,8 +1,8 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicegui/Tauri/tauri-v2/crates/tauri-config-schema/schema.json",
-  "productName": "hledger",
+  "productName": "PocketLedger",
   "version": "0.1.0",
-  "identifier": "com.hledger.app",
+  "identifier": "com.pocketledger.app",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1420",
@@ -13,7 +13,7 @@
     "withGlobalTauri": false,
     "windows": [
       {
-        "title": "hledger",
+        "title": "PocketLedger",
         "width": 390,
         "height": 844,
         "resizable": true

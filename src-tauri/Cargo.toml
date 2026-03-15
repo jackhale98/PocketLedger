@@ -1,8 +1,8 @@
 [package]
-name = "hledger-app"
+name = "pocketledger"
 version = "0.1.0"
 edition = "2021"
-description = "Plain text accounting mobile app"
+description = "PocketLedger - Plain text accounting mobile app"
 
 [lib]
 name = "app_lib"

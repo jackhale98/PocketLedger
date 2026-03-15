@@ -1,0 +1,22 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background -->
+  <rect width="1024" height="1024" rx="228" fill="#0F6E56"/>
+
+  <!-- Pocket shape -->
+  <path d="M280 200 L280 680 Q280 800 400 800 L624 800 Q744 800 744 680 L744 200"
+        fill="none" stroke="#ffffff" stroke-width="28" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Stitch line at top -->
+  <path d="M230 200 L794 200"
+        fill="none" stroke="#ffffff" stroke-width="10" stroke-dasharray="36 28" opacity="0.35"/>
+
+  <!-- Ledger lines -->
+  <line x1="360" y1="340" x2="664" y2="340" stroke="#ffffff" stroke-width="12" opacity="0.35" stroke-linecap="round"/>
+  <line x1="360" y1="440" x2="664" y2="440" stroke="#ffffff" stroke-width="12" opacity="0.35" stroke-linecap="round"/>
+  <line x1="360" y1="540" x2="664" y2="540" stroke="#ffffff" stroke-width="12" opacity="0.35" stroke-linecap="round"/>
+  <line x1="360" y1="640" x2="540" y2="640" stroke="#ffffff" stroke-width="12" opacity="0.35" stroke-linecap="round"/>
+
+  <!-- Green checkmark — bottom right, clear of all lines -->
+  <path d="M600 670 L636 718 L710 620"
+        fill="none" stroke="#9FE1CB" stroke-width="26" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
