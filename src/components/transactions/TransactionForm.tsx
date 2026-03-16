@@ -168,12 +168,12 @@ export function TransactionForm({
   const balancingAmount = getBalancingAmount();
 
   return (
-    <div className="flex flex-col h-full bg-white dark:bg-gray-900">
+    <div className="flex flex-col h-full bg-white dark:bg-gray-900 overflow-hidden">
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 dark:border-gray-700">
         <button
           onClick={onCancel}
-          className="text-gray-600 text-sm font-medium min-w-[60px]"
+          className="text-gray-600 dark:text-gray-300 text-sm font-medium min-w-[60px]"
         >
           Cancel
         </button>
@@ -188,29 +188,29 @@ export function TransactionForm({
       </div>
 
       {/* Form */}
-      <div className="flex-1 overflow-auto p-4 space-y-4">
+      <div className="flex-1 overflow-y-auto overflow-x-hidden p-4 space-y-4">
         {error && (
-          <div className="text-sm text-red-600 bg-red-50 px-3 py-2 rounded-lg">
+          <div className="text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/30 px-3 py-2 rounded-lg">
             {error}
           </div>
         )}
 
         {/* Date */}
         <div>
-          <label className="block text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">
+          <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-1">
             Date
           </label>
           <input
             type="date"
             value={date}
             onChange={(e) => setDate(e.target.value)}
-            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
           />
         </div>
 
         {/* Status */}
         <div>
-          <label className="block text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">
+          <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-1">
             Status
           </label>
           <div className="flex gap-2">
@@ -220,8 +220,8 @@ export function TransactionForm({
                 onClick={() => setStatus(opt.value)}
                 className={`flex-1 py-2 text-sm rounded-lg border ${
                   status === opt.value
-                    ? "border-blue-500 bg-blue-50 text-blue-700 font-medium"
-                    : "border-gray-300 text-gray-600 dark:text-gray-300"
+                    ? "border-blue-500 bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400 font-medium"
+                    : "border-gray-300 dark:border-gray-600 text-gray-600 dark:text-gray-300"
                 }`}
               >
                 {opt.symbol ? `${opt.symbol} ` : ""}
@@ -233,7 +233,7 @@ export function TransactionForm({
 
         {/* Description */}
         <div>
-          <label className="block text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">
+          <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-1">
             Description
           </label>
           <Autocomplete
@@ -246,7 +246,7 @@ export function TransactionForm({
 
         {/* Note / Comment */}
         <div>
-          <label className="block text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">
+          <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-1">
             Note
           </label>
           <input
@@ -254,14 +254,14 @@ export function TransactionForm({
             value={comment}
             onChange={(e) => setComment(e.target.value)}
             placeholder="Optional note or comment"
-            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
           />
         </div>
 
         {/* Postings */}
         <div>
           <div className="flex items-center justify-between mb-2">
-            <label className="text-xs font-medium text-gray-500 uppercase tracking-wide">
+            <label className="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide">
               Postings
             </label>
             <button
@@ -281,7 +281,7 @@ export function TransactionForm({
               return (
                 <div
                   key={posting.id}
-                  className="bg-gray-50 rounded-lg p-3 space-y-2"
+                  className="bg-gray-50 dark:bg-gray-800 rounded-lg p-3 space-y-2 overflow-hidden"
                 >
                   <div className="flex items-center justify-between">
                     <span className="text-xs text-gray-400 dark:text-gray-500">
@@ -320,9 +320,9 @@ export function TransactionForm({
                             ? balancingAmount
                             : "Amount (empty to infer)"
                         }
-                        className={`w-full px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500 ${
+                        className={`w-full px-3 py-2 border border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-100 rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500 ${
                           isLastEmpty && balancingAmount
-                            ? "placeholder:text-gray-400 dark:text-gray-500"
+                            ? "placeholder:text-gray-400 dark:placeholder:text-gray-500"
                             : ""
                         }`}
                       />
@@ -334,7 +334,7 @@ export function TransactionForm({
                         updatePosting(posting.id, "commodity", e.target.value)
                       }
                       placeholder="$"
-                      className="w-16 px-2 py-2 border border-gray-300 rounded-lg text-sm text-center focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      className="w-16 px-2 py-2 border border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-100 rounded-lg text-sm text-center focus:outline-none focus:ring-2 focus:ring-blue-500"
                     />
                   </div>
 
@@ -346,7 +346,7 @@ export function TransactionForm({
                       updatePosting(posting.id, "comment", e.target.value)
                     }
                     placeholder="Posting note (optional)"
-                    className="w-full px-3 py-1.5 border border-gray-200 rounded text-xs text-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    className="w-full px-3 py-1.5 border border-gray-200 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-300 rounded text-xs text-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500"
                   />
                 </div>
               );

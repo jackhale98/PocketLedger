@@ -48,7 +48,7 @@ export function MorePage() {
         filters: [
           {
             name: "Journal",
-            extensions: ["journal", "hledger", "ledger", "j", "txt"],
+            extensions: ["journal", "hledger", "ledger", "j", "txt", "*"],
           },
         ],
       });
