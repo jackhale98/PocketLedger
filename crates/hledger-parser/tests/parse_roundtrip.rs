@@ -87,3 +87,12 @@ fn parse_edge_cases_journal() {
         transactions.len()
     );
 }
+
+#[test]
+fn parse_example_hledger() {
+    let text = std::fs::read_to_string("../../tests/fixtures/example.hledger").unwrap();
+    let journal = hledger_parser::parse(&text).expect("Failed to parse example.hledger");
+    let txn_count = journal.items.iter().filter(|i| matches!(i, hledger_parser::ast::JournalItem::Transaction(_))).count();
+    println!("Parsed: {} items, {} transactions", journal.items.len(), txn_count);
+    assert!(txn_count > 0, "Should have parsed transactions");
+}

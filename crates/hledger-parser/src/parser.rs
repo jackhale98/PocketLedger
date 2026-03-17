@@ -376,6 +376,37 @@ fn split_account_amount(s: &str) -> (&str, &str) {
 
 /// Extract cost notation (@ or @@) from an amount string.
 fn extract_cost(s: &str) -> (&str, Option<Cost>) {
+    // Look for lot prices first: {{AMOUNT}} (total) or {AMOUNT} (unit)
+    // hledger treats {PRICE} as equivalent to @ PRICE
+    if let Some(pos) = s.find("{{") {
+        let amt = s[..pos].trim();
+        if let Some(close) = s[pos..].find("}}") {
+            let cost_str = s[pos + 2..pos + close].trim();
+            if let Ok(cost_amt) = parse_amount(cost_str) {
+                return (
+                    amt,
+                    Some(Cost::TotalCost(CostAmount {
+                        quantity: cost_amt.quantity,
+                        commodity: cost_amt.commodity,
+                    })),
+                );
+            }
+        }
+    } else if let Some(pos) = s.find('{') {
+        let amt = s[..pos].trim();
+        if let Some(close) = s[pos..].find('}') {
+            let cost_str = s[pos + 1..pos + close].trim();
+            if let Ok(cost_amt) = parse_amount(cost_str) {
+                return (
+                    amt,
+                    Some(Cost::UnitCost(CostAmount {
+                        quantity: cost_amt.quantity,
+                        commodity: cost_amt.commodity,
+                    })),
+                );
+            }
+        }
+    }
     // Look for @@ first (total cost), then @ (unit cost)
     if let Some(pos) = s.find("@@") {
         let amt = s[..pos].trim();
