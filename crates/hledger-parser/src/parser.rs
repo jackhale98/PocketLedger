@@ -551,11 +551,19 @@ fn byte_offset(input: &str, line_idx: usize, lines: &[&str]) -> usize {
 }
 
 fn parse_price_directive(line: &str) -> Option<PriceDirective> {
-    // P DATE COMMODITY PRICE
+    // P DATE [TIME] COMMODITY PRICE
     let rest = line.strip_prefix("P ")?.trim();
     let (date_str, rest) = split_first_word(rest);
     let date = parse_date(date_str).ok()?;
     let rest = rest.trim();
+
+    // Skip optional time component (HH:MM:SS or HH:MM)
+    let rest = if rest.starts_with(|c: char| c.is_ascii_digit()) && rest.contains(':') {
+        let (maybe_time, after) = split_first_word(rest);
+        if maybe_time.contains(':') { after.trim() } else { rest }
+    } else {
+        rest
+    };
 
     // The commodity is the next word
     let (commodity_str, price_str) = split_first_word(rest);

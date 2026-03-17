@@ -6,6 +6,7 @@ use serde::Serialize;
 
 use crate::amount::MixedAmount;
 use crate::balance::ResolvedTransaction;
+use crate::price_db::PriceDb;
 
 /// A row in a balance report.
 #[derive(Debug, Clone, Serialize)]
@@ -85,6 +86,23 @@ fn mixed_to_entries(m: &MixedAmount) -> Vec<AmountEntry> {
             quantity: q.to_string(),
         })
         .collect()
+}
+
+/// Convert a MixedAmount to a target commodity using the price database.
+/// Commodities that can't be converted are left as-is.
+fn convert_mixed(m: &MixedAmount, target: &str, price_db: &PriceDb, date: NaiveDate) -> MixedAmount {
+    let mut result = MixedAmount::zero();
+    for (commodity, quantity) in &m.amounts {
+        if commodity == target {
+            result.add(target, *quantity);
+        } else if let Some(converted) = price_db.convert(*quantity, commodity, target, date) {
+            result.add(target, converted);
+        } else {
+            // No price available - keep original commodity
+            result.add(commodity, *quantity);
+        }
+    }
+    result
 }
 
 /// Public version for use by other modules.
@@ -177,6 +195,80 @@ pub fn balance_report(
     }
 
     // Filter out zero balances and format
+    inclusive
+        .iter()
+        .filter(|(_, amt)| !amt.is_zero())
+        .map(|(account, amt)| {
+            let depth = account.matches(':').count();
+            BalanceRow {
+                account: account.clone(),
+                depth,
+                amounts: mixed_to_entries(amt),
+            }
+        })
+        .collect()
+}
+
+/// Generate a balance report with values converted to a target commodity using market prices.
+pub fn balance_report_valued(
+    transactions: &[ResolvedTransaction],
+    account_filter: Option<&str>,
+    date_from: Option<NaiveDate>,
+    date_to: Option<NaiveDate>,
+    target_commodity: &str,
+    price_db: &PriceDb,
+) -> Vec<BalanceRow> {
+    let valuation_date = date_to.unwrap_or_else(|| {
+        transactions.last().map(|t| t.date).unwrap_or_else(|| chrono::Local::now().date_naive())
+    });
+
+    let mut balances: BTreeMap<String, MixedAmount> = BTreeMap::new();
+
+    for txn in transactions {
+        if let Some(from) = date_from {
+            if txn.date < from { continue; }
+        }
+        if let Some(to) = date_to {
+            if txn.date > to { continue; }
+        }
+        for posting in &txn.postings {
+            if let Some(filter) = account_filter {
+                if !is_account_type(&posting.account.full, filter) { continue; }
+            }
+            let entry = balances.entry(posting.account.full.clone()).or_insert_with(MixedAmount::zero);
+            entry.add_mixed(&posting.amount);
+        }
+    }
+
+    // Add parent accounts
+    let leaf_accounts: Vec<String> = balances.keys().cloned().collect();
+    for account in &leaf_accounts {
+        let parts: Vec<&str> = account.split(':').collect();
+        for depth in 1..parts.len() {
+            let parent = parts[..depth].join(":");
+            balances.entry(parent).or_insert_with(MixedAmount::zero);
+        }
+    }
+
+    // Compute inclusive balances
+    let all_accounts: Vec<String> = balances.keys().cloned().collect();
+    let mut inclusive: BTreeMap<String, MixedAmount> = BTreeMap::new();
+
+    for account in &all_accounts {
+        let mut total = balances.get(account).cloned().unwrap_or_default();
+        for (other, amt) in &balances {
+            if other != account
+                && other.starts_with(account.as_str())
+                && other.as_bytes().get(account.len()) == Some(&b':')
+            {
+                total.add_mixed(amt);
+            }
+        }
+        // Convert to target commodity using prices
+        let valued = convert_mixed(&total, target_commodity, price_db, valuation_date);
+        inclusive.insert(account.clone(), valued);
+    }
+
     inclusive
         .iter()
         .filter(|(_, amt)| !amt.is_zero())
@@ -850,6 +942,43 @@ mod tests {
         let vbmpx = find("Assets:US:Vanguard:VBMPX");
         assert!(has_amt(vbmpx, "VBMPX", "169.659"),
             "VBMPX: expected 169.659 VBMPX, got {:?}", vbmpx.amounts);
+    }
+
+    #[test]
+    fn audit_valued_balance_report() {
+        let text = std::fs::read_to_string("../../tests/fixtures/example.hledger").unwrap();
+        let journal = hledger_parser::parse(&text).expect("parse failed");
+        let price_db = crate::price_db::PriceDb::from_journal(&journal);
+        let journal_txns = crate::balance::resolve_transactions(&journal).expect("resolve failed");
+
+        let report = balance_report_valued(&journal_txns, Some("assets"), None, None, "USD", &price_db);
+
+        let find = |name: &str| report.iter().find(|r| r.account == name)
+            .unwrap_or_else(|| panic!("Account {} not found", name));
+        let get_usd = |row: &BalanceRow| -> f64 {
+            row.amounts.iter()
+                .find(|a| a.commodity == "USD")
+                .map(|a| a.quantity.parse::<f64>().unwrap())
+                .unwrap_or(0.0)
+        };
+
+        // hledger -V output: GLD = 2054.25 USD (45 * 45.65)
+        let gld = find("Assets:US:ETrade:GLD");
+        let gld_usd = get_usd(gld);
+        assert!((gld_usd - 2054.25).abs() < 1.0,
+            "GLD valued: expected ~2054.25 USD, got {}", gld_usd);
+
+        // ITOT = 5476.46 USD (62 * 88.33)
+        let itot = find("Assets:US:ETrade:ITOT");
+        let itot_usd = get_usd(itot);
+        assert!((itot_usd - 5476.46).abs() < 1.0,
+            "ITOT valued: expected ~5476.46 USD, got {}", itot_usd);
+
+        // BofA Checking stays as USD (no conversion needed)
+        let checking = find("Assets:US:BofA:Checking");
+        let checking_usd = get_usd(checking);
+        assert!((checking_usd - 1869.39).abs() < 0.01,
+            "Checking: expected 1869.39 USD, got {}", checking_usd);
     }
 
     #[test]

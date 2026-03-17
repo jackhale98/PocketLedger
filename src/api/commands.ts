@@ -151,8 +151,16 @@ export async function expenseBreakdownChart(
   });
 }
 
-export async function listAccountsWithBalances(): Promise<BalanceRow[]> {
-  return invoke<BalanceRow[]>("list_accounts_with_balances");
+export async function listAccountsWithBalances(
+  params?: ReportParams
+): Promise<BalanceRow[]> {
+  return invoke<BalanceRow[]>("list_accounts_with_balances", {
+    params: params ?? null,
+  });
+}
+
+export async function listCommodities(): Promise<string[]> {
+  return invoke<string[]>("list_commodities");
 }
 
 // ─── Budget ───

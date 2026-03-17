@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useCallback } from "react";
 import * as api from "../api/commands";
 import type { BalanceRow, RegisterRow } from "../api/types";
 
@@ -41,16 +41,25 @@ export function AccountsPage() {
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [typeFilter, setTypeFilter] = useState("");
+  const [valueCurrency, setValueCurrency] = useState<string>("");
+  const [commodities, setCommodities] = useState<string[]>([]);
 
-  useEffect(() => {
-    api.listAccountsWithBalances().then((data) => {
-      setAllAccounts(data);
-      setLoading(false);
-      // Auto-expand top-level
-      const topLevel = new Set(data.filter((a) => a.depth === 0).map((a) => a.account));
-      setExpanded(topLevel);
-    });
-  }, []);
+  const loadAccounts = useCallback(async () => {
+    setLoading(true);
+    const [data, comms] = await Promise.all([
+      valueCurrency
+        ? api.listAccountsWithBalances({ targetCommodity: valueCurrency })
+        : api.listAccountsWithBalances(),
+      api.listCommodities(),
+    ]);
+    setAllAccounts(data);
+    setCommodities(comms);
+    setLoading(false);
+    const topLevel = new Set(data.filter((a: BalanceRow) => a.depth === 0).map((a: BalanceRow) => a.account));
+    setExpanded(topLevel);
+  }, [valueCurrency]);
+
+  useEffect(() => { loadAccounts(); }, [loadAccounts]);
 
   // Filter accounts by type and search
   const filteredAccounts = useMemo(() => {
@@ -232,6 +241,23 @@ export function AccountsPage() {
             </button>
           ))}
         </div>
+
+        {/* Value in currency */}
+        {commodities.length > 1 && (
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-gray-500 dark:text-gray-400 shrink-0">Value in</span>
+            <select
+              value={valueCurrency}
+              onChange={(e) => setValueCurrency(e.target.value)}
+              className="flex-1 px-2 py-1.5 bg-gray-100 dark:bg-gray-800 rounded-lg text-xs text-gray-900 dark:text-gray-100 border-none focus:outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              <option value="">Original</option>
+              {commodities.map((c) => (
+                <option key={c} value={c}>{c}</option>
+              ))}
+            </select>
+          </div>
+        )}
       </div>
 
       {/* Account tree */}

@@ -160,11 +160,49 @@ pub async fn expense_breakdown_chart(
 
 #[tauri::command]
 pub async fn list_accounts_with_balances(
+    params: Option<ReportParams>,
     state: State<'_, Mutex<crate::AppState>>,
 ) -> Result<Vec<reports::BalanceRow>, String> {
     let app_state = state.lock().map_err(|e| e.to_string())?;
     let loaded = app_state.journal.as_ref().ok_or("No journal loaded")?;
 
     let txns: Vec<_> = loaded.ledger.transactions().cloned().collect();
+
+    if let Some(params) = params {
+        if let Some(target) = params.target_commodity.as_deref() {
+            if !target.is_empty() {
+                return Ok(reports::balance_report_valued(
+                    &txns,
+                    params.account_filter.as_deref(),
+                    parse_date(&params.date_from),
+                    parse_date(&params.date_to),
+                    target,
+                    loaded.ledger.price_db(),
+                ));
+            }
+        }
+    }
+
     Ok(reports::balance_report(&txns, None, None, None))
+}
+
+#[tauri::command]
+pub async fn list_commodities(
+    state: State<'_, Mutex<crate::AppState>>,
+) -> Result<Vec<String>, String> {
+    let app_state = state.lock().map_err(|e| e.to_string())?;
+    let loaded = app_state.journal.as_ref().ok_or("No journal loaded")?;
+
+    let txns: Vec<_> = loaded.ledger.transactions().cloned().collect();
+    let mut commodities = std::collections::BTreeSet::new();
+    for txn in &txns {
+        for posting in &txn.postings {
+            for commodity in posting.amount.amounts.keys() {
+                if !commodity.is_empty() {
+                    commodities.insert(commodity.clone());
+                }
+            }
+        }
+    }
+    Ok(commodities.into_iter().collect())
 }
