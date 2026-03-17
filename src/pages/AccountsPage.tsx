@@ -15,12 +15,20 @@ function formatAmount(amounts: { commodity: string; quantity: string }[]): strin
   return amounts
     .map((a) => {
       const q = parseFloat(a.quantity);
-      if (a.commodity && a.commodity.length === 1) {
+      // Symbol commodities (single char like $) use 2 decimal places, left-side
+      const isSymbol = a.commodity && a.commodity.length === 1
+        && "$\u20AC\u00A3\u00A5\u20B9\u20BD\u20BF".includes(a.commodity);
+      if (isSymbol) {
         return `${a.commodity}${q.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
       }
-      return a.commodity
-        ? `${q.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${a.commodity}`
-        : q.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      // Non-symbol commodities (stocks, codes): preserve original precision
+      const rawParts = a.quantity.split(".");
+      const decimals = rawParts.length > 1 ? rawParts[1].replace(/0+$/, "").length : 0;
+      const formatted = q.toLocaleString(undefined, {
+        minimumFractionDigits: decimals,
+        maximumFractionDigits: Math.max(decimals, 2),
+      });
+      return a.commodity ? `${formatted} ${a.commodity}` : formatted;
     })
     .join(", ");
 }
@@ -244,7 +252,8 @@ export function AccountsPage() {
               const shortName = search.trim()
                 ? row.account
                 : row.account.split(":").pop() ?? row.account;
-              const isNegative = parseFloat(row.amounts[0]?.quantity ?? "0") < 0;
+              const isMultiCommodity = row.amounts.length > 1;
+              const isNegative = !isMultiCommodity && parseFloat(row.amounts[0]?.quantity ?? "0") < 0;
               const displayDepth = search.trim() ? 0 : row.depth;
 
               return (
@@ -278,7 +287,9 @@ export function AccountsPage() {
                   {/* Balance */}
                   <span
                     className={`text-sm font-mono shrink-0 ml-2 ${
-                      isNegative ? "text-red-500" : "text-green-500"
+                      isMultiCommodity
+                        ? "text-gray-700 dark:text-gray-300"
+                        : isNegative ? "text-red-500" : "text-green-500"
                     }`}
                   >
                     {formatAmount(row.amounts)}

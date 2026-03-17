@@ -767,6 +767,120 @@ mod tests {
     }
 
     #[test]
+    fn audit_cost_transaction_balances() {
+        // This mirrors a real transaction from example.hledger
+        let txns = resolve(
+            "2025-02-16 * Sell shares of ITOT\n\
+             \x20   Assets:US:ETrade:ITOT    -19 ITOT {96.15 USD}\n\
+             \x20   Assets:US:ETrade:Cash    1973.70 USD\n\
+             \x20   Expenses:Financial:Commissions    8.95 USD\n\
+             \x20   Income:US:ETrade:PnL\n",
+        );
+        assert_eq!(txns.len(), 1);
+        let t = &txns[0];
+
+        // ITOT posting: should have -19 ITOT
+        assert_eq!(t.postings[0].amount.get("ITOT"), dec!(-19));
+
+        // Cash posting: 1973.70 USD
+        assert_eq!(t.postings[1].amount.get("USD"), dec!(1973.70));
+
+        // PnL (inferred): should balance the USD side
+        // Cost: -19 * 96.15 = -1826.85 USD equivalent
+        // Cash: +1973.70, Commissions: +8.95
+        // So PnL = -(1973.70 + 8.95 - 1826.85) = -155.80 USD
+        // But also +19 ITOT to balance the ITOT commodity
+        let pnl = &t.postings[3];
+        println!("PnL amounts: {:?}", pnl.amount.amounts);
+        // With current code, PnL gets the negation of the sum of explicit amounts
+    }
+
+    #[test]
+    fn audit_example_hledger_asset_balances() {
+        let text = std::fs::read_to_string("../../tests/fixtures/example.hledger").unwrap();
+        let journal = hledger_parser::parse(&text).expect("parse failed");
+        let txns = resolve(&text[..0]); // dummy - use below
+        let _ = txns;
+
+        let journal_txns = crate::balance::resolve_transactions(&journal).expect("resolve failed");
+        let report = balance_report(&journal_txns, Some("assets"), None, None);
+
+        // Compare against hledger CLI output (account names preserve original casing):
+        let find = |name: &str| report.iter().find(|r| r.account == name)
+            .unwrap_or_else(|| panic!("Account {} not found in report", name));
+        let has_amt = |row: &BalanceRow, commodity: &str, expected: &str| {
+            let expected_dec = rust_decimal::Decimal::from_str_exact(expected).unwrap();
+            row.amounts.iter().any(|a| {
+                a.commodity == commodity
+                    && rust_decimal::Decimal::from_str_exact(&a.quantity).unwrap() == expected_dec
+            })
+        };
+
+        // 1869.39000 USD  Assets:US:BofA:Checking
+        let checking = find("Assets:US:BofA:Checking");
+        assert!(has_amt(checking, "USD", "1869.39"),
+            "BofA Checking: expected 1869.39 USD, got {:?}", checking.amounts);
+
+        // 5724.75000 USD  Assets:US:ETrade:Cash
+        let etrade_cash = find("Assets:US:ETrade:Cash");
+        assert!(has_amt(etrade_cash, "USD", "5724.75"),
+            "ETrade Cash: expected 5724.75 USD, got {:?}", etrade_cash.amounts);
+
+        // 45 GLD  Assets:US:ETrade:GLD
+        let gld = find("Assets:US:ETrade:GLD");
+        assert!(has_amt(gld, "GLD", "45"),
+            "GLD: expected 45 GLD, got {:?}", gld.amounts);
+
+        // 62 ITOT  Assets:US:ETrade:ITOT
+        let itot = find("Assets:US:ETrade:ITOT");
+        assert!(has_amt(itot, "ITOT", "62"),
+            "ITOT: expected 62 ITOT, got {:?}", itot.amounts);
+
+        // 76 VHT  Assets:US:ETrade:VHT
+        let vht = find("Assets:US:ETrade:VHT");
+        assert!(has_amt(vht, "VHT", "76"),
+            "VHT: expected 76 VHT, got {:?}", vht.amounts);
+
+        // 284.123 RGAGX  Assets:US:Vanguard:RGAGX
+        let rgagx = find("Assets:US:Vanguard:RGAGX");
+        assert!(has_amt(rgagx, "RGAGX", "284.123"),
+            "RGAGX: expected 284.123 RGAGX, got {:?}", rgagx.amounts);
+
+        // 169.659 VBMPX  Assets:US:Vanguard:VBMPX
+        let vbmpx = find("Assets:US:Vanguard:VBMPX");
+        assert!(has_amt(vbmpx, "VBMPX", "169.659"),
+            "VBMPX: expected 169.659 VBMPX, got {:?}", vbmpx.amounts);
+    }
+
+    #[test]
+    fn audit_multicommodity_balance_report() {
+        let txns = resolve(
+            "2025-01-01 Buy stock\n\
+             \x20   Assets:Brokerage:Stock    10 AAPL @ 150 USD\n\
+             \x20   Assets:Brokerage:Cash    -1500 USD\n\n\
+             2025-01-15 Deposit\n\
+             \x20   Assets:Brokerage:Cash    5000 USD\n\
+             \x20   Income:Salary\n",
+        );
+
+        let report = balance_report(&txns, Some("assets"), None, None);
+        println!("=== Multi-commodity balance report ===");
+        for row in &report {
+            println!("  {}: {:?}", row.account, row.amounts);
+        }
+
+        // Stock account should show AAPL
+        let stock = report.iter().find(|r| r.account == "Assets:Brokerage:Stock").unwrap();
+        assert!(stock.amounts.iter().any(|a| a.commodity == "AAPL" && a.quantity == "10"),
+            "Stock should have 10 AAPL, got {:?}", stock.amounts);
+
+        // Cash should show USD
+        let cash = report.iter().find(|r| r.account == "Assets:Brokerage:Cash").unwrap();
+        assert!(cash.amounts.iter().any(|a| a.commodity == "USD" && a.quantity == "3500"),
+            "Cash should have 3500 USD, got {:?}", cash.amounts);
+    }
+
+    #[test]
     fn end_of_month_works() {
         assert_eq!(
             end_of_month(NaiveDate::from_ymd_opt(2024, 1, 15).unwrap()),

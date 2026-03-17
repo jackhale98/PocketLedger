@@ -109,8 +109,31 @@ fn resolve_transaction(
         if let Some(ref amt) = posting.amount {
             let quantity = amt.quantity;
             let commodity = &amt.commodity;
-            let mixed = MixedAmount::single(commodity, quantity);
-            postings_with_amounts.push((i, mixed));
+
+            // When a posting has a cost (@ or {}), hledger uses the cost
+            // amount for balancing, not the commodity amount. For example:
+            //   -19 ITOT {96.15 USD}
+            // contributes -19*96.15 = -1826.85 USD to the balance equation
+            // (not -19 ITOT). The posting itself still tracks -19 ITOT.
+            let balance_mixed = if let Some(ref cost) = amt.cost {
+                match cost {
+                    hledger_parser::ast::Cost::UnitCost(c) => {
+                        let cost_total = quantity * c.quantity;
+                        MixedAmount::single(&c.commodity, cost_total)
+                    }
+                    hledger_parser::ast::Cost::TotalCost(c) => {
+                        let cost_total = if quantity.is_sign_negative() {
+                            -c.quantity
+                        } else {
+                            c.quantity
+                        };
+                        MixedAmount::single(&c.commodity, cost_total)
+                    }
+                }
+            } else {
+                MixedAmount::single(commodity, quantity)
+            };
+            postings_with_amounts.push((i, balance_mixed));
         } else {
             if missing_amount_idx.is_some() {
                 return Err(LedgerError::MultipleInferredAmounts {
@@ -135,6 +158,9 @@ fn resolve_transaction(
             // Infer: the missing amount is the negation of the sum
             sum.negate()
         } else {
+            // Use the posting's commodity amount only (not the cost side).
+            // The cost side was used for balancing but the posting tracks
+            // the commodity it actually holds.
             let quantity = posting.amount.as_ref().unwrap().quantity;
             let commodity = &posting.amount.as_ref().unwrap().commodity;
             MixedAmount::single(commodity, quantity)
