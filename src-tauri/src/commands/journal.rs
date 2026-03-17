@@ -38,6 +38,7 @@ pub struct LoadedJournal {
     pub journal: Journal,
     pub ledger: Ledger,
     pub writer_config: WriterConfig,
+    pub include_warnings: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -46,6 +47,7 @@ pub struct JournalSummary {
     pub file_name: String,
     pub transaction_count: usize,
     pub account_count: usize,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -80,6 +82,7 @@ fn make_summary(loaded: &LoadedJournal) -> JournalSummary {
             .unwrap_or_default(),
         transaction_count: loaded.ledger.transaction_count(),
         account_count: loaded.ledger.account_count(),
+        warnings: loaded.include_warnings.clone(),
     }
 }
 
@@ -92,7 +95,8 @@ fn load_journal(path: &str) -> Result<LoadedJournal, String> {
 
     // Resolve include directives
     let base_dir = file_path.parent().map(|p| p.to_path_buf());
-    resolve_includes(&mut journal, base_dir.as_deref());
+    let mut warnings = Vec::new();
+    resolve_includes(&mut journal, base_dir.as_deref(), &mut warnings);
 
     let ledger = Ledger::from_journal(&journal).map_err(|e| e.to_string())?;
 
@@ -102,10 +106,11 @@ fn load_journal(path: &str) -> Result<LoadedJournal, String> {
         journal,
         ledger,
         writer_config,
+        include_warnings: warnings,
     })
 }
 
-fn resolve_includes(journal: &mut Journal, base_dir: Option<&std::path::Path>) {
+fn resolve_includes(journal: &mut Journal, base_dir: Option<&std::path::Path>, warnings: &mut Vec<String>) {
     let mut new_items = Vec::new();
     for item in journal.items.drain(..) {
         match &item {
@@ -115,14 +120,17 @@ fn resolve_includes(journal: &mut Journal, base_dir: Option<&std::path::Path>) {
                 } else {
                     PathBuf::from(&inc.path)
                 };
+                // Also try normalizing the include path (handles glob patterns like *.journal)
                 match std::fs::read_to_string(&inc_path) {
                     Ok(text) => {
                         if let Ok(mut sub) = hledger_parser::parse(&text) {
-                            resolve_includes(&mut sub, inc_path.parent());
+                            resolve_includes(&mut sub, inc_path.parent(), warnings);
                             new_items.extend(sub.items);
                         }
                     }
-                    Err(e) => eprintln!("Warning: could not include {}: {}", inc.path, e),
+                    Err(e) => {
+                        warnings.push(format!("Could not include '{}': {}", inc.path, e));
+                    }
                 }
                 new_items.push(item); // Keep the directive for reference
             }

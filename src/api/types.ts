@@ -3,6 +3,7 @@ export interface JournalSummary {
   fileName: string;
   transactionCount: number;
   accountCount: number;
+  warnings: string[];
 }
 
 /** Mirrors the Rust TransactionSummary struct */

@@ -129,6 +129,15 @@ function App() {
         </div>
       </div>
 
+      {/* Warning banner for include failures */}
+      {summary?.warnings && summary.warnings.length > 0 && (
+        <div className="bg-yellow-50 dark:bg-yellow-900/20 px-4 py-1.5">
+          {summary.warnings.map((w, i) => (
+            <div key={i} className="text-xs text-yellow-700 dark:text-yellow-400">{w}</div>
+          ))}
+        </div>
+      )}
+
       {/* Error banner */}
       {error && (
         <div className="bg-red-50 dark:bg-red-900/30 px-4 py-2 flex items-center justify-between">
