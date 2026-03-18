@@ -274,8 +274,9 @@ export function AccountsPage() {
                 : row.account.split(":").pop() ?? row.account;
               const isLeaf = !canExpand;
               const isMultiCommodity = row.amounts.length > 1;
-              // Hide amounts on parent accounts with many commodities - too noisy on mobile
-              const showAmount = isLeaf || row.amounts.length <= 2;
+              // In valued mode (single currency), always show totals including parents.
+              // In original mode, hide parent accounts with many commodities.
+              const showAmount = !!valueCurrency || isLeaf || row.amounts.length <= 2;
               const isNegative = !isMultiCommodity && parseFloat(row.amounts[0]?.quantity ?? "0") < 0;
               const displayDepth = search.trim() ? 0 : row.depth;
 
