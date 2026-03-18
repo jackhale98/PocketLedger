@@ -89,7 +89,7 @@ fn mixed_to_entries(m: &MixedAmount) -> Vec<AmountEntry> {
 }
 
 /// Convert a MixedAmount to a target commodity using the price database.
-/// Commodities that can't be converted are left as-is.
+/// Commodities that can't be converted are dropped from the result.
 fn convert_mixed(m: &MixedAmount, target: &str, price_db: &PriceDb, date: NaiveDate) -> MixedAmount {
     let mut result = MixedAmount::zero();
     for (commodity, quantity) in &m.amounts {
@@ -97,10 +97,8 @@ fn convert_mixed(m: &MixedAmount, target: &str, price_db: &PriceDb, date: NaiveD
             result.add(target, *quantity);
         } else if let Some(converted) = price_db.convert(*quantity, commodity, target, date) {
             result.add(target, converted);
-        } else {
-            // No price available - keep original commodity
-            result.add(commodity, *quantity);
         }
+        // No price available - skip this commodity rather than mixing it in
     }
     result
 }
