@@ -45,12 +45,6 @@ export function MorePage() {
     try {
       const selected = await open({
         multiple: false,
-        filters: [
-          {
-            name: "Journal",
-            extensions: ["journal", "hledger", "ledger", "j", "txt", "*"],
-          },
-        ],
       });
       if (selected) {
         await switchJournal(selected as string);

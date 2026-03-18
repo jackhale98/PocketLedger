@@ -23,14 +23,8 @@ function App() {
     try {
       const selected = await open({
         multiple: false,
-        // On iOS, extension filters use UTIs. Plain text files (.journal, .ledger)
-        // have no registered UTI, so we allow all files and let the user pick.
-        filters: [
-          {
-            name: "Journal",
-            extensions: ["journal", "hledger", "ledger", "j", "txt", "*"],
-          },
-        ],
+        // No filters: iOS uses UTIs not extensions, and .journal/.ledger
+        // have no registered UTI so they'd be hidden with any filter.
       });
 
       if (selected) {
