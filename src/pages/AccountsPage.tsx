@@ -31,22 +31,6 @@ function formatAmount(amounts: { commodity: string; quantity: string }[]): strin
     .join(", ");
 }
 
-/** For multi-commodity parent accounts, show a compact summary instead of a huge list */
-function formatAmountCompact(amounts: { commodity: string; quantity: string }[]): string {
-  if (amounts.length <= 2) return formatAmount(amounts);
-  // Show the primary currency amount (if any) plus a count
-  const currencyAmounts = amounts.filter((a) =>
-    a.commodity.length <= 3 && /^[A-Z$€£¥₹₽₿]+$/.test(a.commodity)
-  );
-  const primaryCurrency = currencyAmounts.find((a) => ["USD", "$", "EUR", "€", "GBP", "£"].includes(a.commodity))
-    || currencyAmounts[0];
-
-  if (primaryCurrency) {
-    const otherCount = amounts.length - 1;
-    return `${formatAmount([primaryCurrency])} +${otherCount} more`;
-  }
-  return `${amounts.length} commodities`;
-}
 
 /** Case-insensitive check if account matches a type filter */
 function matchesType(account: string, typeFilter: string): boolean {
@@ -288,7 +272,10 @@ export function AccountsPage() {
               const shortName = search.trim()
                 ? row.account
                 : row.account.split(":").pop() ?? row.account;
+              const isLeaf = !canExpand;
               const isMultiCommodity = row.amounts.length > 1;
+              // Hide amounts on parent accounts with many commodities - too noisy on mobile
+              const showAmount = isLeaf || row.amounts.length <= 2;
               const isNegative = !isMultiCommodity && parseFloat(row.amounts[0]?.quantity ?? "0") < 0;
               const displayDepth = search.trim() ? 0 : row.depth;
 
@@ -321,15 +308,17 @@ export function AccountsPage() {
                   </button>
 
                   {/* Balance */}
-                  <span
-                    className={`text-sm font-mono shrink-0 ml-2 text-right max-w-[45%] truncate ${
-                      isMultiCommodity
-                        ? "text-gray-700 dark:text-gray-300"
-                        : isNegative ? "text-red-500" : "text-green-500"
-                    }`}
-                  >
-                    {isMultiCommodity ? formatAmountCompact(row.amounts) : formatAmount(row.amounts)}
-                  </span>
+                  {showAmount && (
+                    <span
+                      className={`text-sm font-mono shrink-0 ml-2 text-right max-w-[45%] truncate ${
+                        isMultiCommodity
+                          ? "text-gray-700 dark:text-gray-300"
+                          : isNegative ? "text-red-500" : "text-green-500"
+                      }`}
+                    >
+                      {formatAmount(row.amounts)}
+                    </span>
+                  )}
                 </div>
               );
             })}
