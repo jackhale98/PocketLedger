@@ -53,6 +53,16 @@ jobs:
           APPLE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_TEAM_ID }}
         run: npx tauri ios init
 
+      - name: Copy app icons into generated Xcode project
+        run: |
+          ICONSET="src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset"
+          if [ -d "$ICONSET" ] && [ -d "src-tauri/icons/ios" ]; then
+            cp src-tauri/icons/ios/*.png "$ICONSET/"
+            echo "Copied iOS app icons"
+          else
+            echo "Warning: Icon directories not found"
+          fi
+
       - name: Enable iOS document picker support
         run: |
           PLIST="src-tauri/gen/apple/PocketHLedger_iOS/Info.plist"
