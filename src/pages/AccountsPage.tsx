@@ -15,13 +15,11 @@ function formatAmount(amounts: { commodity: string; quantity: string }[]): strin
   return amounts
     .map((a) => {
       const q = parseFloat(a.quantity);
-      // Symbol commodities (single char like $) use 2 decimal places, left-side
       const isSymbol = a.commodity && a.commodity.length === 1
         && "$\u20AC\u00A3\u00A5\u20B9\u20BD\u20BF".includes(a.commodity);
       if (isSymbol) {
         return `${a.commodity}${q.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
       }
-      // Non-symbol commodities (stocks, codes): preserve original precision
       const rawParts = a.quantity.split(".");
       const decimals = rawParts.length > 1 ? rawParts[1].replace(/0+$/, "").length : 0;
       const formatted = q.toLocaleString(undefined, {
@@ -31,6 +29,30 @@ function formatAmount(amounts: { commodity: string; quantity: string }[]): strin
       return a.commodity ? `${formatted} ${a.commodity}` : formatted;
     })
     .join(", ");
+}
+
+/** For multi-commodity parent accounts, show a compact summary instead of a huge list */
+function formatAmountCompact(amounts: { commodity: string; quantity: string }[]): string {
+  if (amounts.length <= 2) return formatAmount(amounts);
+  // Show the primary currency amount (if any) plus a count
+  const currencyAmounts = amounts.filter((a) =>
+    a.commodity.length <= 3 && /^[A-Z$€£¥₹₽₿]+$/.test(a.commodity)
+  );
+  const primaryCurrency = currencyAmounts.find((a) => ["USD", "$", "EUR", "€", "GBP", "£"].includes(a.commodity))
+    || currencyAmounts[0];
+
+  if (primaryCurrency) {
+    const otherCount = amounts.length - 1;
+    return `${formatAmount([primaryCurrency])} +${otherCount} more`;
+  }
+  return `${amounts.length} commodities`;
+}
+
+/** Case-insensitive check if account matches a type filter */
+function matchesType(account: string, typeFilter: string): boolean {
+  if (!typeFilter) return true;
+  const lower = account.toLowerCase();
+  return lower === typeFilter || lower.startsWith(typeFilter + ":");
 }
 
 export function AccountsPage() {
@@ -55,18 +77,19 @@ export function AccountsPage() {
     setAllAccounts(data);
     setCommodities(comms);
     setLoading(false);
+    // Auto-expand top-level accounts
     const topLevel = new Set(data.filter((a: BalanceRow) => a.depth === 0).map((a: BalanceRow) => a.account));
     setExpanded(topLevel);
   }, [valueCurrency]);
 
   useEffect(() => { loadAccounts(); }, [loadAccounts]);
 
-  // Filter accounts by type and search
+  // Filter accounts by type and search (case-insensitive)
   const filteredAccounts = useMemo(() => {
     let result = allAccounts;
 
     if (typeFilter) {
-      result = result.filter((a) => a.account.startsWith(typeFilter));
+      result = result.filter((a) => matchesType(a.account, typeFilter));
     }
 
     if (search.trim()) {
@@ -79,27 +102,15 @@ export function AccountsPage() {
 
   // Determine visible accounts based on expanded state
   const visibleAccounts = useMemo(() => {
-    // When searching, show all matches flat (ignore expand state)
     if (search.trim()) {
       return filteredAccounts;
     }
 
     return filteredAccounts.filter((row) => {
-      // Adjust depth based on type filter
-      const effectiveRoot = typeFilter || "";
-      const relativeAccount = effectiveRoot
-        ? row.account.startsWith(effectiveRoot + ":")
-          ? row.account
-          : row.account === effectiveRoot
-            ? row.account
-            : ""
-        : row.account;
-
-      if (!relativeAccount) return false;
-
       const parts = row.account.split(":");
-      // Top level (or first under type filter) is always visible
+
       if (typeFilter) {
+        // Under a type filter, the type root (e.g. "Assets") is always visible
         if (parts.length <= 1) return true;
         // Check if all ancestors are expanded
         for (let i = 1; i < parts.length; i++) {
@@ -127,7 +138,6 @@ export function AccountsPage() {
   };
 
   const collapseAll = () => {
-    // Keep only top-level expanded
     const topLevel = new Set(filteredAccounts.filter((a) => a.depth === 0).map((a) => a.account));
     setExpanded(topLevel);
   };
@@ -312,13 +322,13 @@ export function AccountsPage() {
 
                   {/* Balance */}
                   <span
-                    className={`text-sm font-mono shrink-0 ml-2 ${
+                    className={`text-sm font-mono shrink-0 ml-2 text-right max-w-[45%] truncate ${
                       isMultiCommodity
                         ? "text-gray-700 dark:text-gray-300"
                         : isNegative ? "text-red-500" : "text-green-500"
                     }`}
                   >
-                    {formatAmount(row.amounts)}
+                    {isMultiCommodity ? formatAmountCompact(row.amounts) : formatAmount(row.amounts)}
                   </span>
                 </div>
               );
