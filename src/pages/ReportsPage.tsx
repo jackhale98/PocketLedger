@@ -73,6 +73,7 @@ function RegisterView({ accountList, dateFrom, dateTo, currency }: { accountList
   const [account, setAccount] = useState("");
   const [rows, setRows] = useState<RegisterRow[]>([]);
   const [loading, setLoading] = useState(false);
+  const [newestFirst, setNewestFirst] = useState(true);
 
   const load = useCallback(async () => {
     if (!account) { setRows([]); return; }
@@ -84,18 +85,28 @@ function RegisterView({ accountList, dateFrom, dateTo, currency }: { accountList
 
   useEffect(() => { load(); }, [load]);
 
+  const displayRows = newestFirst ? [...rows].reverse() : rows;
+
   return (
     <div className="space-y-3">
-      <select value={account} onChange={(e) => setAccount(e.target.value)}
-        className="w-full px-3 py-2 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg text-sm text-gray-900 dark:text-gray-100">
-        <option value="">Select an account...</option>
-        {accountList.map((n) => <option key={n} value={n}>{n}</option>)}
-      </select>
+      <div className="flex gap-2">
+        <select value={account} onChange={(e) => setAccount(e.target.value)}
+          className="flex-1 px-3 py-2 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg text-sm text-gray-900 dark:text-gray-100">
+          <option value="">Select an account...</option>
+          {accountList.map((n) => <option key={n} value={n}>{n}</option>)}
+        </select>
+        <button
+          onClick={() => setNewestFirst(!newestFirst)}
+          className="px-3 py-2 bg-gray-100 dark:bg-gray-800 rounded-lg text-xs font-medium text-gray-600 dark:text-gray-400 shrink-0"
+        >
+          {newestFirst ? "New \u2193" : "Old \u2191"}
+        </button>
+      </div>
       {loading && <div className="text-sm text-gray-500 text-center py-4">Loading...</div>}
       {!loading && account && rows.length === 0 && <div className="text-sm text-gray-500 text-center py-4">No postings</div>}
-      {rows.length > 0 && (
+      {displayRows.length > 0 && (
         <div className="divide-y divide-gray-100 dark:divide-gray-800">
-          {rows.map((row, i) => (
+          {displayRows.map((row, i) => (
             <div key={i} className="py-2.5 flex justify-between items-center">
               <div className="min-w-0 flex-1">
                 <div className="text-sm text-gray-900 dark:text-gray-100 truncate">{row.description}</div>
