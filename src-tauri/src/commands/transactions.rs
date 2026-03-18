@@ -36,10 +36,12 @@ pub async fn list_transactions(
     Ok(loaded
         .ledger
         .transactions()
-        .enumerate()
-        .map(|(i, txn)| {
+        .map(|txn| {
+            // Use the AST index from the first posting, which tracks the
+            // original position in the journal file (not the date-sorted order).
+            let ast_index = txn.postings.first().map(|p| p.transaction_index).unwrap_or(0);
             TransactionSummary {
-                index: i,
+                index: ast_index,
                 date: txn.date.format("%Y-%m-%d").to_string(),
                 status: format!("{:?}", txn.status),
                 description: txn.description.clone(),
@@ -73,10 +75,11 @@ pub async fn get_transaction(
         .as_ref()
         .ok_or("No journal loaded")?;
 
+    // Find the resolved transaction whose AST index matches
     let txn = loaded
         .ledger
         .transactions()
-        .nth(index)
+        .find(|t| t.postings.first().map(|p| p.transaction_index).unwrap_or(usize::MAX) == index)
         .ok_or("Transaction not found")?;
 
     Ok(TransactionSummary {
