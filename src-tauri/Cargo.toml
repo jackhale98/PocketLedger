@@ -25,3 +25,4 @@ hledger-parser = { path = "../crates/hledger-parser" }
 hledger-core = { path = "../crates/hledger-core" }
 url = "2"
 urlencoding = "2"
+glob = "0.3"

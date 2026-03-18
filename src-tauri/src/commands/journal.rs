@@ -115,21 +115,52 @@ fn resolve_includes(journal: &mut Journal, base_dir: Option<&std::path::Path>, w
     for item in journal.items.drain(..) {
         match &item {
             JournalItem::IncludeDirective(inc) => {
-                let inc_path = if let Some(base) = base_dir {
-                    base.join(&inc.path)
-                } else {
-                    PathBuf::from(&inc.path)
-                };
-                // Also try normalizing the include path (handles glob patterns like *.journal)
-                match std::fs::read_to_string(&inc_path) {
-                    Ok(text) => {
-                        if let Ok(mut sub) = hledger_parser::parse(&text) {
-                            resolve_includes(&mut sub, inc_path.parent(), warnings);
-                            new_items.extend(sub.items);
+                let inc_str = inc.path.trim();
+
+                // Handle glob patterns (e.g. "include *.journal")
+                if inc_str.contains('*') || inc_str.contains('?') {
+                    let pattern = if let Some(base) = base_dir {
+                        base.join(inc_str).to_string_lossy().to_string()
+                    } else {
+                        inc_str.to_string()
+                    };
+                    match glob::glob(&pattern) {
+                        Ok(paths) => {
+                            for entry in paths.flatten() {
+                                match std::fs::read_to_string(&entry) {
+                                    Ok(text) => {
+                                        if let Ok(mut sub) = hledger_parser::parse(&text) {
+                                            resolve_includes(&mut sub, entry.parent(), warnings);
+                                            new_items.extend(sub.items);
+                                        }
+                                    }
+                                    Err(e) => {
+                                        warnings.push(format!("Could not include '{}': {}", entry.display(), e));
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            warnings.push(format!("Invalid include pattern '{}': {}", inc_str, e));
                         }
                     }
-                    Err(e) => {
-                        warnings.push(format!("Could not include '{}': {}", inc.path, e));
+                } else {
+                    // Simple file path
+                    let inc_path = if let Some(base) = base_dir {
+                        base.join(inc_str)
+                    } else {
+                        PathBuf::from(inc_str)
+                    };
+                    match std::fs::read_to_string(&inc_path) {
+                        Ok(text) => {
+                            if let Ok(mut sub) = hledger_parser::parse(&text) {
+                                resolve_includes(&mut sub, inc_path.parent(), warnings);
+                                new_items.extend(sub.items);
+                            }
+                        }
+                        Err(e) => {
+                            warnings.push(format!("Could not include '{}': {} (resolved to {})", inc_str, e, inc_path.display()));
+                        }
                     }
                 }
                 new_items.push(item); // Keep the directive for reference

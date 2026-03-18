@@ -1022,4 +1022,23 @@ mod tests {
             NaiveDate::from_ymd_opt(2024, 12, 31).unwrap()
         );
     }
+
+    #[test]
+    fn audit_income_statement_net() {
+        let text = std::fs::read_to_string("../../tests/fixtures/example.hledger").unwrap();
+        let journal = hledger_parser::parse(&text).expect("parse failed");
+        let txns = crate::balance::resolve_transactions(&journal).expect("resolve failed");
+
+        let from = NaiveDate::from_ymd_opt(2025, 2, 1).unwrap();
+        let to = NaiveDate::from_ymd_opt(2025, 2, 28).unwrap();
+        let is = income_statement(&txns, Some(from), Some(to));
+
+        // hledger says: net = 3089.64 USD - 2400 IRAUSD + 10 VACHR
+        let net_usd = is.net.iter().find(|a| a.commodity == "USD");
+        if let Some(n) = net_usd {
+            let val: f64 = n.quantity.parse().unwrap();
+            assert!((val - 3089.64).abs() < 0.01,
+                "IS net USD: expected 3089.64, got {}", val);
+        }
+    }
 }
