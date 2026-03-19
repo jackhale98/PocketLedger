@@ -286,15 +286,17 @@ export function ReportsPage() {
     const [nw, ie, eb, accounts] = await Promise.all([
       api.netWorthSeries(params),
       api.incomeExpenseChart(params),
-      api.expenseBreakdownChart(params, expensePrefix),
+      api.expenseBreakdownChart(params, null),
       api.listAccountsWithBalances(),
     ]);
     setNetWorth(nw);
     setIncomeExpense(ie);
     setExpenseBreakdown(eb);
+    setExpensePrefix(null);
+    setExpensePath([]);
     setAccountList(accounts.map((a: BalanceRow) => a.account).sort());
     setLoading(false);
-  }, [makeParams, expensePrefix]);
+  }, [makeParams]);
 
   useEffect(() => { loadDashboard(); }, [loadDashboard]);
 
