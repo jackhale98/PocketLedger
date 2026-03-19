@@ -1,0 +1,204 @@
+; Sample hledger journal with budget periodic transactions
+; For testing PocketHLedger's budget features
+
+; Commodities
+commodity $1,000.00
+
+; Account declarations
+account assets:checking
+account assets:savings
+account expenses:rent
+account expenses:groceries
+account expenses:dining
+account expenses:transport
+account expenses:utilities
+account expenses:subscriptions
+account income:salary
+account income:freelance
+account liabilities:credit-card
+
+; Budget - monthly spending targets
+~ monthly
+    expenses:rent                $1,500.00
+    expenses:groceries             $400.00
+    expenses:dining                $200.00
+    expenses:transport             $150.00
+    expenses:utilities             $120.00
+    expenses:subscriptions          $50.00
+    income
+
+; Opening balances
+2026-01-01 * Opening balances
+    assets:checking             $5,000.00
+    assets:savings             $12,000.00
+    equity:opening
+
+; January income
+2026-01-15 * Employer | Salary
+    assets:checking             $3,200.00
+    income:salary
+
+2026-01-28 * Freelance project
+    assets:checking               $800.00
+    income:freelance
+
+; January expenses
+2026-01-01 * Landlord | Rent
+    expenses:rent               $1,500.00
+    assets:checking
+
+2026-01-03 * Whole Foods
+    expenses:groceries             $87.42
+    liabilities:credit-card
+
+2026-01-05 * Trader Joe's
+    expenses:groceries             $63.18
+    liabilities:credit-card
+
+2026-01-07 * Thai Basil Restaurant
+    expenses:dining                $42.50
+    liabilities:credit-card
+
+2026-01-10 * MBTA Monthly Pass
+    expenses:transport            $100.00
+    assets:checking
+
+2026-01-12 * Electric Company
+    expenses:utilities             $95.00
+    assets:checking
+
+2026-01-14 * Spotify
+    expenses:subscriptions         $10.99
+    liabilities:credit-card
+
+2026-01-14 * Netflix
+    expenses:subscriptions         $15.49
+    liabilities:credit-card
+
+2026-01-18 * Stop & Shop
+    expenses:groceries             $92.33
+    liabilities:credit-card
+
+2026-01-20 * Uber Eats
+    expenses:dining                $35.80
+    liabilities:credit-card
+
+2026-01-22 * Gas station
+    expenses:transport             $45.00
+    assets:checking
+
+2026-01-25 * Water bill
+    expenses:utilities             $28.00
+    assets:checking
+
+2026-01-27 * Whole Foods
+    expenses:groceries            $105.60
+    liabilities:credit-card
+
+2026-01-30 * Credit card payment
+    liabilities:credit-card       $453.31
+    assets:checking
+
+; February income
+2026-02-14 * Employer | Salary
+    assets:checking             $3,200.00
+    income:salary
+
+2026-02-26 * Freelance project
+    assets:checking               $600.00
+    income:freelance
+
+; February expenses
+2026-02-01 * Landlord | Rent
+    expenses:rent               $1,500.00
+    assets:checking
+
+2026-02-02 * Trader Joe's
+    expenses:groceries             $71.90
+    liabilities:credit-card
+
+2026-02-05 * Sushi restaurant
+    expenses:dining                $68.00
+    liabilities:credit-card
+
+2026-02-08 * Stop & Shop
+    expenses:groceries             $88.45
+    liabilities:credit-card
+
+2026-02-10 * MBTA Monthly Pass
+    expenses:transport            $100.00
+    assets:checking
+
+2026-02-12 * Electric Company
+    expenses:utilities            $110.00
+    assets:checking
+
+2026-02-14 * Spotify
+    expenses:subscriptions         $10.99
+    liabilities:credit-card
+
+2026-02-14 * Netflix
+    expenses:subscriptions         $15.49
+    liabilities:credit-card
+
+2026-02-14 * Valentine's dinner
+    expenses:dining                $95.00
+    liabilities:credit-card
+
+2026-02-17 * Whole Foods
+    expenses:groceries            $112.30
+    liabilities:credit-card
+
+2026-02-20 * Lyft rides
+    expenses:transport             $32.50
+    liabilities:credit-card
+
+2026-02-22 * Gas Company
+    expenses:utilities             $85.00
+    assets:checking
+
+2026-02-25 * Whole Foods
+    expenses:groceries             $78.90
+    liabilities:credit-card
+
+2026-02-27 * Credit card payment
+    liabilities:credit-card       $573.53
+    assets:checking
+
+; March income
+2026-03-13 * Employer | Salary
+    assets:checking             $3,200.00
+    income:salary
+
+; March expenses
+2026-03-01 * Landlord | Rent
+    expenses:rent               $1,500.00
+    assets:checking
+
+2026-03-03 * Whole Foods
+    expenses:groceries             $95.20
+    liabilities:credit-card
+
+2026-03-06 * Chipotle
+    expenses:dining                $15.80
+    liabilities:credit-card
+
+2026-03-10 * MBTA Monthly Pass
+    expenses:transport            $100.00
+    assets:checking
+
+2026-03-12 * Electric Company
+    expenses:utilities            $102.00
+    assets:checking
+
+2026-03-14 * Spotify
+    expenses:subscriptions         $10.99
+    liabilities:credit-card
+
+2026-03-14 * Netflix
+    expenses:subscriptions         $15.49
+    liabilities:credit-card
+
+2026-03-15 * Transfer to savings
+    assets:savings                $500.00
+    assets:checking

@@ -463,4 +463,31 @@ mod tests {
         let to = NaiveDate::from_ymd_opt(2024, 6, 30).unwrap();
         assert_eq!(count_periods(&BudgetPeriod::Quarterly, from, to), dec!(2));
     }
+
+    #[test]
+    fn audit_sample_budget_journal() {
+        let text = std::fs::read_to_string("../../tests/fixtures/sample-with-budget.journal").unwrap();
+        let journal = hledger_parser::parse(&text).expect("parse failed");
+        let budgets = extract_budgets(&journal);
+        assert_eq!(budgets.len(), 1, "Should find 1 budget");
+        assert_eq!(budgets[0].period, BudgetPeriod::Monthly);
+        assert_eq!(budgets[0].entries.len(), 6, "Should have 6 budget entries");
+
+        let txns = crate::balance::resolve_transactions(&journal).expect("resolve failed");
+        let from = chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let to = chrono::NaiveDate::from_ymd_opt(2026, 1, 31).unwrap();
+        let report = budget_vs_actual(&txns, &budgets, "$", Some(from), Some(to));
+
+        println!("=== Budget vs Actual Jan 2026 ===");
+        for row in &report {
+            println!("  {}: budget={}, actual={}, {}", row.account, row.budget, row.actual, row.percentage);
+        }
+
+        let rent = report.iter().find(|r| r.account == "expenses:rent").unwrap();
+        assert_eq!(rent.percentage, "100%", "Rent should be exactly on budget");
+        assert!(!rent.over_budget);
+
+        let utilities = report.iter().find(|r| r.account == "expenses:utilities").unwrap();
+        assert!(utilities.over_budget, "Utilities should be over budget");
+    }
 }
