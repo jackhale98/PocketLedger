@@ -309,7 +309,9 @@ export function ReportsPage() {
   const drillIntoExpense = async (category: string) => {
     const newPrefix = expensePrefix ? `${expensePrefix}:${category}` : `expenses:${category}`;
     const sub = await api.expenseBreakdownChart(makeParams(), newPrefix);
-    if (sub.length > 0) {
+    // Only drill down if there are real subcategories (not just "other")
+    const hasRealSubs = sub.length > 1 || (sub.length === 1 && sub[0].name !== "other");
+    if (hasRealSubs) {
       setExpensePrefix(newPrefix);
       setExpensePath((prev) => [...prev, category]);
       setExpenseBreakdown(sub);
