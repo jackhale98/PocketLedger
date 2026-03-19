@@ -135,6 +135,31 @@ export interface BudgetInfo {
   entries: BudgetEntry[];
 }
 
+/** CSV import preview transaction */
+export interface CsvPreviewTransaction {
+  date: string;
+  description: string;
+  account1: string;
+  account2: string;
+  amount: string;
+  commodity: string;
+  comment: string | null;
+}
+
+/** CSV import preview result */
+export interface CsvPreview {
+  transactions: CsvPreviewTransaction[];
+  warnings: string[];
+  rowsProcessed: number;
+}
+
+/** CSV import result */
+export interface CsvImportResult {
+  importedCount: number;
+  warnings: string[];
+  summary: JournalSummary;
+}
+
 /** Reconciliation posting */
 export interface ReconciliationPosting {
   transactionIndex: number;

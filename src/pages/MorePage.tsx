@@ -4,6 +4,7 @@ import { useSettingsStore, type Theme } from "../store/settingsStore";
 import { useJournalStore } from "../store/journalStore";
 import { ReconciliationFlow } from "../components/reconciliation/ReconciliationFlow";
 import { BudgetEditor } from "../components/budget/BudgetEditor";
+import { CsvImportFlow } from "../components/csv/CsvImportFlow";
 
 const COMMON_CURRENCIES = [
   { symbol: "$", label: "Dollar ($)" },
@@ -31,6 +32,7 @@ export function MorePage() {
   const [showCustom, setShowCustom] = useState(false);
   const [showReconciliation, setShowReconciliation] = useState(false);
   const [showBudgetEditor, setShowBudgetEditor] = useState(false);
+  const [showCsvImport, setShowCsvImport] = useState(false);
 
   const handleCustomSubmit = async () => {
     const val = customCurrency.trim();
@@ -76,6 +78,17 @@ export function MorePage() {
     );
   }
 
+  if (showCsvImport) {
+    return (
+      <CsvImportFlow
+        onDone={() => {
+          setShowCsvImport(false);
+          refresh();
+        }}
+      />
+    );
+  }
+
   return (
     <div className="flex flex-col h-full">
       <div className="px-4 py-3 border-b border-gray-200 dark:border-gray-700">
@@ -105,6 +118,16 @@ export function MorePage() {
             <div>
               <div className="font-medium">Manage Budget</div>
               <div className="text-xs text-gray-500 dark:text-gray-400">Create or edit periodic budgets</div>
+            </div>
+            <span className="text-gray-400">&rsaquo;</span>
+          </button>
+          <button
+            onClick={() => setShowCsvImport(true)}
+            className="w-full px-4 py-3 bg-gray-50 dark:bg-gray-800 rounded-lg text-sm text-left text-gray-900 dark:text-gray-100 active:bg-gray-100 dark:active:bg-gray-700 min-h-[48px] flex items-center justify-between"
+          >
+            <div>
+              <div className="font-medium">Import CSV</div>
+              <div className="text-xs text-gray-500 dark:text-gray-400">Import transactions from bank CSV</div>
             </div>
             <span className="text-gray-400">&rsaquo;</span>
           </button>

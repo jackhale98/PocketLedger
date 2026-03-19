@@ -13,7 +13,7 @@ use hledger_parser::writer::{self, WriterConfig};
 
 /// Normalize a path that might be a file:// URI (iOS returns these from dialogs)
 /// into a regular filesystem PathBuf.
-fn normalize_path(path: &str) -> PathBuf {
+pub(crate) fn normalize_path(path: &str) -> PathBuf {
     if let Some(stripped) = path.strip_prefix("file://") {
         // Fast path: just strip the scheme and decode percent-encoding
         if let Ok(decoded) = urlencoding::decode(stripped) {

@@ -54,6 +54,8 @@ pub fn run() {
             commands::budget::save_budget,
             commands::budget::list_budget_accounts,
             commands::journal::switch_journal,
+            commands::csv_import::preview_csv_import,
+            commands::csv_import::import_csv,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -1,4 +1,5 @@
 pub mod ast;
+pub mod csv_rules;
 pub mod error;
 pub mod writer;
 

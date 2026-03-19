@@ -15,6 +15,8 @@ import type {
   BudgetSummaryPoint,
   BudgetInfo,
   BudgetEntry,
+  CsvPreview,
+  CsvImportResult,
 } from "./types";
 
 // ─── Journal ───
@@ -194,6 +196,27 @@ export async function listBudgetAccounts(): Promise<string[]> {
 
 export async function switchJournal(path: string): Promise<JournalSummary> {
   return invoke<JournalSummary>("switch_journal", { path });
+}
+
+// ─── CSV Import ───
+
+export async function previewCsvImport(
+  csvPath: string,
+  rulesPath: string
+): Promise<CsvPreview> {
+  return invoke<CsvPreview>("preview_csv_import", { csvPath, rulesPath });
+}
+
+export async function importCsv(
+  csvPath: string,
+  rulesPath: string,
+  selectedIndices: number[]
+): Promise<CsvImportResult> {
+  return invoke<CsvImportResult>("import_csv", {
+    csvPath,
+    rulesPath,
+    selectedIndices,
+  });
 }
 
 // ─── Reconciliation ───
