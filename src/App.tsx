@@ -13,11 +13,21 @@ function App() {
   const [activeTab, setActiveTab] = useState<TabId>("transactions");
   const { isLoaded, isLoading, error, summary, openJournal, clearError } =
     useJournalStore();
-  const { defaultCurrency, loadSettings } = useSettingsStore();
+  const { defaultCurrency, lastJournalPath, loaded: settingsLoaded, loadSettings, setLastJournalPath } = useSettingsStore();
 
   useEffect(() => {
     loadSettings();
   }, [loadSettings]);
+
+  // Auto-open last journal on startup
+  useEffect(() => {
+    if (settingsLoaded && !isLoaded && !isLoading && lastJournalPath) {
+      openJournal(lastJournalPath).catch(() => {
+        // File may have been moved/deleted - clear the saved path
+        setLastJournalPath("");
+      });
+    }
+  }, [settingsLoaded, isLoaded, isLoading, lastJournalPath, openJournal, setLastJournalPath]);
 
   const handleOpenJournal = async () => {
     try {
@@ -28,7 +38,9 @@ function App() {
       });
 
       if (selected) {
-        await openJournal(selected as string);
+        const path = selected as string;
+        await openJournal(path);
+        await setLastJournalPath(path);
       }
     } catch (err) {
       console.error("File picker error:", err);
@@ -54,6 +66,7 @@ function App() {
         }
         await api.createJournal(path, defaultCurrency);
         await openJournal(path);
+        await setLastJournalPath(path);
       }
     } catch (err) {
       console.error("Create journal error:", err);

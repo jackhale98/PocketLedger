@@ -26,7 +26,7 @@ const THEME_OPTIONS: { value: Theme; label: string }[] = [
 ];
 
 export function MorePage() {
-  const { defaultCurrency, setDefaultCurrency, theme, setTheme } = useSettingsStore();
+  const { defaultCurrency, setDefaultCurrency, theme, setTheme, setLastJournalPath } = useSettingsStore();
   const { refresh, summary, switchJournal } = useJournalStore();
   const [customCurrency, setCustomCurrency] = useState("");
   const [showCustom, setShowCustom] = useState(false);
@@ -49,7 +49,9 @@ export function MorePage() {
         multiple: false,
       });
       if (selected) {
-        await switchJournal(selected as string);
+        const path = selected as string;
+        await switchJournal(path);
+        await setLastJournalPath(path);
       }
     } catch (err) {
       console.error("Switch journal error:", err);
