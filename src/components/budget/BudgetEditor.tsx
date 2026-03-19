@@ -1,7 +1,8 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { Autocomplete } from "../common/Autocomplete";
 import { useSettingsStore } from "../../store/settingsStore";
 import * as api from "../../api/commands";
+import type { BudgetInfo } from "../../api/types";
 
 const PERIOD_OPTIONS = [
   { value: "monthly", label: "Monthly" },
@@ -18,6 +19,10 @@ interface BudgetLine {
 
 export function BudgetEditor({ onDone }: { onDone: () => void }) {
   const { defaultCurrency } = useSettingsStore();
+  const [existingBudgets, setExistingBudgets] = useState<BudgetInfo[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [editing, setEditing] = useState(false);
+
   const [period, setPeriod] = useState("monthly");
   const [lines, setLines] = useState<BudgetLine[]>([
     { account: "", amount: "", commodity: defaultCurrency },
@@ -25,6 +30,35 @@ export function BudgetEditor({ onDone }: { onDone: () => void }) {
   const [preview, setPreview] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    api.getBudgets().then((b) => {
+      setExistingBudgets(b);
+      setLoading(false);
+    });
+  }, []);
+
+  const loadFromExisting = (budget: BudgetInfo) => {
+    setPeriod(budget.period);
+    setLines(
+      budget.entries.map((e) => ({
+        account: e.account,
+        amount: e.amount,
+        commodity: e.commodity || defaultCurrency,
+      }))
+    );
+    setPreview(null);
+    setError(null);
+    setEditing(true);
+  };
+
+  const startNew = () => {
+    setPeriod("monthly");
+    setLines([{ account: "", amount: "", commodity: defaultCurrency }]);
+    setPreview(null);
+    setError(null);
+    setEditing(true);
+  };
 
   const updateLine = (index: number, field: keyof BudgetLine, value: string) => {
     setLines((prev) => {
@@ -94,16 +128,95 @@ export function BudgetEditor({ onDone }: { onDone: () => void }) {
     }
   };
 
+  const fmtAmt = (amount: string, commodity: string) => {
+    const q = parseFloat(amount);
+    const isSymbol = commodity.length === 1 && "$\u20AC\u00A3\u00A5\u20B9\u20BD\u20BF".includes(commodity);
+    const qs = q.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    return isSymbol ? `${commodity}${qs}` : `${qs} ${commodity}`;
+  };
+
+  // Existing budgets list view
+  if (!editing) {
+    return (
+      <div className="flex flex-col h-full">
+        <div className="flex items-center gap-2 px-4 py-3 border-b border-gray-200 dark:border-gray-700">
+          <button onClick={onDone} className="p-2 -ml-2 text-gray-600 dark:text-gray-300">
+            &larr;
+          </button>
+          <h2 className="text-base font-semibold text-gray-900 dark:text-gray-100">Manage Budget</h2>
+        </div>
+
+        <div className="flex-1 overflow-auto p-4 space-y-4">
+          {loading ? (
+            <div className="text-sm text-gray-500 text-center py-8">Loading...</div>
+          ) : existingBudgets.length === 0 ? (
+            <div className="text-center py-8 space-y-3">
+              <div className="text-sm text-gray-500 dark:text-gray-400">No budgets defined</div>
+              <p className="text-xs text-gray-400 dark:text-gray-500">
+                Create a budget to set spending targets for your accounts
+              </p>
+            </div>
+          ) : (
+            <>
+              <label className="text-sm font-medium text-gray-700 dark:text-gray-300 block">
+                Existing Budgets
+              </label>
+              {existingBudgets.map((budget, bi) => (
+                <div key={bi} className="bg-gray-50 dark:bg-gray-800 rounded-lg p-3 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-medium text-gray-900 dark:text-gray-100 capitalize">
+                      {budget.period}
+                    </span>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => loadFromExisting(budget)}
+                        className="text-xs text-blue-600 dark:text-blue-400 font-medium"
+                      >
+                        Copy &amp; Edit
+                      </button>
+                    </div>
+                  </div>
+                  <div className="divide-y divide-gray-200 dark:divide-gray-700">
+                    {budget.entries.map((entry, ei) => (
+                      <div key={ei} className="flex justify-between py-1.5">
+                        <span className="text-xs text-gray-600 dark:text-gray-400 truncate">
+                          {entry.account}
+                        </span>
+                        <span className="text-xs font-mono text-gray-900 dark:text-gray-100 shrink-0 ml-2">
+                          {fmtAmt(entry.amount, entry.commodity || defaultCurrency)}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </>
+          )}
+
+          <button
+            onClick={startNew}
+            className="w-full py-3 bg-blue-600 text-white rounded-lg text-sm font-medium"
+          >
+            Create New Budget
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // Edit/create form view
   return (
     <div className="flex flex-col h-full">
       <div className="flex items-center gap-2 px-4 py-3 border-b border-gray-200 dark:border-gray-700">
-        <button onClick={onDone} className="p-2 -ml-2 text-gray-600 dark:text-gray-300">
+        <button onClick={() => setEditing(false)} className="p-2 -ml-2 text-gray-600 dark:text-gray-300">
           &larr;
         </button>
-        <h2 className="text-base font-semibold text-gray-900 dark:text-gray-100">Manage Budget</h2>
+        <h2 className="text-base font-semibold text-gray-900 dark:text-gray-100">
+          {existingBudgets.length > 0 ? "New Budget" : "Create Budget"}
+        </h2>
       </div>
 
-      <div className="flex-1 overflow-auto p-4 space-y-4">
+      <div className="flex-1 overflow-y-auto overflow-x-hidden p-4 space-y-4">
         {/* Period selector */}
         <div>
           <label className="text-sm font-medium text-gray-700 dark:text-gray-300 block mb-2">

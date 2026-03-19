@@ -145,12 +145,13 @@ pub fn budget_vs_actual(
     date_from: Option<NaiveDate>,
     date_to: Option<NaiveDate>,
 ) -> Vec<BudgetRow> {
-    // Default date range: current month if not specified
-    let today = chrono::Local::now().date_naive();
+    // Default date range: full journal span if not specified
     let from = date_from.unwrap_or_else(|| {
-        NaiveDate::from_ymd_opt(today.year(), today.month(), 1).unwrap()
+        transactions.first().map(|t| t.date).unwrap_or_else(|| chrono::Local::now().date_naive())
     });
-    let to = date_to.unwrap_or(today);
+    let to = date_to.unwrap_or_else(|| {
+        transactions.last().map(|t| t.date).unwrap_or_else(|| chrono::Local::now().date_naive())
+    });
 
     // Compute actual spending per account
     let mut actuals: BTreeMap<String, MixedAmount> = BTreeMap::new();
