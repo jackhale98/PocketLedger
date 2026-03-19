@@ -1,7 +1,7 @@
 # iOS TestFlight Setup (without a Mac)
 
 This guide covers generating Apple signing credentials on Linux, configuring
-GitHub secrets, and letting the CI workflow build, sign, and upload hledger
+GitHub secrets, and letting the CI workflow build, sign, and upload PocketHLedger
 to TestFlight automatically.
 
 ## Prerequisites
@@ -46,8 +46,8 @@ openssl pkcs12 -export -legacy -out distribution.p12 \
 
 1. Go to https://developer.apple.com/account/resources/identifiers/add/bundleId
 2. Select **App IDs** → **App**
-3. Description: `hledger`
-4. Bundle ID (Explicit): `com.hledger.app`
+3. Description: `PocketHLedger`
+4. Bundle ID (Explicit): `com.pockethledger.app`
    - Must match the `identifier` field in `src-tauri/tauri.conf.json`
 5. Click **Register**
 
@@ -57,7 +57,7 @@ openssl pkcs12 -export -legacy -out distribution.p12 \
 2. Select **App Store Connect** (this covers TestFlight)
 3. Select the App ID you just created
 4. Select the distribution certificate from Step 2
-5. Name it `hledger Distribution`
+5. Name it `PocketHLedger Distribution`
 6. Download the `.mobileprovision` file
 
 ## Step 6: Add GitHub Secrets
@@ -83,9 +83,9 @@ base64 -w 0 profile.mobileprovision  # → APPLE_PROVISIONING_PROFILE
 
 1. Go to https://appstoreconnect.apple.com → My Apps → "+"
 2. New App → iOS
-3. Name: `hledger`
+3. Name: `PocketHLedger`
 4. Bundle ID: select the one from Step 4
-5. SKU: `hledger`
+5. SKU: `pockethledger`
 6. Save — this creates the TestFlight landing page
 
 ## Step 8: Create an App Store Connect API Key
@@ -122,7 +122,7 @@ Or trigger manually from the Actions tab using **workflow_dispatch**.
 
 1. Check the GitHub Actions run — the "Upload to TestFlight" step should show
    `UPLOAD SUCCEEDED`
-2. Go to App Store Connect → My Apps → hledger → TestFlight
+2. Go to App Store Connect → My Apps → PocketHLedger → TestFlight
 3. The build appears after Apple processes it (usually 15-30 minutes)
 4. Apple may email about export compliance — answer "No" (no custom encryption)
 5. Add internal/external testers — they get a TestFlight notification
@@ -133,7 +133,7 @@ Or trigger manually from the Actions tab using **workflow_dispatch**.
 |---|---|---|
 | `MAC verification failed during PKCS12 import` | .p12 without `-legacy` flag | Recreate with `openssl pkcs12 -export -legacy ...` |
 | `future Xcode project file format (77)` | Xcode < 16.3 | Use `runs-on: macos-15` |
-| `No profiles for 'com.hledger.app' were found` | Bundle ID mismatch | Verify bundle ID matches `tauri.conf.json` `identifier` |
+| `No profiles for 'com.pockethledger.app' were found` | Bundle ID mismatch | Verify bundle ID matches `tauri.conf.json` `identifier` |
 | `Signing requires a development team` | Missing env var on init | Set `APPLE_DEVELOPMENT_TEAM` on both init and build steps |
 | `Library does not include required runtime symbols` | Missing mobile entry point | Ensure `#[cfg_attr(mobile, tauri::mobile_entry_point)]` on `run()` |
 
