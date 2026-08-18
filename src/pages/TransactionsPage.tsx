@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect, useRef, useCallback } from "react";
 import { useJournalStore } from "../store/journalStore";
 import { useSettingsStore } from "../store/settingsStore";
 import { TransactionList } from "../components/transactions/TransactionList";
@@ -6,6 +6,13 @@ import { TransactionDetail } from "../components/transactions/TransactionDetail"
 import { TransactionForm } from "../components/transactions/TransactionForm";
 import { DateFilter } from "../components/common/DateFilter";
 import * as api from "../api/commands";
+import type { TransactionSummary } from "../api/types";
+
+/** Detects hledger query syntax (acct:food, amt:>100, not:rent, ...) */
+const QUERY_PREFIX_RE =
+  /(^|\s)(acct|desc|payee|code|note|tag|cur|amt|status|date|real|depth|not):/;
+
+const PAGE_SIZE = 100;
 
 export function TransactionsPage() {
   const { transactions, addTransaction, refresh } = useJournalStore();
@@ -18,11 +25,53 @@ export function TransactionsPage() {
   const [dateTo, setDateTo] = useState("");
   const [sortNewestFirst, setSortNewestFirst] = useState(true);
   const [showFilters, setShowFilters] = useState(false);
+  const [advancedSearch, setAdvancedSearch] = useState(false);
+  const [searchResults, setSearchResults] = useState<TransactionSummary[] | null>(null);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const [searching, setSearching] = useState(false);
+  const [hintDismissed, setHintDismissed] = useState(false);
+  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
+  const searchSeq = useRef(0);
+  const observerRef = useRef<IntersectionObserver | null>(null);
+
+  const isBackendQuery =
+    (advancedSearch || QUERY_PREFIX_RE.test(searchQuery)) && !!searchQuery.trim();
+
+  // Backend query search, debounced (~250ms), with a seq guard against races.
+  useEffect(() => {
+    const seq = ++searchSeq.current;
+    if (!isBackendQuery) {
+      setSearchResults(null);
+      setSearchError(null);
+      setSearching(false);
+      return;
+    }
+    setSearching(true);
+    const timer = setTimeout(async () => {
+      try {
+        const results = await api.searchTransactions(searchQuery);
+        if (seq !== searchSeq.current) return;
+        setSearchResults(results);
+        setSearchError(null);
+      } catch (err) {
+        if (seq !== searchSeq.current) return;
+        // Keep the previous results visible; just surface the error.
+        setSearchError(err instanceof Error ? err.message : String(err));
+      } finally {
+        if (seq === searchSeq.current) setSearching(false);
+      }
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [searchQuery, isBackendQuery, transactions]);
 
   const filteredTransactions = useMemo(() => {
-    let result = [...transactions];
+    let result =
+      isBackendQuery && searchResults !== null
+        ? [...searchResults]
+        : [...transactions];
 
-    if (searchQuery.trim()) {
+    // Plain-text substring filter only when not in backend query mode.
+    if (!isBackendQuery && searchQuery.trim()) {
       const q = searchQuery.toLowerCase();
       result = result.filter(
         (txn) =>
@@ -36,7 +85,34 @@ export function TransactionsPage() {
     if (sortNewestFirst) result.reverse();
 
     return result;
-  }, [transactions, searchQuery, dateFrom, dateTo, sortNewestFirst]);
+  }, [transactions, searchResults, isBackendQuery, searchQuery, dateFrom, dateTo, sortNewestFirst]);
+
+  // Reset the render window whenever the filtered set changes.
+  useEffect(() => {
+    setVisibleCount(PAGE_SIZE);
+  }, [filteredTransactions]);
+
+  // Sentinel at the list bottom grows the window when it scrolls into view.
+  const sentinelRef = useCallback((node: HTMLDivElement | null) => {
+    observerRef.current?.disconnect();
+    observerRef.current = null;
+    if (node) {
+      const observer = new IntersectionObserver((entries) => {
+        if (entries.some((e) => e.isIntersecting)) {
+          setVisibleCount((c) => c + PAGE_SIZE);
+        }
+      });
+      observer.observe(node);
+      observerRef.current = observer;
+    }
+  }, []);
+
+  useEffect(() => () => observerRef.current?.disconnect(), []);
+
+  const visibleTransactions =
+    filteredTransactions.length > visibleCount
+      ? filteredTransactions.slice(0, visibleCount)
+      : filteredTransactions;
 
   const selectedTransaction =
     selectedIndex !== null
@@ -114,6 +190,16 @@ export function TransactionsPage() {
               {sortNewestFirst ? "New \u2193" : "Old \u2191"}
             </button>
             <button
+              onClick={() => setAdvancedSearch(!advancedSearch)}
+              className={`text-xs font-medium px-2 py-1 rounded ${
+                advancedSearch
+                  ? "bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400"
+                  : "text-gray-500 dark:text-gray-400"
+              }`}
+            >
+              Query
+            </button>
+            <button
               onClick={() => setShowFilters(!showFilters)}
               className={`text-xs font-medium px-2 py-1 rounded ${
                 hasActiveFilters
@@ -130,9 +216,40 @@ export function TransactionsPage() {
           type="text"
           value={searchQuery}
           onChange={(e) => setSearchQuery(e.target.value)}
-          placeholder="Search transactions..."
+          placeholder={
+            advancedSearch
+              ? "Query: acct:food amt:>100 not:rent..."
+              : "Search transactions..."
+          }
           className="w-full px-3 py-2 bg-gray-100 dark:bg-gray-800 rounded-lg text-sm text-gray-900 dark:text-gray-100 placeholder-gray-500 dark:placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
         />
+
+        {searchError && (
+          <div className="text-xs text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/30 px-3 py-2 rounded-lg break-words">
+            {searchError}
+          </div>
+        )}
+
+        {(advancedSearch || isBackendQuery) && !hintDismissed && (
+          <div className="flex items-start justify-between gap-2 text-xs text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-800/60 px-3 py-2 rounded-lg">
+            <span className="min-w-0 break-words">
+              Examples: <code className="font-mono">acct:food</code>{" "}
+              <code className="font-mono">amt:&gt;100</code>{" "}
+              <code className="font-mono">date:2026-01..</code>{" "}
+              <code className="font-mono">cur:EUR</code>{" "}
+              <code className="font-mono">status:*</code>{" "}
+              <code className="font-mono">tag:name=value</code>{" "}
+              <code className="font-mono">not:rent</code>
+            </span>
+            <button
+              onClick={() => setHintDismissed(true)}
+              className="shrink-0 text-gray-400 dark:text-gray-500"
+              aria-label="Dismiss hint"
+            >
+              &times;
+            </button>
+          </div>
+        )}
 
         {showFilters && (
           <DateFilter
@@ -144,13 +261,23 @@ export function TransactionsPage() {
 
         {(searchQuery || hasActiveFilters) && (
           <div className="text-xs text-gray-500 dark:text-gray-400">
-            {filteredTransactions.length} of {transactions.length} transactions
+            {searching
+              ? "Searching..."
+              : `${filteredTransactions.length} of ${transactions.length} transactions`}
           </div>
         )}
       </div>
 
       <div className="flex-1 overflow-auto">
-        <TransactionList transactions={filteredTransactions} onSelect={setSelectedIndex} />
+        <TransactionList transactions={visibleTransactions} onSelect={setSelectedIndex} />
+        {filteredTransactions.length > visibleCount && (
+          <div
+            ref={sentinelRef}
+            className="py-3 text-center text-xs text-gray-400 dark:text-gray-500"
+          >
+            Showing {visibleTransactions.length} of {filteredTransactions.length}
+          </div>
+        )}
       </div>
 
       <button

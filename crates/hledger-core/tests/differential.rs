@@ -260,6 +260,105 @@ fn net_worth_matches_hledger_valued_balance() {
     );
 }
 
+/// Multi-period balance report vs `hledger bal -M --flat`: every cell of
+/// every fixture must agree.
+#[test]
+fn monthly_periodic_report_matches_hledger() {
+    if !hledger_available() {
+        eprintln!("hledger CLI not found — skipping differential test");
+        return;
+    }
+
+    for file in all_fixtures() {
+        // hledger side: "account","2024-01","2024-02",... rows.
+        let output = Command::new("hledger")
+            .args(["-f", &file.to_string_lossy(), "bal", "-M", "--flat", "-N", "-O", "csv"])
+            .output()
+            .expect("run hledger bal -M");
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let text = String::from_utf8_lossy(&output.stdout);
+        let mut lines = text.lines();
+        let header = lines.next().unwrap_or_default();
+        let periods: Vec<String> = header
+            .trim_start_matches('"')
+            .trim_end_matches('"')
+            .split("\",\"")
+            .skip(1)
+            .map(|s| s.to_string())
+            .collect();
+
+        let mut theirs: BTreeMap<String, Vec<BTreeMap<String, Decimal>>> = BTreeMap::new();
+        for line in lines {
+            let Some(stripped) = line.trim().strip_prefix('"').and_then(|l| l.strip_suffix('"'))
+            else {
+                continue;
+            };
+            let cells: Vec<&str> = stripped.split("\",\"").collect();
+            if cells.len() != periods.len() + 1 {
+                continue;
+            }
+            let mut row = Vec::new();
+            for cell in &cells[1..] {
+                let mut amounts = BTreeMap::new();
+                for part in cell.split(['\n']).flat_map(|p| p.split(", ")) {
+                    let part = part.trim();
+                    if part.is_empty() || part == "0" {
+                        continue;
+                    }
+                    let amt = hledger_parser::parse_amount(part)
+                        .unwrap_or_else(|e| panic!("bad amount '{}': {}", part, e));
+                    *amounts.entry(amt.commodity).or_insert(Decimal::ZERO) += amt.quantity;
+                }
+                row.push(amounts);
+            }
+            theirs.insert(cells[0].to_string(), row);
+        }
+
+        // Engine side.
+        let text = std::fs::read_to_string(&file).unwrap();
+        let journal = hledger_parser::parse(&text).unwrap();
+        let txns = hledger_core::balance::resolve_transactions(&journal).unwrap();
+        let report = hledger_core::periodic_report::periodic_balance_report(
+            &txns,
+            hledger_core::periodic_report::ReportInterval::Monthly,
+            hledger_core::periodic_report::AccumulationMode::Periodic,
+            None,
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(
+            report.periods, periods,
+            "{}: period columns differ",
+            file.display()
+        );
+
+        for (account, their_row) in &theirs {
+            let our_row = report
+                .rows
+                .iter()
+                .find(|r| &r.account == account)
+                .unwrap_or_else(|| {
+                    panic!("{}: engine missing account {}", file.display(), account)
+                });
+            for (i, their_cell) in their_row.iter().enumerate() {
+                let mut ours: BTreeMap<String, Decimal> = BTreeMap::new();
+                for e in &our_row.amounts[i] {
+                    ours.insert(e.commodity.clone(), e.quantity.parse().unwrap());
+                }
+                assert_eq!(
+                    &ours, their_cell,
+                    "{}: {} period {} differs",
+                    file.display(),
+                    account,
+                    report.periods[i]
+                );
+            }
+        }
+    }
+}
+
 /// Writing a transaction back must produce text hledger itself accepts.
 #[test]
 fn rewritten_transactions_stay_hledger_valid() {

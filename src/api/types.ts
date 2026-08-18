@@ -50,6 +50,10 @@ export interface ReportParams {
   dateTo?: string | null;
   accountFilter?: string | null;
   targetCommodity?: string | null;
+  /** hledger query expression (acct:, amt:, date:, cur:, status:, tag:, not:, ...) */
+  query?: string | null;
+  /** Include forecast transactions generated from periodic rules */
+  forecast?: boolean | null;
 }
 
 /** A row in a balance report */
@@ -63,6 +67,31 @@ export interface BalanceRow {
 export interface AmountEntry {
   commodity: string;
   quantity: string;
+}
+
+/** Interval for a multi-period balance report */
+export type BalanceInterval = "weekly" | "monthly" | "quarterly" | "yearly";
+
+/** Accumulation mode for a multi-period balance report */
+export type BalanceAccumulationMode = "periodic" | "cumulative" | "historical";
+
+/** A row in a multi-period balance report */
+export interface PeriodicBalanceRow {
+  account: string;
+  depth: number;
+  /** One cell per period, in period order; empty array = zero */
+  amounts: AmountEntry[][];
+  /** Row total (periodic/cumulative: sum of changes; historical: final balance) */
+  total: AmountEntry[];
+}
+
+/** Multi-period balance report */
+export interface PeriodicBalanceReport {
+  /** Period labels, e.g. "2024-01" / "2024-Q1" / "2024" / "2024-W05" */
+  periods: string[];
+  rows: PeriodicBalanceRow[];
+  /** Column totals across all rows, one per period */
+  totals: AmountEntry[][];
 }
 
 /** A row in a register report */

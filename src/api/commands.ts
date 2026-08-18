@@ -17,6 +17,9 @@ import type {
   BudgetEntry,
   CsvPreview,
   CsvImportResult,
+  BalanceInterval,
+  BalanceAccumulationMode,
+  PeriodicBalanceReport,
 } from "./types";
 
 // ─── Journal ───
@@ -72,6 +75,15 @@ export async function getTransaction(
   index: number
 ): Promise<TransactionSummary> {
   return invoke<TransactionSummary>("get_transaction", { index });
+}
+
+/** Search transactions with the hledger query language (acct:, desc:, amt:,
+ *  date:, cur:, status:, tag:, not:, plus bare terms). Rejects with a
+ *  user-readable message on invalid query syntax. */
+export async function searchTransactions(
+  query: string
+): Promise<TransactionSummary[]> {
+  return invoke<TransactionSummary[]>("search_transactions", { query });
 }
 
 // ─── Autocomplete ───
@@ -163,6 +175,20 @@ export async function listAccountsWithBalances(
 
 export async function listCommodities(): Promise<string[]> {
   return invoke<string[]>("list_commodities");
+}
+
+export async function periodicBalance(
+  interval: BalanceInterval,
+  mode: BalanceAccumulationMode | null,
+  depth: number | null,
+  params: ReportParams = {}
+): Promise<PeriodicBalanceReport> {
+  return invoke<PeriodicBalanceReport>("periodic_balance", {
+    interval,
+    mode,
+    depth,
+    params,
+  });
 }
 
 // ─── Budget ───

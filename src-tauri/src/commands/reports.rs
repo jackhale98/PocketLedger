@@ -12,6 +12,38 @@ pub struct ReportParams {
     pub date_to: Option<String>,
     pub account_filter: Option<String>,
     pub target_commodity: Option<String>,
+    /// hledger query string filtering postings (acct:, desc:, amt:, ...).
+    #[serde(default)]
+    pub query: Option<String>,
+    /// Extend reports with transactions materialized from periodic rules.
+    #[serde(default)]
+    pub forecast: Option<bool>,
+}
+
+/// Parse the params' query string, erroring loudly on bad syntax.
+pub fn parse_query_param(params: &ReportParams) -> Result<Option<hledger_core::query::Query>, String> {
+    match params.query.as_deref() {
+        Some(q) if !q.trim().is_empty() => {
+            let parsed = hledger_core::query::parse_query(q)?;
+            Ok(Some(parsed))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// The transaction set a report should run over: real transactions, plus
+/// forecast transactions up to date_to (or six months past the last real
+/// transaction) when requested.
+pub fn transactions_for(
+    loaded: &super::journal::LoadedJournal,
+    params: &ReportParams,
+) -> Vec<hledger_core::balance::ResolvedTransaction> {
+    let real: Vec<_> = loaded.ledger.transactions().cloned().collect();
+    if params.forecast.unwrap_or(false) {
+        hledger_core::forecast::with_forecast(&loaded.journal, &real, parse_date(&params.date_to))
+    } else {
+        real
+    }
 }
 
 pub fn parse_date(s: &Option<String>) -> Option<chrono::NaiveDate> {
@@ -67,10 +99,64 @@ pub async fn register_report(
     let app_state = state.lock().map_err(|e| e.to_string())?;
     let loaded = app_state.journal.as_ref().ok_or("No journal loaded")?;
 
-    let txns: Vec<_> = loaded.ledger.transactions().cloned().collect();
+    let query = parse_query_param(&params)?;
+    let mut txns = transactions_for(loaded, &params);
+    if let Some(q) = &query {
+        // The register shows postings, so the query filters posting-level.
+        txns = txns
+            .iter()
+            .map(|txn| {
+                let mut t = txn.clone();
+                t.postings.retain(|p| q.matches_posting(txn, p));
+                t
+            })
+            .filter(|t| !t.postings.is_empty())
+            .collect();
+    }
     Ok(reports::register_report(
         &txns,
         &account,
+        parse_date(&params.date_from),
+        parse_date(&params.date_to),
+    ))
+}
+
+#[tauri::command]
+pub async fn periodic_balance(
+    interval: String,
+    mode: Option<String>,
+    depth: Option<usize>,
+    params: ReportParams,
+    state: State<'_, Mutex<crate::AppState>>,
+) -> Result<hledger_core::periodic_report::PeriodicBalanceReport, String> {
+    use hledger_core::periodic_report::{AccumulationMode, ReportInterval};
+
+    let app_state = state.lock().map_err(|e| e.to_string())?;
+    let loaded = app_state.journal.as_ref().ok_or("No journal loaded")?;
+
+    let interval = match interval.as_str() {
+        "weekly" | "W" => ReportInterval::Weekly,
+        "monthly" | "M" => ReportInterval::Monthly,
+        "quarterly" | "Q" => ReportInterval::Quarterly,
+        "yearly" | "Y" => ReportInterval::Yearly,
+        other => return Err(format!("unknown interval '{}'", other)),
+    };
+    let mode = match mode.as_deref() {
+        None | Some("periodic") => AccumulationMode::Periodic,
+        Some("cumulative") => AccumulationMode::Cumulative,
+        Some("historical") => AccumulationMode::Historical,
+        Some(other) => return Err(format!("unknown accumulation mode '{}'", other)),
+    };
+
+    let query = parse_query_param(&params)?;
+    let txns = transactions_for(loaded, &params);
+
+    Ok(hledger_core::periodic_report::periodic_balance_report(
+        &txns,
+        interval,
+        mode,
+        depth,
+        query.as_ref(),
         parse_date(&params.date_from),
         parse_date(&params.date_to),
     ))
@@ -136,7 +222,7 @@ pub async fn net_worth_series(
     let loaded = app_state.journal.as_ref().ok_or("No journal loaded")?;
 
     let commodity = resolve_target_commodity(loaded, params.target_commodity.as_deref());
-    let txns: Vec<_> = loaded.ledger.transactions().cloned().collect();
+    let txns = transactions_for(loaded, &params);
     Ok(reports::net_worth_series(
         &txns,
         loaded.ledger.classifier(),
@@ -177,7 +263,7 @@ pub async fn income_expense_chart(
     let loaded = app_state.journal.as_ref().ok_or("No journal loaded")?;
 
     let commodity = resolve_target_commodity(loaded, params.target_commodity.as_deref());
-    let txns: Vec<_> = loaded.ledger.transactions().cloned().collect();
+    let txns = transactions_for(loaded, &params);
     Ok(reports::income_expense_series(
         &txns,
         loaded.ledger.classifier(),

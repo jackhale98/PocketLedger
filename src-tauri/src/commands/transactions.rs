@@ -100,6 +100,36 @@ pub async fn list_transactions(
         .collect())
 }
 
+/// Search transactions with the hledger query language (acct:, desc:, amt:,
+/// date:, cur:, status:, tag:, not:, plus bare account/description terms).
+#[tauri::command]
+pub async fn search_transactions(
+    query: String,
+    state: State<'_, Mutex<crate::AppState>>,
+) -> Result<Vec<TransactionSummary>, String> {
+    let app_state = state.lock().map_err(|e| e.to_string())?;
+    let loaded = app_state
+        .journal
+        .as_ref()
+        .ok_or("No journal loaded")?;
+
+    let parsed = hledger_core::query::parse_query(&query)?;
+
+    Ok(loaded
+        .ledger
+        .transactions()
+        .filter(|txn| parsed.matches_transaction(txn))
+        .map(|txn| {
+            let ast_index = txn
+                .postings
+                .first()
+                .map(|p| p.transaction_index)
+                .unwrap_or(0);
+            summarize(loaded, txn, ast_index)
+        })
+        .collect())
+}
+
 #[tauri::command]
 pub async fn get_transaction(
     index: usize,

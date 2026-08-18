@@ -11,9 +11,10 @@ import type {
   TimeSeriesPoint, IncomeExpensePoint, PieSlice,
   FinancialStatement, BalanceRow, RegisterRow, ReportParams,
   BudgetRow, BudgetSummaryPoint,
+  AmountEntry, BalanceInterval, BalanceAccumulationMode, PeriodicBalanceReport,
 } from "../api/types";
 
-type ReportTab = "overview" | "register" | "budget";
+type ReportTab = "overview" | "table" | "register" | "budget";
 type DrillView = "balance-sheet" | "income-statement" | "cash-flow" | null;
 
 const COLORS = ["#3b82f6","#ef4444","#22c55e","#f59e0b","#8b5cf6","#ec4899","#06b6d4","#84cc16","#f97316","#6366f1"];
@@ -132,6 +133,184 @@ function RegisterView({ accountList, dateFrom, dateTo, currency }: { accountList
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+function fmtCompactEntry(a: AmountEntry): string {
+  const q = parseFloat(a.quantity);
+  const qs = q.toLocaleString(undefined, { maximumFractionDigits: 2 });
+  return a.commodity && a.commodity.length === 1 ? `${a.commodity}${qs}` : a.commodity ? `${qs} ${a.commodity}` : qs;
+}
+
+function BalanceCell({ amounts, bold }: { amounts: AmountEntry[]; bold?: boolean }) {
+  return (
+    <td className={`px-2 py-1.5 text-right font-mono whitespace-nowrap align-top ${bold ? "font-semibold" : ""}`} style={{ fontVariantNumeric: "tabular-nums" }}>
+      {amounts.length === 0 ? (
+        <span className="text-gray-300 dark:text-gray-600">&middot;</span>
+      ) : (
+        amounts.map((a, i) => (
+          <div key={i} className={parseFloat(a.quantity) < 0 ? "text-red-500" : "text-gray-800 dark:text-gray-200"}>
+            {fmtCompactEntry(a)}
+          </div>
+        ))
+      )}
+    </td>
+  );
+}
+
+const TABLE_INTERVALS: [BalanceInterval, string][] = [
+  ["weekly", "W"], ["monthly", "M"], ["quarterly", "Q"], ["yearly", "Y"],
+];
+const TABLE_DEPTHS: (number | null)[] = [null, 1, 2, 3, 4];
+
+function TableView({ dateFrom, dateTo }: { dateFrom: string; dateTo: string }) {
+  const [interval, setInterval_] = useState<BalanceInterval>("monthly");
+  const [mode, setMode] = useState<BalanceAccumulationMode>("periodic");
+  const [depth, setDepth] = useState<number | null>(null);
+  const [query, setQuery] = useState("");
+  const [debouncedQuery, setDebouncedQuery] = useState("");
+  const [forecast, setForecast] = useState(false);
+  const [report, setReport] = useState<PeriodicBalanceReport | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const loadSeq = useRef(0);
+
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedQuery(query), 300);
+    return () => clearTimeout(t);
+  }, [query]);
+
+  const load = useCallback(async () => {
+    const seq = ++loadSeq.current;
+    setLoading(true);
+    try {
+      const data = await api.periodicBalance(interval, mode, depth, {
+        dateFrom: dateFrom || null,
+        dateTo: dateTo || null,
+        query: debouncedQuery.trim() || null,
+        forecast: forecast || null,
+      });
+      if (seq !== loadSeq.current) return;
+      setReport(data);
+      setError(null);
+    } catch (err) {
+      if (seq !== loadSeq.current) return;
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      if (seq === loadSeq.current) setLoading(false);
+    }
+  }, [interval, mode, depth, debouncedQuery, forecast, dateFrom, dateTo]);
+
+  useEffect(() => { load(); }, [load]);
+
+  // Grand total (Total column footer): sum of row totals per commodity.
+  const grandTotal: AmountEntry[] = (() => {
+    if (!report) return [];
+    const byCommodity = new Map<string, number>();
+    for (const row of report.rows) {
+      for (const a of row.total) {
+        byCommodity.set(a.commodity, (byCommodity.get(a.commodity) ?? 0) + parseFloat(a.quantity));
+      }
+    }
+    return [...byCommodity.entries()]
+      .filter(([, q]) => q !== 0)
+      .map(([commodity, q]) => ({ commodity, quantity: q.toString() }));
+  })();
+
+  const stickyCol = "sticky left-0 bg-white dark:bg-gray-900";
+
+  return (
+    <div className="space-y-3">
+      {/* Interval + mode */}
+      <div className="flex gap-2">
+        <div className="flex rounded-lg overflow-hidden border border-gray-300 dark:border-gray-600">
+          {TABLE_INTERVALS.map(([val, label]) => (
+            <button key={val} onClick={() => setInterval_(val)}
+              className={`px-3 py-2 text-xs font-medium ${val === interval ? "bg-blue-600 text-white" : "bg-white dark:bg-gray-800 text-gray-600 dark:text-gray-400"}`}>
+              {label}
+            </button>
+          ))}
+        </div>
+        <select value={mode} onChange={(e) => setMode(e.target.value as BalanceAccumulationMode)}
+          className="flex-1 px-3 py-2 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg text-sm text-gray-900 dark:text-gray-100">
+          <option value="periodic">Periodic</option>
+          <option value="cumulative">Cumulative</option>
+          <option value="historical">Historical</option>
+        </select>
+      </div>
+
+      {/* Depth + forecast */}
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-1">
+          <span className="text-xs text-gray-500 dark:text-gray-400 mr-1">Depth</span>
+          {TABLE_DEPTHS.map((d) => (
+            <button key={d ?? "all"} onClick={() => setDepth(d)}
+              className={`px-2.5 py-1.5 text-xs font-medium rounded ${d === depth ? "bg-blue-600 text-white" : "bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400"}`}>
+              {d === null ? "All" : d}
+            </button>
+          ))}
+        </div>
+        <label className="flex items-center gap-1.5 text-xs text-gray-600 dark:text-gray-400 shrink-0">
+          <input type="checkbox" checked={forecast} onChange={(e) => setForecast(e.target.checked)} className="accent-blue-600" />
+          Forecast
+        </label>
+      </div>
+
+      {/* Query */}
+      <input
+        type="text"
+        value={query}
+        onChange={(e) => setQuery(e.target.value)}
+        placeholder="Query: acct:expenses cur:EUR not:rent..."
+        className="w-full px-3 py-2 bg-gray-100 dark:bg-gray-800 rounded-lg text-sm text-gray-900 dark:text-gray-100 placeholder-gray-500 dark:placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
+      />
+
+      {error && (
+        <div className="text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/30 px-3 py-2 rounded-lg break-words">{error}</div>
+      )}
+
+      {forecast && !error && (
+        <p className="text-xs text-gray-400 dark:text-gray-500">includes forecast from periodic transactions</p>
+      )}
+
+      {loading ? (
+        <div className="text-sm text-gray-500 text-center py-8">Loading...</div>
+      ) : !error && report && report.rows.length === 0 ? (
+        <div className="text-sm text-gray-500 text-center py-8">No data for this period</div>
+      ) : !error && report ? (
+        <div className="overflow-x-auto rounded-lg border border-gray-200 dark:border-gray-700">
+          <table className="text-xs w-full min-w-max border-collapse">
+            <thead>
+              <tr className="border-b border-gray-200 dark:border-gray-700">
+                <th className={`${stickyCol} px-2 py-1.5 text-left font-medium text-gray-500 dark:text-gray-400`}>Account</th>
+                {report.periods.map((p) => (
+                  <th key={p} className="px-2 py-1.5 text-right font-medium text-gray-500 dark:text-gray-400 whitespace-nowrap">{p}</th>
+                ))}
+                <th className="px-2 py-1.5 text-right font-medium text-gray-500 dark:text-gray-400">Total</th>
+              </tr>
+            </thead>
+            <tbody>
+              {report.rows.map((row) => (
+                <tr key={row.account} className="border-b border-gray-100 dark:border-gray-800">
+                  <td className={`${stickyCol} px-2 py-1.5 font-mono text-[11px] text-gray-800 dark:text-gray-200 max-w-[160px] truncate`} title={row.account}>
+                    {row.account}
+                  </td>
+                  {row.amounts.map((cell, i) => <BalanceCell key={i} amounts={cell} />)}
+                  <BalanceCell amounts={row.total} bold />
+                </tr>
+              ))}
+            </tbody>
+            <tfoot>
+              <tr className="border-t-2 border-gray-300 dark:border-gray-600">
+                <td className={`${stickyCol} px-2 py-1.5 font-semibold text-gray-900 dark:text-gray-100`}>Total</td>
+                {report.totals.map((cell, i) => <BalanceCell key={i} amounts={cell} bold />)}
+                <BalanceCell amounts={grandTotal} bold />
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -329,6 +508,7 @@ export function ReportsPage() {
   const [pageError, setPageError] = useState<string | null>(null);
   const [drillHint, setDrillHint] = useState<string | null>(null);
   const [valuation, setValuation] = useState<api.ValuationInfo | null>(null);
+  const [forecast, setForecast] = useState(false);
   const dashboardSeq = useRef(0);
   const seriesSeq = useRef(0);
   const drillSeq = useRef(0);
@@ -344,10 +524,11 @@ export function ReportsPage() {
     setLoading(true);
     setPageError(null);
     const params = makeParams();
+    const chartParams: ReportParams = forecast ? { ...params, forecast: true } : params;
     try {
       const [nw, ie, eb, accounts, vi] = await Promise.all([
-        api.netWorthSeries(params),
-        api.incomeExpenseChart(params),
+        api.netWorthSeries(chartParams),
+        api.incomeExpenseChart(chartParams),
         api.expenseBreakdownChart(params, null),
         api.listAccountsWithBalances(),
         api.valuationInfo(params),
@@ -367,7 +548,7 @@ export function ReportsPage() {
     } finally {
       if (seq === dashboardSeq.current) setLoading(false);
     }
-  }, [makeParams]);
+  }, [makeParams, forecast]);
 
   useEffect(() => { loadDashboard(); }, [loadDashboard]);
 
@@ -451,7 +632,7 @@ export function ReportsPage() {
       <div className="px-4 py-3 border-b border-gray-200 dark:border-gray-700 space-y-2">
         <h1 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Reports</h1>
         <div className="flex gap-1">
-          {([["overview", "Overview"], ["register", "Register"], ["budget", "Budget"]] as [ReportTab, string][]).map(([t, label]) => (
+          {([["overview", "Overview"], ["table", "Table"], ["register", "Register"], ["budget", "Budget"]] as [ReportTab, string][]).map(([t, label]) => (
             <button key={t} onClick={() => setTab(t)}
               className={`flex-1 py-2 text-sm font-medium rounded-lg ${t === tab ? "bg-blue-600 text-white" : "bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400"}`}>
               {label}
@@ -459,6 +640,12 @@ export function ReportsPage() {
           ))}
         </div>
         <DateFilter dateFrom={dateFrom} dateTo={dateTo} onChange={(f, t) => { setDateFrom(f); setDateTo(t); }} />
+        {tab === "overview" && (
+          <label className="flex items-center gap-1.5 text-xs text-gray-600 dark:text-gray-400">
+            <input type="checkbox" checked={forecast} onChange={(e) => setForecast(e.target.checked)} className="accent-blue-600" />
+            Forecast
+          </label>
+        )}
       </div>
 
       <div className="flex-1 overflow-auto">
@@ -468,7 +655,7 @@ export function ReportsPage() {
             <button onClick={() => setPageError(null)} className="text-xs text-red-500 ml-2 shrink-0">Dismiss</button>
           </div>
         )}
-        {valuation && valuation.unconvertible.length > 0 && tab !== "budget" && tab !== "register" && (
+        {valuation && valuation.unconvertible.length > 0 && tab === "overview" && (
           <div className="mx-4 mt-3 text-xs text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 px-3 py-2 rounded-lg">
             Charts are valued in {valuation.targetCommodity || "the journal's main currency"}. No price is known for{" "}
             {valuation.unconvertible.join(", ")} — holdings in{" "}
@@ -478,6 +665,8 @@ export function ReportsPage() {
         )}
         {tab === "budget" ? (
           <div className="p-4"><BudgetView dateFrom={dateFrom} dateTo={dateTo} currency={defaultCurrency} /></div>
+        ) : tab === "table" ? (
+          <div className="p-4"><TableView dateFrom={dateFrom} dateTo={dateTo} /></div>
         ) : tab === "register" ? (
           <div className="p-4"><RegisterView accountList={accountList} dateFrom={dateFrom} dateTo={dateTo} currency={defaultCurrency} /></div>
         ) : loading ? (
@@ -507,6 +696,7 @@ export function ReportsPage() {
                     </LineChart>
                   </ResponsiveContainer>
                 </div>
+                {forecast && <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">includes forecast from periodic transactions</p>}
               </div>
             )}
 
@@ -528,6 +718,7 @@ export function ReportsPage() {
                     </BarChart>
                   </ResponsiveContainer>
                 </div>
+                {forecast && <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">includes forecast from periodic transactions</p>}
               </div>
             )}
 
