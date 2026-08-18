@@ -185,9 +185,18 @@ export async function budgetSummaryChart(
 
 export async function saveBudget(
   entries: BudgetEntry[],
-  period: string
+  period: string,
+  replaceLine?: number
 ): Promise<JournalSummary> {
-  return invoke<JournalSummary>("save_budget", { entries, period });
+  return invoke<JournalSummary>("save_budget", {
+    entries,
+    period,
+    replaceLine: replaceLine ?? null,
+  });
+}
+
+export async function deleteBudget(line: number): Promise<JournalSummary> {
+  return invoke<JournalSummary>("delete_budget", { line });
 }
 
 export async function listBudgetAccounts(): Promise<string[]> {
@@ -238,8 +247,25 @@ export async function toggleReconciliationPosting(
   });
 }
 
-export async function finishReconciliation(): Promise<JournalSummary> {
-  return invoke<JournalSummary>("finish_reconciliation");
+export async function finishReconciliation(
+  force?: boolean
+): Promise<JournalSummary> {
+  return invoke<JournalSummary>("finish_reconciliation", {
+    force: force ?? null,
+  });
+}
+
+// ─── Valuation ───
+
+export interface ValuationInfo {
+  targetCommodity: string;
+  unconvertible: string[];
+}
+
+export async function valuationInfo(
+  params: ReportParams = {}
+): Promise<ValuationInfo> {
+  return invoke<ValuationInfo>("valuation_info", { params });
 }
 
 export async function cancelReconciliation(): Promise<void> {

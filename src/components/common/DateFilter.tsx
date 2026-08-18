@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { startOfMonth, endOfMonth, subMonths, startOfYear, endOfYear, subYears, startOfQuarter, endOfQuarter, subQuarters, format } from "date-fns";
 
 interface DateFilterProps {
@@ -29,6 +29,24 @@ function fmt(d: Date): string {
 
 export function DateFilter({ dateFrom, dateTo, onChange }: DateFilterProps) {
   const [showCustom, setShowCustom] = useState(false);
+  // Local draft of the custom range so an invalid range (from > to) can be
+  // shown inline without emitting it to the parent.
+  const [customFrom, setCustomFrom] = useState(dateFrom);
+  const [customTo, setCustomTo] = useState(dateTo);
+
+  useEffect(() => {
+    setCustomFrom(dateFrom);
+    setCustomTo(dateTo);
+  }, [dateFrom, dateTo]);
+
+  const rangeInvalid = Boolean(customFrom && customTo && customFrom > customTo);
+
+  const handleCustomChange = (from: string, to: string) => {
+    setCustomFrom(from);
+    setCustomTo(to);
+    if (from && to && from > to) return; // invalid: don't emit
+    onChange(from, to);
+  };
 
   const activePreset = PRESETS.find(
     (p) => fmt(p.from()) === dateFrom && fmt(p.to()) === dateTo
@@ -80,25 +98,40 @@ export function DateFilter({ dateFrom, dateTo, onChange }: DateFilterProps) {
 
       {/* Custom date inputs */}
       {showCustom && (
-        <div className="flex gap-2 items-center">
-          <div className="flex-1">
-            <input
-              type="date"
-              value={dateFrom}
-              onChange={(e) => onChange(e.target.value, dateTo)}
-              className="w-full px-2 py-1.5 border border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 rounded text-xs focus:outline-none focus:ring-2 focus:ring-blue-500"
-            />
+        <>
+          <div className="flex gap-2 items-center">
+            <div className="flex-1">
+              <input
+                type="date"
+                value={customFrom}
+                onChange={(e) => handleCustomChange(e.target.value, customTo)}
+                className={`w-full px-2 py-1.5 border dark:bg-gray-800 dark:text-gray-100 rounded text-xs focus:outline-none focus:ring-2 ${
+                  rangeInvalid
+                    ? "border-red-400 dark:border-red-600 focus:ring-red-500"
+                    : "border-gray-300 dark:border-gray-600 focus:ring-blue-500"
+                }`}
+              />
+            </div>
+            <span className="text-xs text-gray-400">to</span>
+            <div className="flex-1">
+              <input
+                type="date"
+                value={customTo}
+                onChange={(e) => handleCustomChange(customFrom, e.target.value)}
+                className={`w-full px-2 py-1.5 border dark:bg-gray-800 dark:text-gray-100 rounded text-xs focus:outline-none focus:ring-2 ${
+                  rangeInvalid
+                    ? "border-red-400 dark:border-red-600 focus:ring-red-500"
+                    : "border-gray-300 dark:border-gray-600 focus:ring-blue-500"
+                }`}
+              />
+            </div>
           </div>
-          <span className="text-xs text-gray-400">to</span>
-          <div className="flex-1">
-            <input
-              type="date"
-              value={dateTo}
-              onChange={(e) => onChange(dateFrom, e.target.value)}
-              className="w-full px-2 py-1.5 border border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 rounded text-xs focus:outline-none focus:ring-2 focus:ring-blue-500"
-            />
-          </div>
-        </div>
+          {rangeInvalid && (
+            <p className="text-xs text-red-600 dark:text-red-400">
+              "From" date is after "To" date — range not applied
+            </p>
+          )}
+        </>
       )}
     </div>
   );

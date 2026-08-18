@@ -14,6 +14,9 @@ export interface TransactionSummary {
   description: string;
   comment: string | null;
   postings: PostingSummary[];
+  /** Carries costs/assertions/tags the form doesn't show; edits preserve them
+   *  as long as the posting structure is unchanged */
+  hasHiddenDetails: boolean;
 }
 
 /** Mirrors the Rust PostingSummary struct */
@@ -113,6 +116,8 @@ export interface BudgetRow {
   percentage: string;
   commodity: string;
   overBudget: boolean;
+  /** Income-style goal (negative budget): overBudget means the goal was missed */
+  isIncome: boolean;
 }
 
 /** Budget vs actual chart data point */
@@ -131,7 +136,11 @@ export interface BudgetEntry {
 
 /** Budget info from journal */
 export interface BudgetInfo {
+  /** Full period expression, e.g. "monthly" or "every 2 weeks from 2026-01" */
   period: string;
+  description: string;
+  /** Source line of the periodic transaction; use for replace/delete */
+  line: number;
   entries: BudgetEntry[];
 }
 
@@ -144,6 +153,8 @@ export interface CsvPreviewTransaction {
   amount: string;
   commodity: string;
   comment: string | null;
+  /** A matching transaction (date+amount+description) already exists */
+  isDuplicate: boolean;
 }
 
 /** CSV import preview result */
@@ -151,11 +162,13 @@ export interface CsvPreview {
   transactions: CsvPreviewTransaction[];
   warnings: string[];
   rowsProcessed: number;
+  duplicateCount: number;
 }
 
 /** CSV import result */
 export interface CsvImportResult {
   importedCount: number;
+  skippedDuplicates: number;
   warnings: string[];
   summary: JournalSummary;
 }

@@ -4,7 +4,6 @@ use serde::Serialize;
 
 use hledger_parser::ast::Status;
 
-use crate::amount::MixedAmount;
 use crate::balance::ResolvedTransaction;
 
 /// A posting reference for the reconciliation UI.
@@ -55,11 +54,23 @@ pub struct PostingData {
     pub date: NaiveDate,
     pub description: String,
     pub amount: Decimal,
+    /// The posting's EFFECTIVE status (transaction status flows down to
+    /// unmarked postings) — comparing toggles against this makes un-clearing
+    /// a `*`-transaction posting a real change, and leaving cleared postings
+    /// untouched a non-change.
     pub original_status: Status,
 }
 
+fn account_matches(posting_account: &str, account: &str) -> bool {
+    let pa = posting_account.to_lowercase();
+    let a = account.to_lowercase();
+    pa == a || (pa.starts_with(&a) && pa.as_bytes().get(a.len()) == Some(&b':'))
+}
+
 impl ReconciliationSession {
-    /// Start a new reconciliation session for an account.
+    /// Start a new reconciliation session for an account. Only real (non-
+    /// virtual) postings in the statement's commodity participate — a bank
+    /// statement never contains virtual budget postings or other commodities.
     pub fn new(
         transactions: &[ResolvedTransaction],
         account: &str,
@@ -71,30 +82,30 @@ impl ReconciliationSession {
         let mut posting_data = Vec::new();
 
         for (ti, txn) in transactions.iter().enumerate() {
-            if txn.date > statement_date {
-                continue;
-            }
             for (pi, posting) in txn.postings.iter().enumerate() {
-                if !posting.account.full.eq_ignore_ascii_case(account)
-                    && !posting.account.full.to_lowercase().starts_with(
-                        &format!("{}:", account.to_lowercase()),
-                    )
-                {
-                    // Only exact match for reconciliation
-                    if posting.account.full.to_lowercase() != account.to_lowercase() {
-                        continue;
-                    }
+                if posting.date > statement_date {
+                    continue;
+                }
+                if posting.is_virtual {
+                    continue;
+                }
+                if !account_matches(&posting.account.full, account) {
+                    continue;
                 }
 
-                let amount = crate::reports::get_primary_value_pub(&posting.amount, commodity);
-                let is_cleared = posting.status == Status::Cleared
-                    || txn.status == Status::Cleared;
+                // Exactly the statement commodity — no cross-commodity summing.
+                let amount = posting.amount.get(commodity);
+                if amount.is_zero() && !posting.amount.amounts.contains_key(commodity) {
+                    continue;
+                }
+
+                let is_cleared = posting.status == Status::Cleared;
 
                 posting_statuses.push((ti, pi, is_cleared));
                 posting_data.push(PostingData {
                     transaction_index: ti,
                     posting_index: pi,
-                    date: txn.date,
+                    date: posting.date,
                     description: txn.description.clone(),
                     amount,
                     original_status: posting.status,
@@ -112,7 +123,7 @@ impl ReconciliationSession {
         }
     }
 
-    /// Toggle a posting's cleared status. Returns the posting list index.
+    /// Toggle a posting's cleared status.
     pub fn toggle_posting(&mut self, index: usize) {
         if index < self.posting_statuses.len() {
             self.posting_statuses[index].2 = !self.posting_statuses[index].2;
@@ -174,8 +185,9 @@ impl ReconciliationSession {
         }
     }
 
-    /// Get the list of status changes to apply to the journal.
-    /// Returns (transaction_index, posting_index, new_status) for each changed posting.
+    /// Get the list of status changes to apply to the journal:
+    /// (transaction_index, posting_index, new_status) for each posting whose
+    /// checkbox now differs from its original effective status.
     pub fn changes(&self) -> Vec<(usize, usize, Status)> {
         self.posting_statuses
             .iter()
@@ -235,17 +247,14 @@ mod tests {
             &txns, "assets:checking", d(2024, 1, 31), dec!(-1050), "$",
         );
 
-        // Nothing cleared yet
         assert_eq!(session.cleared_balance(), dec!(0));
         assert_eq!(session.difference(), dec!(-1050));
         assert!(!session.is_reconciled());
 
-        // Clear first posting
         session.toggle_posting(0);
         assert_eq!(session.cleared_balance(), dec!(-50));
         assert_eq!(session.difference(), dec!(-1000));
 
-        // Clear second posting
         session.toggle_posting(1);
         assert_eq!(session.cleared_balance(), dec!(-1050));
         assert_eq!(session.difference(), dec!(0));
@@ -278,11 +287,30 @@ mod tests {
             &txns, "assets:checking", d(2024, 1, 31), dec!(-1050), "$",
         );
 
-        // First transaction is cleared, so its posting starts cleared
         assert!(session.posting_statuses[0].2);
-        // Second is not
         assert!(!session.posting_statuses[1].2);
         assert_eq!(session.cleared_balance(), dec!(-50));
+    }
+
+    #[test]
+    fn unclearing_txn_cleared_posting_is_a_change() {
+        // The posting inherits `*` from the transaction; unchecking it must
+        // produce a change (the audit found unchecks were silently dropped).
+        let txns = resolve(
+            "2024-01-10 * A\n    expenses:food  $50\n    assets:checking  $-50\n",
+        );
+        let mut session = ReconciliationSession::new(
+            &txns, "assets:checking", d(2024, 1, 31), dec!(-50), "$",
+        );
+        assert!(session.posting_statuses[0].2, "starts cleared");
+
+        // Untouched: no spurious changes.
+        assert!(session.changes().is_empty());
+
+        session.toggle_posting(0);
+        let changes = session.changes();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].2, Status::Unmarked);
     }
 
     #[test]
@@ -295,7 +323,6 @@ mod tests {
             &txns, "assets:checking", d(2024, 1, 31), dec!(-1050), "$",
         );
 
-        // Toggle both to cleared
         session.toggle_posting(0);
         session.toggle_posting(1);
 
@@ -313,7 +340,34 @@ mod tests {
         let session = ReconciliationSession::new(
             &txns, "assets:checking", d(2024, 1, 31), dec!(100), "$",
         );
-        // Only Jan transaction should appear
         assert_eq!(session.posting_data.len(), 1);
+    }
+
+    #[test]
+    fn virtual_and_foreign_commodity_postings_excluded() {
+        let txns = resolve(
+            "2024-01-10 A\n    (assets:checking)  $99\n    \n\n\
+             2024-01-11 B\n    assets:checking  100 EUR\n    assets:eur  -100 EUR\n\n\
+             2024-01-12 C\n    assets:checking  $40\n    income\n",
+        );
+        let session = ReconciliationSession::new(
+            &txns, "assets:checking", d(2024, 1, 31), dec!(40), "$",
+        );
+        // Only the $40 real posting participates.
+        assert_eq!(session.posting_data.len(), 1);
+        assert_eq!(session.posting_data[0].amount, dec!(40));
+    }
+
+    #[test]
+    fn account_prefix_boundary() {
+        let txns = resolve(
+            "2024-01-10 A\n    assets:bank  $30\n    equity\n\n\
+             2024-01-11 B\n    assets:bankloan  $20\n    equity\n",
+        );
+        let session = ReconciliationSession::new(
+            &txns, "assets:bank", d(2024, 1, 31), dec!(30), "$",
+        );
+        assert_eq!(session.posting_data.len(), 1);
+        assert_eq!(session.posting_data[0].amount, dec!(30));
     }
 }

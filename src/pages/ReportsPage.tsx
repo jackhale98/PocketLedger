@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import {
   LineChart, Line, BarChart, Bar, PieChart, Pie, Cell,
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
@@ -50,7 +50,7 @@ function StatementView({ statement, onBack }: { statement: FinancialStatement; o
               <div className="bg-gray-50 dark:bg-gray-800 rounded-lg divide-y divide-gray-200 dark:divide-gray-700">
                 {section.rows.map((row, ri) => (
                   <div key={ri} className="px-3 py-2 flex justify-between" style={{ paddingLeft: `${12 + row.depth * 16}px` }}>
-                    <span className="text-sm text-gray-800 dark:text-gray-200 truncate">{row.account.split(":").pop()}</span>
+                    <span className="text-sm text-gray-800 dark:text-gray-200 truncate" title={row.account}>{row.account.split(":").pop()}</span>
                     <span className={`text-sm font-mono shrink-0 ml-2 ${parseFloat(row.amounts[0]?.quantity ?? "0") < 0 ? "text-red-500" : "text-green-500"}`}>{fmtAmt(row.amounts)}</span>
                   </div>
                 ))}
@@ -73,14 +73,25 @@ function RegisterView({ accountList, dateFrom, dateTo, currency }: { accountList
   const [account, setAccount] = useState("");
   const [rows, setRows] = useState<RegisterRow[]>([]);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [newestFirst, setNewestFirst] = useState(true);
+  const loadSeq = useRef(0);
 
   const load = useCallback(async () => {
-    if (!account) { setRows([]); return; }
+    const seq = ++loadSeq.current;
+    if (!account) { setRows([]); setError(null); setLoading(false); return; }
     setLoading(true);
-    const data = await api.registerReport(account, { dateFrom: dateFrom || null, dateTo: dateTo || null, targetCommodity: currency });
-    setRows(data);
-    setLoading(false);
+    setError(null);
+    try {
+      const data = await api.registerReport(account, { dateFrom: dateFrom || null, dateTo: dateTo || null, targetCommodity: currency });
+      if (seq !== loadSeq.current) return;
+      setRows(data);
+    } catch (err) {
+      if (seq !== loadSeq.current) return;
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      if (seq === loadSeq.current) setLoading(false);
+    }
   }, [account, dateFrom, dateTo, currency]);
 
   useEffect(() => { load(); }, [load]);
@@ -102,14 +113,15 @@ function RegisterView({ accountList, dateFrom, dateTo, currency }: { accountList
           {newestFirst ? "New \u2193" : "Old \u2191"}
         </button>
       </div>
+      {error && <div className="text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/30 px-3 py-2 rounded-lg">{error}</div>}
       {loading && <div className="text-sm text-gray-500 text-center py-4">Loading...</div>}
-      {!loading && account && rows.length === 0 && <div className="text-sm text-gray-500 text-center py-4">No postings</div>}
+      {!loading && !error && account && rows.length === 0 && <div className="text-sm text-gray-500 text-center py-4">No postings</div>}
       {displayRows.length > 0 && (
         <div className="divide-y divide-gray-100 dark:divide-gray-800">
           {displayRows.map((row, i) => (
             <div key={i} className="py-2.5 flex justify-between items-center">
               <div className="min-w-0 flex-1">
-                <div className="text-sm text-gray-900 dark:text-gray-100 truncate">{row.description}</div>
+                <div className="text-sm text-gray-900 dark:text-gray-100 truncate" title={row.description}>{row.description}</div>
                 <div className="text-xs text-gray-500 dark:text-gray-400">{row.date}</div>
               </div>
               <div className="text-right ml-3 shrink-0">
@@ -128,27 +140,47 @@ function BudgetView({ dateFrom, dateTo, currency }: { dateFrom: string; dateTo: 
   const [budgetRows, setBudgetRows] = useState<BudgetRow[]>([]);
   const [budgetChart, setBudgetChart] = useState<BudgetSummaryPoint[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const loadSeq = useRef(0);
 
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current;
     setLoading(true);
+    setError(null);
     const params: ReportParams = {
       targetCommodity: currency,
       dateFrom: dateFrom || null,
       dateTo: dateTo || null,
     };
-    const [rows, chart] = await Promise.all([
-      api.budgetVsActual(params),
-      api.budgetSummaryChart(params),
-    ]);
-    setBudgetRows(rows);
-    setBudgetChart(chart);
-    setLoading(false);
+    try {
+      const [rows, chart] = await Promise.all([
+        api.budgetVsActual(params),
+        api.budgetSummaryChart(params),
+      ]);
+      if (seq !== loadSeq.current) return;
+      setBudgetRows(rows);
+      setBudgetChart(chart);
+    } catch (err) {
+      if (seq !== loadSeq.current) return;
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      if (seq === loadSeq.current) setLoading(false);
+    }
   }, [dateFrom, dateTo, currency]);
 
   useEffect(() => { load(); }, [load]);
 
   if (loading) {
     return <div className="text-sm text-gray-500 text-center py-8">Loading...</div>;
+  }
+
+  if (error) {
+    return (
+      <div className="space-y-2 py-4">
+        <div className="text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/30 px-3 py-2 rounded-lg">{error}</div>
+        <button onClick={load} className="w-full py-2 text-sm text-blue-600 font-medium">Retry</button>
+      </div>
+    );
   }
 
   if (budgetRows.length === 0) {
@@ -162,11 +194,21 @@ function BudgetView({ dateFrom, dateTo, currency }: { dateFrom: string; dateTo: 
     );
   }
 
-  // Summary totals
-  const totalBudget = budgetRows.reduce((s, r) => s + parseFloat(r.budget), 0);
-  const totalActual = budgetRows.reduce((s, r) => s + parseFloat(r.actual), 0);
-  const totalRemaining = totalBudget - totalActual;
-  const mainCommodity = budgetRows[0]?.commodity ?? currency;
+  // Summary totals: group per commodity and exclude income (negative-budget)
+  // rows so the "Spent"/"Budgeted" cards only cover expense budgets.
+  const expenseRows = budgetRows.filter((r) => parseFloat(r.budget) >= 0);
+  const incomeRowCount = budgetRows.length - expenseRows.length;
+  const totalsByCommodity = new Map<string, { budget: number; actual: number }>();
+  for (const r of expenseRows) {
+    const t = totalsByCommodity.get(r.commodity) ?? { budget: 0, actual: 0 };
+    t.budget += parseFloat(r.budget);
+    t.actual += parseFloat(r.actual);
+    totalsByCommodity.set(r.commodity, t);
+  }
+  const commodityTotals = [...totalsByCommodity.entries()]
+    .sort((a, b) => Math.abs(b[1].budget) - Math.abs(a[1].budget));
+  const mainTotal = commodityTotals[0];
+  const extraCommodities = commodityTotals.length - 1;
 
   const chartData = budgetChart.map((p) => ({
     period: p.period,
@@ -176,27 +218,38 @@ function BudgetView({ dateFrom, dateTo, currency }: { dateFrom: string; dateTo: 
 
   return (
     <div className="space-y-4">
-      {/* Summary cards */}
-      <div className="grid grid-cols-3 gap-2">
-        <div className="bg-gray-50 dark:bg-gray-800 rounded-lg p-3 text-center">
-          <div className="text-xs text-gray-500 dark:text-gray-400">Budgeted</div>
-          <div className="text-sm font-semibold text-gray-900 dark:text-gray-100 font-mono">
-            {fmtBudgetAmt(totalBudget.toString(), mainCommodity)}
+      {/* Summary cards (expense budgets, dominant commodity) */}
+      {mainTotal && (
+        <div>
+          <div className="grid grid-cols-3 gap-2">
+            <div className="bg-gray-50 dark:bg-gray-800 rounded-lg p-3 text-center">
+              <div className="text-xs text-gray-500 dark:text-gray-400">Budgeted</div>
+              <div className="text-sm font-semibold text-gray-900 dark:text-gray-100 font-mono">
+                {fmtBudgetAmt(mainTotal[1].budget.toString(), mainTotal[0])}
+              </div>
+            </div>
+            <div className="bg-gray-50 dark:bg-gray-800 rounded-lg p-3 text-center">
+              <div className="text-xs text-gray-500 dark:text-gray-400">Spent</div>
+              <div className="text-sm font-semibold text-gray-900 dark:text-gray-100 font-mono">
+                {fmtBudgetAmt(mainTotal[1].actual.toString(), mainTotal[0])}
+              </div>
+            </div>
+            <div className="bg-gray-50 dark:bg-gray-800 rounded-lg p-3 text-center">
+              <div className="text-xs text-gray-500 dark:text-gray-400">Remaining</div>
+              <div className={`text-sm font-semibold font-mono ${mainTotal[1].budget - mainTotal[1].actual >= 0 ? "text-green-500" : "text-red-500"}`}>
+                {fmtBudgetAmt((mainTotal[1].budget - mainTotal[1].actual).toString(), mainTotal[0])}
+              </div>
+            </div>
           </div>
+          {(extraCommodities > 0 || incomeRowCount > 0) && (
+            <p className="text-xs text-gray-400 dark:text-gray-500 mt-1 text-center">
+              {extraCommodities > 0 && `+ ${extraCommodities} more ${extraCommodities === 1 ? "currency" : "currencies"} not shown`}
+              {extraCommodities > 0 && incomeRowCount > 0 && " · "}
+              {incomeRowCount > 0 && "income budgets excluded from totals"}
+            </p>
+          )}
         </div>
-        <div className="bg-gray-50 dark:bg-gray-800 rounded-lg p-3 text-center">
-          <div className="text-xs text-gray-500 dark:text-gray-400">Spent</div>
-          <div className="text-sm font-semibold text-gray-900 dark:text-gray-100 font-mono">
-            {fmtBudgetAmt(totalActual.toString(), mainCommodity)}
-          </div>
-        </div>
-        <div className="bg-gray-50 dark:bg-gray-800 rounded-lg p-3 text-center">
-          <div className="text-xs text-gray-500 dark:text-gray-400">Remaining</div>
-          <div className={`text-sm font-semibold font-mono ${totalRemaining >= 0 ? "text-green-500" : "text-red-500"}`}>
-            {fmtBudgetAmt(totalRemaining.toString(), mainCommodity)}
-          </div>
-        </div>
-      </div>
+      )}
 
       {/* Budget vs Actual table */}
       <div>
@@ -208,7 +261,7 @@ function BudgetView({ dateFrom, dateTo, currency }: { dateFrom: string; dateTo: 
             return (
               <div key={i} className="px-3 py-2.5">
                 <div className="flex justify-between items-center mb-1">
-                  <span className="text-sm text-gray-800 dark:text-gray-200 truncate">
+                  <span className="text-sm text-gray-800 dark:text-gray-200 truncate" title={row.account}>
                     {row.account.split(":").pop()}
                   </span>
                   <span className={`text-xs font-mono ${row.overBudget ? "text-red-500" : "text-green-500"}`}>
@@ -273,6 +326,12 @@ export function ReportsPage() {
   const [accountSeries, setAccountSeries] = useState<TimeSeriesPoint[]>([]);
   const [expensePrefix, setExpensePrefix] = useState<string | null>(null);
   const [expensePath, setExpensePath] = useState<string[]>([]);
+  const [pageError, setPageError] = useState<string | null>(null);
+  const [drillHint, setDrillHint] = useState<string | null>(null);
+  const [valuation, setValuation] = useState<api.ValuationInfo | null>(null);
+  const dashboardSeq = useRef(0);
+  const seriesSeq = useRef(0);
+  const drillSeq = useRef(0);
 
   const makeParams = useCallback((): ReportParams => ({
     targetCommodity: defaultCurrency,
@@ -281,60 +340,101 @@ export function ReportsPage() {
   }), [defaultCurrency, dateFrom, dateTo]);
 
   const loadDashboard = useCallback(async () => {
+    const seq = ++dashboardSeq.current;
     setLoading(true);
+    setPageError(null);
     const params = makeParams();
-    const [nw, ie, eb, accounts] = await Promise.all([
-      api.netWorthSeries(params),
-      api.incomeExpenseChart(params),
-      api.expenseBreakdownChart(params, null),
-      api.listAccountsWithBalances(),
-    ]);
-    setNetWorth(nw);
-    setIncomeExpense(ie);
-    setExpenseBreakdown(eb);
-    setExpensePrefix(null);
-    setExpensePath([]);
-    setAccountList(accounts.map((a: BalanceRow) => a.account).sort());
-    setLoading(false);
+    try {
+      const [nw, ie, eb, accounts, vi] = await Promise.all([
+        api.netWorthSeries(params),
+        api.incomeExpenseChart(params),
+        api.expenseBreakdownChart(params, null),
+        api.listAccountsWithBalances(),
+        api.valuationInfo(params),
+      ]);
+      if (seq !== dashboardSeq.current) return;
+      setNetWorth(nw);
+      setIncomeExpense(ie);
+      setExpenseBreakdown(eb);
+      setExpensePrefix(null);
+      setExpensePath([]);
+      setDrillHint(null);
+      setValuation(vi);
+      setAccountList(accounts.map((a: BalanceRow) => a.account).sort());
+    } catch (err) {
+      if (seq !== dashboardSeq.current) return;
+      setPageError(err instanceof Error ? err.message : String(err));
+    } finally {
+      if (seq === dashboardSeq.current) setLoading(false);
+    }
   }, [makeParams]);
 
   useEffect(() => { loadDashboard(); }, [loadDashboard]);
 
   useEffect(() => {
     if (selectedAccount) {
-      api.accountBalanceSeries(selectedAccount, makeParams()).then(setAccountSeries);
+      const seq = ++seriesSeq.current;
+      api.accountBalanceSeries(selectedAccount, makeParams())
+        .then((data) => { if (seq === seriesSeq.current) setAccountSeries(data); })
+        .catch((err) => {
+          if (seq === seriesSeq.current) setPageError(err instanceof Error ? err.message : String(err));
+        });
     }
   }, [selectedAccount, makeParams]);
 
   const drillIntoExpense = async (category: string) => {
+    const seq = ++drillSeq.current;
     const newPrefix = expensePrefix ? `${expensePrefix}:${category}` : `expenses:${category}`;
-    const sub = await api.expenseBreakdownChart(makeParams(), newPrefix);
-    // Only drill down if there are real subcategories (not just "other")
-    const hasRealSubs = sub.length > 1 || (sub.length === 1 && sub[0].name !== "other");
-    if (hasRealSubs) {
-      setExpensePrefix(newPrefix);
-      setExpensePath((prev) => [...prev, category]);
-      setExpenseBreakdown(sub);
+    try {
+      const sub = await api.expenseBreakdownChart(makeParams(), newPrefix);
+      if (seq !== drillSeq.current) return;
+      // Only drill down if there are real subcategories (not just "other")
+      const hasRealSubs = sub.length > 1 || (sub.length === 1 && sub[0].name !== "other");
+      if (hasRealSubs) {
+        setExpensePrefix(newPrefix);
+        setExpensePath((prev) => [...prev, category]);
+        setExpenseBreakdown(sub);
+        setDrillHint(null);
+      } else {
+        setDrillHint(category === "other"
+          ? "\"other\" aggregates smaller categories — open Accounts for detail"
+          : "No further breakdown for this category");
+      }
+    } catch (err) {
+      if (seq !== drillSeq.current) return;
+      setPageError(err instanceof Error ? err.message : String(err));
     }
   };
 
   const expenseBreadcrumbBack = async (index: number) => {
+    const seq = ++drillSeq.current;
     const newPath = index < 0 ? [] : expensePath.slice(0, index + 1);
     const newPrefix = newPath.length > 0 ? "expenses:" + newPath.join(":") : null;
-    setExpensePrefix(newPrefix);
-    setExpensePath(newPath);
-    const eb = await api.expenseBreakdownChart(makeParams(), newPrefix);
-    setExpenseBreakdown(eb);
+    try {
+      const eb = await api.expenseBreakdownChart(makeParams(), newPrefix);
+      if (seq !== drillSeq.current) return;
+      setExpensePrefix(newPrefix);
+      setExpensePath(newPath);
+      setExpenseBreakdown(eb);
+      setDrillHint(null);
+    } catch (err) {
+      if (seq !== drillSeq.current) return;
+      setPageError(err instanceof Error ? err.message : String(err));
+    }
   };
 
   const openStatement = async (type: DrillView) => {
     if (!type) return;
     const params = makeParams();
-    const data = type === "balance-sheet" ? await api.balanceSheetReport(params)
-      : type === "income-statement" ? await api.incomeStatementReport(params)
-      : await api.cashFlowReport(params);
-    setStatement(data);
-    setDrillView(type);
+    try {
+      const data = type === "balance-sheet" ? await api.balanceSheetReport(params)
+        : type === "income-statement" ? await api.incomeStatementReport(params)
+        : await api.cashFlowReport(params);
+      setStatement(data);
+      setDrillView(type);
+    } catch (err) {
+      setPageError(err instanceof Error ? err.message : String(err));
+    }
   };
 
   if (drillView && statement) {
@@ -362,6 +462,20 @@ export function ReportsPage() {
       </div>
 
       <div className="flex-1 overflow-auto">
+        {pageError && (
+          <div className="mx-4 mt-3 flex items-center justify-between text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/30 px-3 py-2 rounded-lg">
+            <span className="min-w-0 break-words">{pageError}</span>
+            <button onClick={() => setPageError(null)} className="text-xs text-red-500 ml-2 shrink-0">Dismiss</button>
+          </div>
+        )}
+        {valuation && valuation.unconvertible.length > 0 && tab !== "budget" && tab !== "register" && (
+          <div className="mx-4 mt-3 text-xs text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 px-3 py-2 rounded-lg">
+            Charts are valued in {valuation.targetCommodity || "the journal's main currency"}. No price is known for{" "}
+            {valuation.unconvertible.join(", ")} — holdings in{" "}
+            {valuation.unconvertible.length === 1 ? "this commodity are" : "these commodities are"} not included in
+            chart totals. Add P price directives to include them.
+          </div>
+        )}
         {tab === "budget" ? (
           <div className="p-4"><BudgetView dateFrom={dateFrom} dateTo={dateTo} currency={defaultCurrency} /></div>
         ) : tab === "register" ? (
@@ -449,7 +563,7 @@ export function ReportsPage() {
                       const total = pieData.reduce((s, d) => s + d.value, 0);
                       const pct = total > 0 ? ((item.value / total) * 100).toFixed(0) : "0";
                       return (
-                        <button key={item.name} onClick={() => drillIntoExpense(item.name)}
+                        <button key={item.name} onClick={() => drillIntoExpense(item.name)} title={item.name}
                           className="flex items-center gap-1 text-xs text-gray-700 dark:text-gray-300">
                           <span className="w-2.5 h-2.5 rounded-sm shrink-0" style={{ backgroundColor: COLORS[i % COLORS.length] }} />
                           <span className="truncate max-w-[80px]">{item.name}</span>
@@ -458,7 +572,8 @@ export function ReportsPage() {
                       );
                     })}
                   </div>
-                  {expensePath.length === 0 && <p className="text-xs text-gray-400 mt-1 text-center">Tap a slice to drill down</p>}
+                  {drillHint && <p className="text-xs text-amber-600 dark:text-amber-400 mt-1 text-center">{drillHint}</p>}
+                  {!drillHint && expensePath.length === 0 && <p className="text-xs text-gray-400 mt-1 text-center">Tap a slice to drill down</p>}
                 </div>
               </div>
             )}

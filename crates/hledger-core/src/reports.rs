@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{Datelike, NaiveDate};
 use rust_decimal::Decimal;
@@ -6,6 +6,7 @@ use serde::Serialize;
 
 use crate::amount::MixedAmount;
 use crate::balance::ResolvedTransaction;
+use crate::classify::{AccountClassifier, AccountType};
 use crate::price_db::PriceDb;
 
 /// A row in a balance report.
@@ -83,54 +84,99 @@ fn mixed_to_entries(m: &MixedAmount) -> Vec<AmountEntry> {
         .iter()
         .map(|(c, q)| AmountEntry {
             commodity: c.clone(),
-            quantity: q.to_string(),
+            quantity: q.normalize().to_string(),
         })
         .collect()
 }
 
 /// Convert a MixedAmount to a target commodity using the price database.
-/// Commodities that can't be converted are dropped from the result.
-fn convert_mixed(m: &MixedAmount, target: &str, price_db: &PriceDb, date: NaiveDate) -> MixedAmount {
+/// Commodities without any conversion path are KEPT in their own commodity
+/// (hledger -V behavior) — never silently dropped, never raw-summed.
+pub fn convert_mixed(
+    m: &MixedAmount,
+    target: &str,
+    price_db: &PriceDb,
+    date: NaiveDate,
+) -> MixedAmount {
     let mut result = MixedAmount::zero();
     for (commodity, quantity) in &m.amounts {
         if commodity == target {
             result.add(target, *quantity);
         } else if let Some(converted) = price_db.convert(*quantity, commodity, target, date) {
             result.add(target, converted);
+        } else {
+            result.add(commodity, *quantity);
         }
-        // No price available - skip this commodity rather than mixing it in
     }
     result
 }
 
-/// Public version for use by other modules.
-pub fn get_primary_value_pub(m: &MixedAmount, target: &str) -> Decimal {
-    get_primary_value(m, target)
-}
-
-/// Get the value in the target commodity, falling back to the first available
-/// commodity if the target isn't found.
-fn get_primary_value(m: &MixedAmount, target: &str) -> Decimal {
-    if !target.is_empty() {
-        let val = m.get(target);
-        if !val.is_zero() || m.amounts.is_empty() {
-            return val;
+/// Value a MixedAmount in the target commodity for a single-number chart.
+/// Returns the convertible total; commodities with no conversion path are
+/// EXCLUDED from the number (never added raw across commodities) and reported
+/// in the second element so the UI can warn.
+pub fn valued_quantity(
+    m: &MixedAmount,
+    target: &str,
+    price_db: &PriceDb,
+    date: NaiveDate,
+) -> (Decimal, BTreeSet<String>) {
+    let mut total = Decimal::ZERO;
+    let mut unconvertible = BTreeSet::new();
+    for (commodity, quantity) in &m.amounts {
+        if commodity == target || commodity.is_empty() {
+            total += *quantity;
+        } else if let Some(converted) = price_db.convert(*quantity, commodity, target, date) {
+            total += converted;
+        } else {
+            unconvertible.insert(commodity.clone());
         }
     }
-    // Fallback: sum all commodity values (works for single-currency journals)
-    m.amounts.values().copied().fold(Decimal::ZERO, |a, b| a + b)
+    (total, unconvertible)
 }
 
-/// Case-insensitive check if an account belongs to a given type.
-fn is_account_type(account: &str, account_type: &str) -> bool {
-    let lower = account.to_lowercase();
-    lower == account_type
-        || lower.starts_with(&format!("{}:", account_type))
+/// Commodities in the journal that cannot be valued in `target` as of `date`.
+/// The UI shows these as a warning on valued charts.
+pub fn unconvertible_commodities(
+    transactions: &[ResolvedTransaction],
+    target: &str,
+    price_db: &PriceDb,
+    date: NaiveDate,
+) -> Vec<String> {
+    let mut result = BTreeSet::new();
+    for txn in transactions {
+        for posting in &txn.postings {
+            for commodity in posting.amount.amounts.keys() {
+                if commodity != target
+                    && !commodity.is_empty()
+                    && price_db
+                        .convert(Decimal::ONE, commodity, target, date)
+                        .is_none()
+                {
+                    result.insert(commodity.clone());
+                }
+            }
+        }
+    }
+    result.into_iter().collect()
+}
+
+/// Case-insensitive account-prefix match with a `:` boundary.
+fn account_matches_prefix(account: &str, prefix: &str) -> bool {
+    if account.len() < prefix.len() {
+        return false;
+    }
+    let account_lower = account.to_lowercase();
+    let prefix_lower = prefix.to_lowercase();
+    account_lower == prefix_lower
+        || (account_lower.starts_with(&prefix_lower)
+            && account_lower.as_bytes().get(prefix_lower.len()) == Some(&b':'))
 }
 
 // ─── Report generation functions ───
 
-/// Generate a balance report: account balances filtered by account prefix and date range.
+/// Generate a balance report: account balances filtered by account prefix and
+/// date range. Dates are matched per-posting (respecting `date:` tags).
 pub fn balance_report(
     transactions: &[ResolvedTransaction],
     account_filter: Option<&str>,
@@ -140,19 +186,12 @@ pub fn balance_report(
     let mut balances: BTreeMap<String, MixedAmount> = BTreeMap::new();
 
     for txn in transactions {
-        if let Some(from) = date_from {
-            if txn.date < from {
-                continue;
-            }
-        }
-        if let Some(to) = date_to {
-            if txn.date > to {
-                continue;
-            }
-        }
         for posting in &txn.postings {
+            if !date_in_range(posting.date, date_from, date_to) {
+                continue;
+            }
             if let Some(filter) = account_filter {
-                if !is_account_type(&posting.account.full, filter) {
+                if !account_matches_prefix(&posting.account.full, filter) {
                     continue;
                 }
             }
@@ -163,24 +202,40 @@ pub fn balance_report(
         }
     }
 
-    // Also add parent accounts
+    rows_with_parents(balances)
+}
+
+fn date_in_range(date: NaiveDate, from: Option<NaiveDate>, to: Option<NaiveDate>) -> bool {
+    if let Some(f) = from {
+        if date < f {
+            return false;
+        }
+    }
+    if let Some(t) = to {
+        if date > t {
+            return false;
+        }
+    }
+    true
+}
+
+/// Add parent accounts, compute inclusive balances, drop zero rows.
+fn rows_with_parents(balances: BTreeMap<String, MixedAmount>) -> Vec<BalanceRow> {
+    let mut balances = balances;
     let leaf_accounts: Vec<String> = balances.keys().cloned().collect();
     for account in &leaf_accounts {
         let parts: Vec<&str> = account.split(':').collect();
         for depth in 1..parts.len() {
             let parent = parts[..depth].join(":");
-            // Ensure parent exists but don't add amounts (they'll be computed)
             balances.entry(parent).or_insert_with(MixedAmount::zero);
         }
     }
 
-    // Compute inclusive balances (parent = sum of children)
     let all_accounts: Vec<String> = balances.keys().cloned().collect();
     let mut inclusive: BTreeMap<String, MixedAmount> = BTreeMap::new();
 
     for account in &all_accounts {
         let mut total = balances.get(account).cloned().unwrap_or_default();
-        // Add all descendants
         for (other, amt) in &balances {
             if other != account
                 && other.starts_with(account.as_str())
@@ -192,7 +247,6 @@ pub fn balance_report(
         inclusive.insert(account.clone(), total);
     }
 
-    // Filter out zero balances and format
     inclusive
         .iter()
         .filter(|(_, amt)| !amt.is_zero())
@@ -207,7 +261,8 @@ pub fn balance_report(
         .collect()
 }
 
-/// Generate a balance report with values converted to a target commodity using market prices.
+/// Generate a balance report with values converted to a target commodity using
+/// market prices. Unpriceable commodities stay in their own commodity.
 pub fn balance_report_valued(
     transactions: &[ResolvedTransaction],
     account_filter: Option<&str>,
@@ -217,71 +272,53 @@ pub fn balance_report_valued(
     price_db: &PriceDb,
 ) -> Vec<BalanceRow> {
     let valuation_date = date_to.unwrap_or_else(|| {
-        transactions.last().map(|t| t.date).unwrap_or_else(|| chrono::Local::now().date_naive())
+        transactions
+            .last()
+            .map(|t| t.date)
+            .unwrap_or_else(|| chrono::Local::now().date_naive())
     });
 
     let mut balances: BTreeMap<String, MixedAmount> = BTreeMap::new();
 
     for txn in transactions {
-        if let Some(from) = date_from {
-            if txn.date < from { continue; }
-        }
-        if let Some(to) = date_to {
-            if txn.date > to { continue; }
-        }
         for posting in &txn.postings {
-            if let Some(filter) = account_filter {
-                if !is_account_type(&posting.account.full, filter) { continue; }
+            if !date_in_range(posting.date, date_from, date_to) {
+                continue;
             }
-            let entry = balances.entry(posting.account.full.clone()).or_insert_with(MixedAmount::zero);
+            if let Some(filter) = account_filter {
+                if !account_matches_prefix(&posting.account.full, filter) {
+                    continue;
+                }
+            }
+            let entry = balances
+                .entry(posting.account.full.clone())
+                .or_insert_with(MixedAmount::zero);
             entry.add_mixed(&posting.amount);
         }
     }
 
-    // Add parent accounts
-    let leaf_accounts: Vec<String> = balances.keys().cloned().collect();
-    for account in &leaf_accounts {
-        let parts: Vec<&str> = account.split(':').collect();
-        for depth in 1..parts.len() {
-            let parent = parts[..depth].join(":");
-            balances.entry(parent).or_insert_with(MixedAmount::zero);
-        }
-    }
-
-    // Compute inclusive balances
-    let all_accounts: Vec<String> = balances.keys().cloned().collect();
-    let mut inclusive: BTreeMap<String, MixedAmount> = BTreeMap::new();
-
-    for account in &all_accounts {
-        let mut total = balances.get(account).cloned().unwrap_or_default();
-        for (other, amt) in &balances {
-            if other != account
-                && other.starts_with(account.as_str())
-                && other.as_bytes().get(account.len()) == Some(&b':')
-            {
-                total.add_mixed(amt);
+    // Value the inclusive totals.
+    let rows = rows_with_parents(balances);
+    rows.into_iter()
+        .map(|row| {
+            let mut m = MixedAmount::zero();
+            for e in &row.amounts {
+                if let Ok(q) = e.quantity.parse::<Decimal>() {
+                    m.add(&e.commodity, q);
+                }
             }
-        }
-        // Convert to target commodity using prices
-        let valued = convert_mixed(&total, target_commodity, price_db, valuation_date);
-        inclusive.insert(account.clone(), valued);
-    }
-
-    inclusive
-        .iter()
-        .filter(|(_, amt)| !amt.is_zero())
-        .map(|(account, amt)| {
-            let depth = account.matches(':').count();
+            let valued = convert_mixed(&m, target_commodity, price_db, valuation_date);
             BalanceRow {
-                account: account.clone(),
-                depth,
-                amounts: mixed_to_entries(amt),
+                account: row.account,
+                depth: row.depth,
+                amounts: mixed_to_entries(&valued),
             }
         })
         .collect()
 }
 
-/// Generate a register report for a specific account.
+/// Generate a register report for a specific account (boundary-aware prefix:
+/// `assets:bank` matches `assets:bank` and `assets:bank:x`, not `assets:bankloan`).
 pub fn register_report(
     transactions: &[ResolvedTransaction],
     account_filter: &str,
@@ -292,23 +329,16 @@ pub fn register_report(
     let mut running_total = MixedAmount::zero();
 
     for txn in transactions {
-        if let Some(from) = date_from {
-            if txn.date < from {
-                continue;
-            }
-        }
-        if let Some(to) = date_to {
-            if txn.date > to {
-                continue;
-            }
-        }
         for posting in &txn.postings {
-            if !posting.account.full.starts_with(account_filter) {
+            if !account_matches_prefix(&posting.account.full, account_filter) {
+                continue;
+            }
+            if !date_in_range(posting.date, date_from, date_to) {
                 continue;
             }
             running_total.add_mixed(&posting.amount);
             rows.push(RegisterRow {
-                date: txn.date.format("%Y-%m-%d").to_string(),
+                date: posting.date.format("%Y-%m-%d").to_string(),
                 description: txn.description.clone(),
                 account: posting.account.full.clone(),
                 amount: mixed_to_entries(&posting.amount),
@@ -320,20 +350,22 @@ pub fn register_report(
     rows
 }
 
-/// Generate a Balance Sheet (Assets - Liabilities = Equity).
+/// Generate a Balance Sheet. Historical semantics like hledger `bs`: shows
+/// balances as of `date_to`; a from-date filter deliberately does NOT truncate
+/// opening balances (that would turn balances into period deltas).
 pub fn balance_sheet(
     transactions: &[ResolvedTransaction],
-    date_from: Option<NaiveDate>,
+    classifier: &AccountClassifier,
+    _date_from: Option<NaiveDate>,
     date_to: Option<NaiveDate>,
 ) -> FinancialStatement {
-    let assets = section_balance(transactions, "assets", date_from, date_to);
-    let liabilities = section_balance(transactions, "liabilities", date_from, date_to);
-    let equity = section_balance(transactions, "equity", date_from, date_to);
+    let assets = section_by_type(transactions, classifier, &[AccountType::Asset, AccountType::Cash], None, date_to);
+    let liabilities = section_by_type(transactions, classifier, &[AccountType::Liability], None, date_to);
+    let equity = section_by_type(transactions, classifier, &[AccountType::Equity], None, date_to);
 
+    // Net worth = assets + liabilities (liabilities are negative).
     let mut net = assets.total.clone();
-    let mut liab_total = liabilities.total.clone();
-    liab_total.add_mixed(&equity.total);
-    // Net = Assets - Liabilities - Equity (should be zero in balanced books)
+    net.add_mixed(&liabilities.total);
 
     FinancialStatement {
         title: "Balance Sheet".to_string(),
@@ -346,33 +378,26 @@ pub fn balance_sheet(
     }
 }
 
-/// Generate an Income Statement (Revenue - Expenses = Net Income).
+/// Generate an Income Statement (Revenue - Expenses = Net Income) for a period.
 pub fn income_statement(
     transactions: &[ResolvedTransaction],
+    classifier: &AccountClassifier,
     date_from: Option<NaiveDate>,
     date_to: Option<NaiveDate>,
 ) -> FinancialStatement {
-    let income = section_balance(transactions, "income", date_from, date_to);
-    let revenue = section_balance(transactions, "revenue", date_from, date_to);
-    let expenses = section_balance(transactions, "expenses", date_from, date_to);
+    let income = section_by_type(transactions, classifier, &[AccountType::Revenue], date_from, date_to);
+    let expenses = section_by_type(transactions, classifier, &[AccountType::Expense], date_from, date_to);
 
-    // Combine income + revenue
-    let mut combined_income = income.total.clone();
-    combined_income.add_mixed(&revenue.total);
-    let income_negated = combined_income.negate(); // Income is typically negative in double-entry
-
+    let income_negated = income.total.negate(); // income is negative in double-entry
     let mut net = income_negated.clone();
     net.subtract(&expenses.total);
-
-    let mut income_rows = income.rows;
-    income_rows.extend(revenue.rows);
 
     FinancialStatement {
         title: "Income Statement".to_string(),
         sections: vec![
             StatementSection {
                 title: "Income".to_string(),
-                rows: income_rows,
+                rows: income.rows.clone(),
                 total: mixed_to_entries(&income_negated),
             },
             format_section("Expenses", &expenses),
@@ -381,24 +406,52 @@ pub fn income_statement(
     }
 }
 
-/// Generate a Cash Flow statement.
+/// Generate a Cash Flow statement: changes in cash accounts over the period.
 pub fn cash_flow(
     transactions: &[ResolvedTransaction],
+    classifier: &AccountClassifier,
     date_from: Option<NaiveDate>,
     date_to: Option<NaiveDate>,
 ) -> FinancialStatement {
-    let cash = section_balance(transactions, "assets", date_from, date_to);
+    let mut balances: BTreeMap<String, MixedAmount> = BTreeMap::new();
+    let mut total = MixedAmount::zero();
+
+    for txn in transactions {
+        for posting in &txn.postings {
+            if !date_in_range(posting.date, date_from, date_to) {
+                continue;
+            }
+            if !classifier.is_cash(&posting.account.full) {
+                continue;
+            }
+            balances
+                .entry(posting.account.full.clone())
+                .or_insert_with(MixedAmount::zero)
+                .add_mixed(&posting.amount);
+            total.add_mixed(&posting.amount);
+        }
+    }
+
+    let rows = rows_with_parents(balances);
 
     FinancialStatement {
         title: "Cash Flow".to_string(),
-        sections: vec![format_section("Cash Changes", &cash)],
-        net: mixed_to_entries(&cash.total),
+        sections: vec![StatementSection {
+            title: "Cash Changes".to_string(),
+            rows,
+            total: mixed_to_entries(&total),
+        }],
+        net: mixed_to_entries(&total),
     }
 }
 
-/// Net worth over time (assets - liabilities at end of each month).
+/// Net worth over time: assets + liabilities valued in the target commodity at
+/// the end of each month (market prices; unpriceable holdings excluded from
+/// the number — see `unconvertible_commodities` for the warning list).
 pub fn net_worth_series(
     transactions: &[ResolvedTransaction],
+    classifier: &AccountClassifier,
+    price_db: &PriceDb,
     target_commodity: &str,
     date_from: Option<NaiveDate>,
     date_to: Option<NaiveDate>,
@@ -411,29 +464,27 @@ pub fn net_worth_series(
     let last_date = date_to.unwrap_or(transactions.last().unwrap().date);
 
     let mut points = Vec::new();
-    let mut assets = MixedAmount::zero();
-    let mut liabilities = MixedAmount::zero();
+    let mut balance = MixedAmount::zero();
     let mut txn_idx = 0;
 
     let mut current = end_of_month(first_date);
     while current <= end_of_month(last_date) {
         while txn_idx < transactions.len() && transactions[txn_idx].date <= current {
             for posting in &transactions[txn_idx].postings {
-                if is_account_type(&posting.account.full, "assets") {
-                    assets.add_mixed(&posting.amount);
-                } else if is_account_type(&posting.account.full, "liabilities") {
-                    liabilities.add_mixed(&posting.amount);
+                let t = classifier.classify(&posting.account.full);
+                if t.is_asset() || t == AccountType::Liability {
+                    balance.add_mixed(&posting.amount);
                 }
             }
             txn_idx += 1;
         }
 
-        let net_worth =
-            get_primary_value(&assets, target_commodity) + get_primary_value(&liabilities, target_commodity);
+        let (net_worth, _skipped) =
+            valued_quantity(&balance, target_commodity, price_db, current);
 
         points.push(TimeSeriesPoint {
             date: current.format("%Y-%m-%d").to_string(),
-            value: net_worth.to_string(),
+            value: net_worth.normalize().to_string(),
         });
 
         current = next_month_end(current);
@@ -442,9 +493,10 @@ pub fn net_worth_series(
     points
 }
 
-/// Account balance over time for a specific account.
+/// Account balance over time for a specific account, valued in the target.
 pub fn account_series(
     transactions: &[ResolvedTransaction],
+    price_db: &PriceDb,
     account_prefix: &str,
     target_commodity: &str,
     date_from: Option<NaiveDate>,
@@ -465,17 +517,17 @@ pub fn account_series(
     while current <= end_of_month(last_date) {
         while txn_idx < transactions.len() && transactions[txn_idx].date <= current {
             for posting in &transactions[txn_idx].postings {
-                if posting.account.full.starts_with(account_prefix) {
+                if account_matches_prefix(&posting.account.full, account_prefix) {
                     balance.add_mixed(&posting.amount);
                 }
             }
             txn_idx += 1;
         }
 
-        let value = get_primary_value(&balance, target_commodity);
+        let (value, _skipped) = valued_quantity(&balance, target_commodity, price_db, current);
         points.push(TimeSeriesPoint {
             date: current.format("%Y-%m-%d").to_string(),
-            value: value.to_string(),
+            value: value.normalize().to_string(),
         });
 
         current = next_month_end(current);
@@ -484,9 +536,15 @@ pub fn account_series(
     points
 }
 
-/// Income vs Expenses by month.
+/// Income vs Expenses by month. Values are converted to the target commodity
+/// at each period end; the requested date range is respected exactly (the
+/// first bucket does not swallow days before `date_from`). Signs are true:
+/// a refund-heavy month shows negative expenses rather than being folded to
+/// positive by abs().
 pub fn income_expense_series(
     transactions: &[ResolvedTransaction],
+    classifier: &AccountClassifier,
+    price_db: &PriceDb,
     target_commodity: &str,
     date_from: Option<NaiveDate>,
     date_to: Option<NaiveDate>,
@@ -499,38 +557,40 @@ pub fn income_expense_series(
     let last_date = date_to.unwrap_or(transactions.last().unwrap().date);
 
     let mut points = Vec::new();
-    let mut txn_idx = 0;
 
     let mut current_start = start_of_month(first_date);
     while current_start <= last_date {
         let current_end = end_of_month(current_start);
+        // Clamp the bucket to the requested range.
+        let bucket_from = current_start.max(first_date);
+        let bucket_to = current_end.min(last_date);
+
         let mut income = MixedAmount::zero();
         let mut expenses = MixedAmount::zero();
 
-        while txn_idx < transactions.len() && transactions[txn_idx].date <= current_end {
-            if transactions[txn_idx].date >= current_start {
-                for posting in &transactions[txn_idx].postings {
-                    if is_account_type(&posting.account.full, "income")
-                        || is_account_type(&posting.account.full, "revenue")
-                    {
-                        income.add_mixed(&posting.amount);
-                    } else if is_account_type(&posting.account.full, "expenses") {
-                        expenses.add_mixed(&posting.amount);
-                    }
+        for txn in transactions {
+            for posting in &txn.postings {
+                if !date_in_range(posting.date, Some(bucket_from), Some(bucket_to)) {
+                    continue;
+                }
+                match classifier.classify(&posting.account.full) {
+                    AccountType::Revenue => income.add_mixed(&posting.amount),
+                    AccountType::Expense => expenses.add_mixed(&posting.amount),
+                    _ => {}
                 }
             }
-            txn_idx += 1;
         }
 
-        // Income is negative in double-entry, negate for display
-        let income_val = get_primary_value(&income, target_commodity).abs();
-        // Expenses as negative for the chart
-        let expense_val = -(get_primary_value(&expenses, target_commodity).abs());
+        let (income_sum, _) = valued_quantity(&income, target_commodity, price_db, current_end);
+        let (expense_sum, _) =
+            valued_quantity(&expenses, target_commodity, price_db, current_end);
 
         points.push(IncomeExpensePoint {
             period: current_start.format("%Y-%m").to_string(),
-            income: income_val.to_string(),
-            expenses: expense_val.to_string(),
+            // Income is negative in double-entry; flip for display.
+            income: (-income_sum).normalize().to_string(),
+            // Expenses shown as negative bars (spending) / positive (refunds).
+            expenses: (-expense_sum).normalize().to_string(),
         });
 
         current_start = next_month_start(current_start);
@@ -540,42 +600,35 @@ pub fn income_expense_series(
 }
 
 /// Expense breakdown by subcategory, with optional drill-down via parent_prefix.
-/// - parent_prefix=None: breaks down by top-level expense categories (expenses:X)
-/// - parent_prefix=Some("expenses:food"): breaks down by subcategories of food
 pub fn expense_breakdown(
     transactions: &[ResolvedTransaction],
+    price_db: &PriceDb,
     target_commodity: &str,
     date_from: Option<NaiveDate>,
     date_to: Option<NaiveDate>,
     parent_prefix: Option<&str>,
 ) -> Vec<PieSlice> {
     let prefix = parent_prefix.unwrap_or("expenses");
-    let prefix_lower = prefix.to_lowercase();
     let prefix_depth = prefix.matches(':').count() + 1; // depth of children
+
+    let valuation_date = date_to.unwrap_or_else(|| {
+        transactions
+            .last()
+            .map(|t| t.date)
+            .unwrap_or_else(|| chrono::Local::now().date_naive())
+    });
 
     let mut by_category: BTreeMap<String, Decimal> = BTreeMap::new();
 
     for txn in transactions {
-        if let Some(from) = date_from {
-            if txn.date < from {
-                continue;
-            }
-        }
-        if let Some(to) = date_to {
-            if txn.date > to {
-                continue;
-            }
-        }
         for posting in &txn.postings {
-            let acct_lower = posting.account.full.to_lowercase();
-            // Must be under the prefix
-            if !(acct_lower == prefix_lower
-                || (acct_lower.starts_with(&prefix_lower) && acct_lower.as_bytes().get(prefix_lower.len()) == Some(&b':')))
-            {
+            if !date_in_range(posting.date, date_from, date_to) {
+                continue;
+            }
+            if !account_matches_prefix(&posting.account.full, prefix) {
                 continue;
             }
 
-            // Get the child name at the next depth level
             let category = posting
                 .account
                 .parts
@@ -583,12 +636,17 @@ pub fn expense_breakdown(
                 .cloned()
                 .unwrap_or_else(|| "other".to_string());
 
-            let value = get_primary_value(&posting.amount, target_commodity);
+            let (value, _) = valued_quantity(
+                &posting.amount,
+                target_commodity,
+                price_db,
+                valuation_date,
+            );
             *by_category.entry(category).or_insert(Decimal::ZERO) += value;
         }
     }
 
-    // Sort by value descending, keep top 7, group rest as "other"
+    // Sort by value descending, keep top 7, group rest as "other".
     let mut sorted: Vec<(String, Decimal)> = by_category
         .into_iter()
         .filter(|(_, v)| *v > Decimal::ZERO)
@@ -603,13 +661,13 @@ pub fn expense_breakdown(
             .iter()
             .map(|(name, value)| PieSlice {
                 name: name.clone(),
-                value: value.to_string(),
+                value: value.normalize().to_string(),
             })
             .collect();
         if !other_total.is_zero() {
             result.push(PieSlice {
                 name: "other".to_string(),
-                value: other_total.to_string(),
+                value: other_total.normalize().to_string(),
             });
         }
         result
@@ -618,7 +676,7 @@ pub fn expense_breakdown(
             .into_iter()
             .map(|(name, value)| PieSlice {
                 name,
-                value: value.to_string(),
+                value: value.normalize().to_string(),
             })
             .collect()
     }
@@ -631,35 +689,37 @@ struct SectionData {
     total: MixedAmount,
 }
 
-fn section_balance(
+fn section_by_type(
     transactions: &[ResolvedTransaction],
-    prefix: &str,
+    classifier: &AccountClassifier,
+    types: &[AccountType],
     date_from: Option<NaiveDate>,
     date_to: Option<NaiveDate>,
 ) -> SectionData {
-    let rows = balance_report(transactions, Some(prefix), date_from, date_to);
+    let mut balances: BTreeMap<String, MixedAmount> = BTreeMap::new();
     let mut total = MixedAmount::zero();
 
-    // Total = sum of top-level accounts in this section
     for txn in transactions {
-        if let Some(from) = date_from {
-            if txn.date < from {
-                continue;
-            }
-        }
-        if let Some(to) = date_to {
-            if txn.date > to {
-                continue;
-            }
-        }
         for posting in &txn.postings {
-            if is_account_type(&posting.account.full, prefix) {
-                total.add_mixed(&posting.amount);
+            if !date_in_range(posting.date, date_from, date_to) {
+                continue;
             }
+            let t = classifier.classify(&posting.account.full);
+            if !types.contains(&t) {
+                continue;
+            }
+            balances
+                .entry(posting.account.full.clone())
+                .or_insert_with(MixedAmount::zero)
+                .add_mixed(&posting.amount);
+            total.add_mixed(&posting.amount);
         }
     }
 
-    SectionData { rows, total }
+    SectionData {
+        rows: rows_with_parents(balances),
+        total,
+    }
 }
 
 fn format_section(title: &str, data: &SectionData) -> StatementSection {
@@ -714,6 +774,14 @@ mod tests {
         resolve_transactions(&journal).unwrap()
     }
 
+    fn classifier() -> AccountClassifier {
+        AccountClassifier::default()
+    }
+
+    fn no_prices() -> PriceDb {
+        PriceDb::new()
+    }
+
     #[test]
     fn balance_report_simple() {
         let txns = resolve(
@@ -722,10 +790,10 @@ mod tests {
         let report = balance_report(&txns, None, None, None);
 
         let food = report.iter().find(|r| r.account == "expenses:food").unwrap();
-        assert_eq!(food.amounts[0].quantity, "50.00");
+        assert_eq!(food.amounts[0].quantity, "50");
 
         let checking = report.iter().find(|r| r.account == "assets:checking").unwrap();
-        assert_eq!(checking.amounts[0].quantity, "-50.00");
+        assert_eq!(checking.amounts[0].quantity, "-50");
     }
 
     #[test]
@@ -771,15 +839,59 @@ mod tests {
     }
 
     #[test]
-    fn balance_sheet_basic() {
+    fn register_prefix_has_boundary() {
+        let txns = resolve(
+            "2024-01-10 A\n    assets:bank  $30\n    equity\n\n\
+             2024-01-20 B\n    assets:bankloan  $20\n    equity\n",
+        );
+        let report = register_report(&txns, "assets:bank", None, None);
+        assert_eq!(report.len(), 1);
+        assert_eq!(report[0].account, "assets:bank");
+    }
+
+    #[test]
+    fn balance_sheet_net_includes_liabilities() {
+        let txns = resolve(
+            "2024-01-01 Opening\n    assets:checking  $10000\n    equity:opening\n\n\
+             2024-01-05 Loan\n    assets:checking  $4000\n    liabilities:loan\n",
+        );
+        let bs = balance_sheet(&txns, &classifier(), None, None);
+
+        assert_eq!(bs.sections.len(), 3);
+        // Net = 14000 (assets) + -4000 (liabilities) = 10000
+        let net_usd = bs.net.iter().find(|e| e.commodity == "$").unwrap();
+        assert_eq!(net_usd.quantity, "10000");
+    }
+
+    #[test]
+    fn balance_sheet_is_historical() {
+        // A from-date must NOT exclude opening balances.
         let txns = resolve(
             "2024-01-01 Opening\n    assets:checking  $1000\n    equity:opening\n\n\
-             2024-01-15 Spend\n    expenses:food  $50\n    assets:checking\n",
+             2024-03-15 Spend\n    expenses:food  $50\n    assets:checking\n",
         );
-        let bs = balance_sheet(&txns, None, None);
+        let bs = balance_sheet(
+            &txns,
+            &classifier(),
+            Some(NaiveDate::from_ymd_opt(2024, 3, 1).unwrap()),
+            None,
+        );
+        let assets = &bs.sections[0];
+        let total = assets.total.iter().find(|e| e.commodity == "$").unwrap();
+        assert_eq!(total.quantity, "950");
+    }
 
-        assert_eq!(bs.title, "Balance Sheet");
-        assert_eq!(bs.sections.len(), 3); // Assets, Liabilities, Equity
+    #[test]
+    fn balance_sheet_uses_declared_types() {
+        let journal = parse(
+            "account aktiva:bank  ; type:A\n\n2024-01-01 T\n    aktiva:bank  $100\n    eigenkapital:start  $-100\n",
+        )
+        .unwrap();
+        let txns = resolve_transactions(&journal).unwrap();
+        let c = AccountClassifier::from_journal(&journal);
+        let bs = balance_sheet(&txns, &c, None, None);
+        let assets = &bs.sections[0];
+        assert!(assets.rows.iter().any(|r| r.account == "aktiva:bank"));
     }
 
     #[test]
@@ -788,10 +900,24 @@ mod tests {
             "2024-01-15 Paycheck\n    assets:checking  $3000\n    income:salary\n\n\
              2024-01-20 Grocery\n    expenses:food  $50\n    assets:checking\n",
         );
-        let is = income_statement(&txns, None, None);
+        let is = income_statement(&txns, &classifier(), None, None);
 
         assert_eq!(is.title, "Income Statement");
-        assert_eq!(is.sections.len(), 2); // Income, Expenses
+        assert_eq!(is.sections.len(), 2);
+        let net = is.net.iter().find(|e| e.commodity == "$").unwrap();
+        assert_eq!(net.quantity, "2950");
+    }
+
+    #[test]
+    fn cash_flow_only_cash_accounts() {
+        let txns = resolve(
+            "2024-01-15 Pay\n    assets:bank:checking  $3000\n    income:salary\n\n\
+             2024-01-20 Invest\n    assets:investments:etf  10 VTI @ $200\n    assets:bank:checking  $-2000\n",
+        );
+        let cf = cash_flow(&txns, &classifier(), None, None);
+        // Only the checking account changes count: 3000 - 2000 = 1000.
+        let net = cf.net.iter().find(|e| e.commodity == "$").unwrap();
+        assert_eq!(net.quantity, "1000");
     }
 
     #[test]
@@ -801,7 +927,7 @@ mod tests {
              2024-01-15 B\n    expenses:rent  $1000\n    assets:checking\n\n\
              2024-01-20 C\n    expenses:food  $30\n    assets:checking\n",
         );
-        let breakdown = expense_breakdown(&txns, "$", None, None, None);
+        let breakdown = expense_breakdown(&txns, &no_prices(), "$", None, None, None);
 
         let food = breakdown.iter().find(|s| s.name == "food").unwrap();
         assert_eq!(food.value, "80");
@@ -811,13 +937,28 @@ mod tests {
     }
 
     #[test]
+    fn expense_breakdown_converts_currencies() {
+        let input = "P 2024-01-01 EUR $1.10\n\n\
+                     2024-01-10 A\n    expenses:food  $50\n    assets:checking\n\n\
+                     2024-01-15 B\n    expenses:food  40 EUR\n    assets:eur  -40 EUR\n";
+        let journal = parse(input).unwrap();
+        let txns = resolve_transactions(&journal).unwrap();
+        let db = PriceDb::from_journal(&journal);
+        let breakdown = expense_breakdown(&txns, &db, "$", None, None, None);
+        let food = breakdown.iter().find(|s| s.name == "food").unwrap();
+        // 50 + 40*1.10 = 94, not 90 (raw cross-commodity sum).
+        assert_eq!(food.value, "94");
+    }
+
+    #[test]
     fn expense_breakdown_drilldown() {
         let txns = resolve(
             "2024-01-10 A\n    expenses:food:groceries  $40\n    assets:checking\n\n\
              2024-01-15 B\n    expenses:food:dining  $30\n    assets:checking\n\n\
              2024-01-20 C\n    expenses:rent  $1000\n    assets:checking\n",
         );
-        let breakdown = expense_breakdown(&txns, "$", None, None, Some("expenses:food"));
+        let breakdown =
+            expense_breakdown(&txns, &no_prices(), "$", None, None, Some("expenses:food"));
 
         assert_eq!(breakdown.len(), 2);
         let groceries = breakdown.iter().find(|s| s.name == "groceries").unwrap();
@@ -833,7 +974,7 @@ mod tests {
              2024-01-20 Grocery\n    expenses:food  $50\n    assets:checking\n\n\
              2024-02-15 Pay\n    assets:checking  $3000\n    income:salary\n",
         );
-        let series = income_expense_series(&txns, "$", None, None);
+        let series = income_expense_series(&txns, &classifier(), &no_prices(), "$", None, None);
 
         assert!(series.len() >= 2);
         assert_eq!(series[0].period, "2024-01");
@@ -842,23 +983,105 @@ mod tests {
     }
 
     #[test]
+    fn income_expense_series_respects_from_date() {
+        let txns = resolve(
+            "2024-01-05 Early\n    expenses:food  $100\n    assets:checking\n\n\
+             2024-01-20 Late\n    expenses:food  $50\n    assets:checking\n",
+        );
+        let series = income_expense_series(
+            &txns,
+            &classifier(),
+            &no_prices(),
+            "$",
+            Some(NaiveDate::from_ymd_opt(2024, 1, 15).unwrap()),
+            None,
+        );
+        // The Jan bucket must not include the Jan 5 transaction.
+        assert_eq!(series[0].expenses, "-50");
+    }
+
+    #[test]
+    fn income_expense_refund_month_keeps_sign() {
+        let txns = resolve(
+            "2024-01-15 Refund\n    expenses:food  $-80\n    assets:checking\n",
+        );
+        let series = income_expense_series(&txns, &classifier(), &no_prices(), "$", None, None);
+        // Net-refund month: expenses show positive 80, not -80.
+        assert_eq!(series[0].expenses, "80");
+    }
+
+    #[test]
     fn net_worth_series_basic() {
         let txns = resolve(
             "2024-01-01 Opening\n    assets:checking  $1000\n    equity:opening\n\n\
              2024-02-01 Spend\n    expenses:food  $50\n    assets:checking\n",
         );
-        let series = net_worth_series(&txns, "$", None, None);
+        let series =
+            net_worth_series(&txns, &classifier(), &no_prices(), "$", None, None);
 
         assert!(!series.is_empty());
-        // First month: $1000
         assert_eq!(series[0].value, "1000");
-        // Second month: $950
         assert_eq!(series[1].value, "950");
     }
 
     #[test]
+    fn net_worth_series_values_holdings() {
+        let input = "P 2024-01-31 AAPL $150.00\nP 2024-02-28 AAPL $160.00\n\n\
+                     2024-01-10 Buy\n    assets:stock  10 AAPL @ $140\n    assets:cash  $-1400\n\n\
+                     2024-01-15 Fund\n    assets:cash  $2000\n    income:job\n";
+        let journal = parse(input).unwrap();
+        let txns = resolve_transactions(&journal).unwrap();
+        let db = PriceDb::from_journal(&journal);
+        let series = net_worth_series(&txns, &classifier(), &db, "$", None, None);
+
+        // End of Jan: cash 600 + 10 AAPL @150 = 2100 (not 610 raw-summed).
+        assert_eq!(series[0].value, "2100");
+    }
+
+    #[test]
+    fn net_worth_never_raw_sums_commodities() {
+        // No prices at all: the foreign holding is excluded, not added raw.
+        let txns = resolve(
+            "2024-01-10 T\n    assets:cash  $600\n    income:job  $-600\n\n\
+             2024-01-11 T2\n    assets:stock  10 XYZ\n    equity:conversion  -10 XYZ\n",
+        );
+        let series =
+            net_worth_series(&txns, &classifier(), &no_prices(), "$", None, None);
+        assert_eq!(series[0].value, "600");
+    }
+
+    #[test]
+    fn unconvertible_reported() {
+        let txns = resolve(
+            "2024-01-10 T\n    assets:stock  10 XYZ\n    equity:conversion  -10 XYZ\n",
+        );
+        let list = unconvertible_commodities(
+            &txns,
+            "$",
+            &no_prices(),
+            NaiveDate::from_ymd_opt(2024, 12, 31).unwrap(),
+        );
+        assert_eq!(list, vec!["XYZ".to_string()]);
+    }
+
+    #[test]
+    fn end_of_month_works() {
+        assert_eq!(
+            end_of_month(NaiveDate::from_ymd_opt(2024, 1, 15).unwrap()),
+            NaiveDate::from_ymd_opt(2024, 1, 31).unwrap()
+        );
+        assert_eq!(
+            end_of_month(NaiveDate::from_ymd_opt(2024, 2, 1).unwrap()),
+            NaiveDate::from_ymd_opt(2024, 2, 29).unwrap()
+        );
+        assert_eq!(
+            end_of_month(NaiveDate::from_ymd_opt(2024, 12, 5).unwrap()),
+            NaiveDate::from_ymd_opt(2024, 12, 31).unwrap()
+        );
+    }
+
+    #[test]
     fn audit_cost_transaction_balances() {
-        // This mirrors a real transaction from example.hledger
         let txns = resolve(
             "2025-02-16 * Sell shares of ITOT\n\
              \x20   Assets:US:ETrade:ITOT    -19 ITOT {96.15 USD}\n\
@@ -868,34 +1091,19 @@ mod tests {
         );
         assert_eq!(txns.len(), 1);
         let t = &txns[0];
-
-        // ITOT posting: should have -19 ITOT
         assert_eq!(t.postings[0].amount.get("ITOT"), dec!(-19));
-
-        // Cash posting: 1973.70 USD
         assert_eq!(t.postings[1].amount.get("USD"), dec!(1973.70));
-
-        // PnL (inferred): should balance the USD side
-        // Cost: -19 * 96.15 = -1826.85 USD equivalent
-        // Cash: +1973.70, Commissions: +8.95
-        // So PnL = -(1973.70 + 8.95 - 1826.85) = -155.80 USD
-        // But also +19 ITOT to balance the ITOT commodity
-        let pnl = &t.postings[3];
-        println!("PnL amounts: {:?}", pnl.amount.amounts);
-        // With current code, PnL gets the negation of the sum of explicit amounts
+        // PnL inferred from the cost-converted sum: -155.80 USD.
+        assert_eq!(t.postings[3].amount.get("USD"), dec!(-155.80));
     }
 
     #[test]
     fn audit_example_hledger_asset_balances() {
         let text = std::fs::read_to_string("../../tests/fixtures/example.hledger").unwrap();
         let journal = hledger_parser::parse(&text).expect("parse failed");
-        let txns = resolve(&text[..0]); // dummy - use below
-        let _ = txns;
-
         let journal_txns = crate::balance::resolve_transactions(&journal).expect("resolve failed");
         let report = balance_report(&journal_txns, Some("assets"), None, None);
 
-        // Compare against hledger CLI output (account names preserve original casing):
         let find = |name: &str| report.iter().find(|r| r.account == name)
             .unwrap_or_else(|| panic!("Account {} not found in report", name));
         let has_amt = |row: &BalanceRow, commodity: &str, expected: &str| {
@@ -906,40 +1114,28 @@ mod tests {
             })
         };
 
-        // 1869.39000 USD  Assets:US:BofA:Checking
         let checking = find("Assets:US:BofA:Checking");
         assert!(has_amt(checking, "USD", "1869.39"),
             "BofA Checking: expected 1869.39 USD, got {:?}", checking.amounts);
 
-        // 5724.75000 USD  Assets:US:ETrade:Cash
         let etrade_cash = find("Assets:US:ETrade:Cash");
         assert!(has_amt(etrade_cash, "USD", "5724.75"),
             "ETrade Cash: expected 5724.75 USD, got {:?}", etrade_cash.amounts);
 
-        // 45 GLD  Assets:US:ETrade:GLD
         let gld = find("Assets:US:ETrade:GLD");
-        assert!(has_amt(gld, "GLD", "45"),
-            "GLD: expected 45 GLD, got {:?}", gld.amounts);
+        assert!(has_amt(gld, "GLD", "45"), "GLD: got {:?}", gld.amounts);
 
-        // 62 ITOT  Assets:US:ETrade:ITOT
         let itot = find("Assets:US:ETrade:ITOT");
-        assert!(has_amt(itot, "ITOT", "62"),
-            "ITOT: expected 62 ITOT, got {:?}", itot.amounts);
+        assert!(has_amt(itot, "ITOT", "62"), "ITOT: got {:?}", itot.amounts);
 
-        // 76 VHT  Assets:US:ETrade:VHT
         let vht = find("Assets:US:ETrade:VHT");
-        assert!(has_amt(vht, "VHT", "76"),
-            "VHT: expected 76 VHT, got {:?}", vht.amounts);
+        assert!(has_amt(vht, "VHT", "76"), "VHT: got {:?}", vht.amounts);
 
-        // 284.123 RGAGX  Assets:US:Vanguard:RGAGX
         let rgagx = find("Assets:US:Vanguard:RGAGX");
-        assert!(has_amt(rgagx, "RGAGX", "284.123"),
-            "RGAGX: expected 284.123 RGAGX, got {:?}", rgagx.amounts);
+        assert!(has_amt(rgagx, "RGAGX", "284.123"), "RGAGX: got {:?}", rgagx.amounts);
 
-        // 169.659 VBMPX  Assets:US:Vanguard:VBMPX
         let vbmpx = find("Assets:US:Vanguard:VBMPX");
-        assert!(has_amt(vbmpx, "VBMPX", "169.659"),
-            "VBMPX: expected 169.659 VBMPX, got {:?}", vbmpx.amounts);
+        assert!(has_amt(vbmpx, "VBMPX", "169.659"), "VBMPX: got {:?}", vbmpx.amounts);
     }
 
     #[test]
@@ -960,23 +1156,17 @@ mod tests {
                 .unwrap_or(0.0)
         };
 
-        // hledger -V output: GLD = 2054.25 USD (45 * 45.65)
         let gld = find("Assets:US:ETrade:GLD");
-        let gld_usd = get_usd(gld);
-        assert!((gld_usd - 2054.25).abs() < 1.0,
-            "GLD valued: expected ~2054.25 USD, got {}", gld_usd);
+        assert!((get_usd(gld) - 2054.25).abs() < 1.0,
+            "GLD valued: expected ~2054.25 USD, got {}", get_usd(gld));
 
-        // ITOT = 5476.46 USD (62 * 88.33)
         let itot = find("Assets:US:ETrade:ITOT");
-        let itot_usd = get_usd(itot);
-        assert!((itot_usd - 5476.46).abs() < 1.0,
-            "ITOT valued: expected ~5476.46 USD, got {}", itot_usd);
+        assert!((get_usd(itot) - 5476.46).abs() < 1.0,
+            "ITOT valued: expected ~5476.46 USD, got {}", get_usd(itot));
 
-        // BofA Checking stays as USD (no conversion needed)
         let checking = find("Assets:US:BofA:Checking");
-        let checking_usd = get_usd(checking);
-        assert!((checking_usd - 1869.39).abs() < 0.01,
-            "Checking: expected 1869.39 USD, got {}", checking_usd);
+        assert!((get_usd(checking) - 1869.39).abs() < 0.01,
+            "Checking: expected 1869.39 USD, got {}", get_usd(checking));
     }
 
     #[test]
@@ -991,36 +1181,11 @@ mod tests {
         );
 
         let report = balance_report(&txns, Some("assets"), None, None);
-        println!("=== Multi-commodity balance report ===");
-        for row in &report {
-            println!("  {}: {:?}", row.account, row.amounts);
-        }
-
-        // Stock account should show AAPL
         let stock = report.iter().find(|r| r.account == "Assets:Brokerage:Stock").unwrap();
-        assert!(stock.amounts.iter().any(|a| a.commodity == "AAPL" && a.quantity == "10"),
-            "Stock should have 10 AAPL, got {:?}", stock.amounts);
+        assert!(stock.amounts.iter().any(|a| a.commodity == "AAPL" && a.quantity == "10"));
 
-        // Cash should show USD
         let cash = report.iter().find(|r| r.account == "Assets:Brokerage:Cash").unwrap();
-        assert!(cash.amounts.iter().any(|a| a.commodity == "USD" && a.quantity == "3500"),
-            "Cash should have 3500 USD, got {:?}", cash.amounts);
-    }
-
-    #[test]
-    fn end_of_month_works() {
-        assert_eq!(
-            end_of_month(NaiveDate::from_ymd_opt(2024, 1, 15).unwrap()),
-            NaiveDate::from_ymd_opt(2024, 1, 31).unwrap()
-        );
-        assert_eq!(
-            end_of_month(NaiveDate::from_ymd_opt(2024, 2, 1).unwrap()),
-            NaiveDate::from_ymd_opt(2024, 2, 29).unwrap() // leap year
-        );
-        assert_eq!(
-            end_of_month(NaiveDate::from_ymd_opt(2024, 12, 5).unwrap()),
-            NaiveDate::from_ymd_opt(2024, 12, 31).unwrap()
-        );
+        assert!(cash.amounts.iter().any(|a| a.commodity == "USD" && a.quantity == "3500"));
     }
 
     #[test]
@@ -1028,12 +1193,12 @@ mod tests {
         let text = std::fs::read_to_string("../../tests/fixtures/example.hledger").unwrap();
         let journal = hledger_parser::parse(&text).expect("parse failed");
         let txns = crate::balance::resolve_transactions(&journal).expect("resolve failed");
+        let c = AccountClassifier::from_journal(&journal);
 
         let from = NaiveDate::from_ymd_opt(2025, 2, 1).unwrap();
         let to = NaiveDate::from_ymd_opt(2025, 2, 28).unwrap();
-        let is = income_statement(&txns, Some(from), Some(to));
+        let is = income_statement(&txns, &c, Some(from), Some(to));
 
-        // hledger says: net = 3089.64 USD - 2400 IRAUSD + 10 VACHR
         let net_usd = is.net.iter().find(|a| a.commodity == "USD");
         if let Some(n) = net_usd {
             let val: f64 = n.quantity.parse().unwrap();

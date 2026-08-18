@@ -2,10 +2,11 @@ use std::collections::BTreeSet;
 
 use serde::Serialize;
 
-use hledger_parser::ast::{Journal, JournalItem, Status};
+use hledger_parser::ast::{Journal, Status};
 
 use crate::account::AccountTree;
-use crate::balance::{build_account_tree, resolve_transactions, ResolvedTransaction};
+use crate::balance::{build_account_tree, resolve_journal, ResolvedTransaction, ResolveWarning};
+use crate::classify::AccountClassifier;
 use crate::error::LedgerError;
 use crate::price_db::PriceDb;
 
@@ -14,6 +15,8 @@ pub struct Ledger {
     transactions: Vec<ResolvedTransaction>,
     account_tree: AccountTree,
     price_db: PriceDb,
+    classifier: AccountClassifier,
+    warnings: Vec<ResolveWarning>,
 }
 
 /// A flattened view of a resolved posting for the Tauri command layer.
@@ -49,15 +52,49 @@ pub struct PostingViewRef<'a> {
 impl Ledger {
     /// Create a Ledger from a parsed Journal.
     pub fn from_journal(journal: &Journal) -> Result<Self, LedgerError> {
-        let transactions = resolve_transactions(journal)?;
-        let account_tree = build_account_tree(&transactions);
+        let result = resolve_journal(journal)?;
+        let account_tree = build_account_tree(&result.transactions);
         let price_db = PriceDb::from_journal(journal);
+        let classifier = AccountClassifier::from_journal(journal);
 
         Ok(Self {
-            transactions,
+            transactions: result.transactions,
             account_tree,
             price_db,
+            classifier,
+            warnings: result.warnings,
         })
+    }
+
+    /// Non-fatal problems found during resolution (assertion failures, auto
+    /// posting issues). Must be surfaced in the UI.
+    pub fn warnings(&self) -> &[ResolveWarning] {
+        &self.warnings
+    }
+
+    /// The account type classifier (declared types + name inference).
+    pub fn classifier(&self) -> &AccountClassifier {
+        &self.classifier
+    }
+
+    /// The most-used commodity in the journal, by posting count. Used as the
+    /// default valuation target when the user hasn't chosen one — guessing
+    /// "$" on a EUR journal produced garbage charts.
+    pub fn primary_commodity(&self) -> Option<String> {
+        let mut counts: std::collections::BTreeMap<&str, usize> = Default::default();
+        for txn in &self.transactions {
+            for posting in &txn.postings {
+                for commodity in posting.amount.amounts.keys() {
+                    if !commodity.is_empty() {
+                        *counts.entry(commodity).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+        counts
+            .into_iter()
+            .max_by_key(|(_, n)| *n)
+            .map(|(c, _)| c.to_string())
     }
 
     /// Number of transactions.

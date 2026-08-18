@@ -1,30 +1,49 @@
 use std::collections::BTreeMap;
 
-use chrono::{Datelike, NaiveDate};
+use chrono::{Datelike, Duration, Months, NaiveDate};
 use rust_decimal::Decimal;
 use serde::Serialize;
 
 use crate::amount::MixedAmount;
 use crate::balance::ResolvedTransaction;
-use crate::reports::get_primary_value_pub;
+use crate::price_db::PriceDb;
+use crate::reports::valued_quantity;
 
 use hledger_parser::ast::{Journal, JournalItem};
 
-/// Budget period types mapped from hledger periodic transaction syntax.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
-pub enum BudgetPeriod {
-    Weekly,
-    Monthly,
-    Quarterly,
-    Yearly,
+pub enum PeriodUnit {
+    Day,
+    Week,
+    Month,
+    Quarter,
+    Year,
+}
+
+/// A parsed hledger period expression: `[every N] UNIT [from DATE] [to DATE]`.
+/// Unrecognized expressions are rejected with a warning — silently defaulting
+/// to monthly falsified budgets.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PeriodSpec {
+    pub unit: PeriodUnit,
+    pub every: u32,
+    pub start: Option<NaiveDate>,
+    /// Exclusive end bound (`to DATE` in hledger).
+    pub end: Option<NaiveDate>,
+    /// The original period expression text.
+    pub raw: String,
 }
 
 /// A budget definition extracted from a periodic transaction.
 #[derive(Debug, Clone, Serialize)]
 pub struct Budget {
-    pub period: BudgetPeriod,
+    pub period: PeriodSpec,
+    pub description: String,
     pub entries: Vec<BudgetEntry>,
+    /// Line of the periodic transaction in the source (for editing).
+    pub line: usize,
 }
 
 /// A single budget line item.
@@ -46,6 +65,9 @@ pub struct BudgetRow {
     pub percentage: String,
     pub commodity: String,
     pub over_budget: bool,
+    /// True for income-style goals (negative budget amounts): "over budget"
+    /// then means the goal was missed, not exceeded.
+    pub is_income: bool,
 }
 
 /// A data point for budget vs actual chart series.
@@ -56,15 +78,31 @@ pub struct BudgetSummaryPoint {
     pub actual: String,
 }
 
+pub struct BudgetExtraction {
+    pub budgets: Vec<Budget>,
+    pub warnings: Vec<String>,
+}
+
 /// Parse periodic transactions from a journal into Budget structs.
 pub fn extract_budgets(journal: &Journal) -> Vec<Budget> {
+    extract_budgets_with_warnings(journal).budgets
+}
+
+pub fn extract_budgets_with_warnings(journal: &Journal) -> BudgetExtraction {
     let mut budgets = Vec::new();
+    let mut warnings = Vec::new();
 
     for item in &journal.items {
         if let JournalItem::PeriodicTransaction(pt) = item {
-            let period = match parse_period(&pt.period) {
+            let period = match parse_period_expression(&pt.period) {
                 Some(p) => p,
-                None => continue,
+                None => {
+                    warnings.push(format!(
+                        "line {}: unsupported period expression '~ {}' — this budget is ignored (supported: daily/weekly/monthly/quarterly/yearly, 'every N <unit>s', with optional 'from DATE' / 'to DATE')",
+                        pt.span.line, pt.period
+                    ));
+                    continue;
+                }
             };
 
             let mut entries = Vec::new();
@@ -79,202 +117,408 @@ pub fn extract_budgets(journal: &Journal) -> Vec<Budget> {
             }
 
             if !entries.is_empty() {
-                budgets.push(Budget { period, entries });
+                budgets.push(Budget {
+                    period,
+                    description: pt.description.clone(),
+                    entries,
+                    line: pt.span.line,
+                });
             }
         }
     }
 
-    budgets
+    BudgetExtraction { budgets, warnings }
 }
 
-/// Parse a period string into a BudgetPeriod enum.
-fn parse_period(s: &str) -> Option<BudgetPeriod> {
-    let lower = s.to_lowercase();
-    if lower.contains("year") || lower == "yearly" || lower == "annually" {
-        Some(BudgetPeriod::Yearly)
-    } else if lower.contains("quarter") || lower == "quarterly" {
-        Some(BudgetPeriod::Quarterly)
-    } else if lower.contains("month") || lower == "monthly" || lower == "every month" {
-        Some(BudgetPeriod::Monthly)
-    } else if lower.contains("week") || lower == "weekly" {
-        Some(BudgetPeriod::Weekly)
-    } else {
-        // Default to monthly for unrecognized periods
-        Some(BudgetPeriod::Monthly)
+/// Parse a period expression. Returns None (→ warning upstream) for syntax we
+/// can't faithfully honor.
+pub fn parse_period_expression(s: &str) -> Option<PeriodSpec> {
+    let raw = s.trim().to_string();
+    let lower = raw.to_lowercase();
+    let mut tokens = lower.split_whitespace().peekable();
+
+    let mut unit: Option<PeriodUnit> = None;
+    let mut every: u32 = 1;
+    let mut start: Option<NaiveDate> = None;
+    let mut end: Option<NaiveDate> = None;
+
+    while let Some(tok) = tokens.next() {
+        match tok {
+            "daily" => unit = Some(PeriodUnit::Day),
+            "weekly" => unit = Some(PeriodUnit::Week),
+            "monthly" => unit = Some(PeriodUnit::Month),
+            "quarterly" => unit = Some(PeriodUnit::Quarter),
+            "yearly" | "annually" => unit = Some(PeriodUnit::Year),
+            "every" => {
+                let next = tokens.next()?;
+                // "every 2 weeks" or "every week"
+                if let Ok(n) = next.parse::<u32>() {
+                    if n == 0 {
+                        return None;
+                    }
+                    every = n;
+                    let u = tokens.next()?;
+                    unit = Some(parse_unit_word(u)?);
+                } else {
+                    unit = Some(parse_unit_word(next)?);
+                }
+            }
+            "from" => {
+                let d = tokens.next()?;
+                start = Some(parse_smart_date(d, false)?);
+            }
+            "to" | "until" => {
+                let d = tokens.next()?;
+                end = Some(parse_smart_date(d, true)?);
+            }
+            "in" => {
+                // "in 2026-03": a single month range
+                let d = tokens.next()?;
+                start = Some(parse_smart_date(d, false)?);
+                end = Some(smart_date_range_end(d)?);
+            }
+            _ => {
+                // A bare date range "2026-01..2026-06" or unknown syntax.
+                if let Some((a, b)) = tok.split_once("..") {
+                    start = Some(parse_smart_date(a, false)?);
+                    end = Some(parse_smart_date(b, true)?);
+                } else {
+                    return None;
+                }
+            }
+        }
+    }
+
+    let unit = match unit {
+        Some(u) => u,
+        // Pure date range with no interval: treat as a single monthly-style
+        // occurrence at the range start; reject when there is no range at all.
+        None if start.is_some() => PeriodUnit::Month,
+        None => return None,
+    };
+
+    Some(PeriodSpec {
+        unit,
+        every,
+        start,
+        end,
+        raw,
+    })
+}
+
+fn parse_unit_word(w: &str) -> Option<PeriodUnit> {
+    match w.trim_end_matches(',') {
+        "day" | "days" => Some(PeriodUnit::Day),
+        "week" | "weeks" => Some(PeriodUnit::Week),
+        "month" | "months" => Some(PeriodUnit::Month),
+        "quarter" | "quarters" => Some(PeriodUnit::Quarter),
+        "year" | "years" => Some(PeriodUnit::Year),
+        _ => None,
     }
 }
 
-/// Calculate how many complete periods fit in a date range.
-fn count_periods(period: &BudgetPeriod, date_from: NaiveDate, date_to: NaiveDate) -> Decimal {
-    if date_to < date_from {
-        return Decimal::ZERO;
+/// Parse YYYY, YYYY-MM, or YYYY-MM-DD. When `as_end`, the date is the
+/// EXCLUSIVE end of the named period (hledger `to 2026-03` = up to Mar 1).
+fn parse_smart_date(s: &str, as_end: bool) -> Option<NaiveDate> {
+    let s = s.trim();
+    let parts: Vec<&str> = s.split(['-', '/', '.']).collect();
+    match parts.len() {
+        1 => {
+            let y: i32 = parts[0].parse().ok()?;
+            if !(1000..10000).contains(&y) {
+                return None;
+            }
+            NaiveDate::from_ymd_opt(y, 1, 1)
+        }
+        2 => {
+            let y: i32 = parts[0].parse().ok()?;
+            let m: u32 = parts[1].parse().ok()?;
+            NaiveDate::from_ymd_opt(y, m, 1)
+        }
+        3 => {
+            let y: i32 = parts[0].parse().ok()?;
+            let m: u32 = parts[1].parse().ok()?;
+            let d: u32 = parts[2].parse().ok()?;
+            NaiveDate::from_ymd_opt(y, m, d)
+        }
+        _ => None,
     }
+    .map(|d| {
+        if as_end && parts.len() < 3 {
+            d // year/month end bounds are already exclusive starts
+        } else {
+            d
+        }
+    })
+}
 
-    match period {
-        BudgetPeriod::Monthly => {
-            let months = (date_to.year() - date_from.year()) * 12
-                + (date_to.month() as i32 - date_from.month() as i32)
-                + 1;
-            Decimal::from(months.max(0))
-        }
-        BudgetPeriod::Quarterly => {
-            let from_q = (date_from.month() - 1) / 3;
-            let to_q = (date_to.month() - 1) / 3;
-            let quarters = (date_to.year() - date_from.year()) * 4
-                + (to_q as i32 - from_q as i32)
-                + 1;
-            Decimal::from(quarters.max(0))
-        }
-        BudgetPeriod::Yearly => {
-            let years = date_to.year() - date_from.year() + 1;
-            Decimal::from(years.max(0))
-        }
-        BudgetPeriod::Weekly => {
-            let days = (date_to - date_from).num_days() + 1;
-            let weeks = days / 7;
-            Decimal::from(weeks.max(1))
-        }
+fn smart_date_range_end(s: &str) -> Option<NaiveDate> {
+    let start = parse_smart_date(s, false)?;
+    let parts = s.split(['-', '/', '.']).count();
+    match parts {
+        1 => start.checked_add_months(Months::new(12)),
+        2 => start.checked_add_months(Months::new(1)),
+        _ => start.checked_add_signed(Duration::days(1)),
     }
 }
 
-/// Generate a budget-vs-actual comparison report.
+/// Natural alignment of a unit: where unanchored occurrences start.
+fn align_to_unit(date: NaiveDate, unit: PeriodUnit) -> NaiveDate {
+    match unit {
+        PeriodUnit::Day => date,
+        PeriodUnit::Week => date - Duration::days(date.weekday().num_days_from_monday() as i64),
+        PeriodUnit::Month => NaiveDate::from_ymd_opt(date.year(), date.month(), 1).unwrap(),
+        PeriodUnit::Quarter => {
+            let q_month = ((date.month() - 1) / 3) * 3 + 1;
+            NaiveDate::from_ymd_opt(date.year(), q_month, 1).unwrap()
+        }
+        PeriodUnit::Year => NaiveDate::from_ymd_opt(date.year(), 1, 1).unwrap(),
+    }
+}
+
+fn step(date: NaiveDate, unit: PeriodUnit, every: u32) -> Option<NaiveDate> {
+    match unit {
+        PeriodUnit::Day => date.checked_add_signed(Duration::days(every as i64)),
+        PeriodUnit::Week => date.checked_add_signed(Duration::weeks(every as i64)),
+        PeriodUnit::Month => date.checked_add_months(Months::new(every)),
+        PeriodUnit::Quarter => date.checked_add_months(Months::new(3 * every)),
+        PeriodUnit::Year => date.checked_add_months(Months::new(12 * every)),
+    }
+}
+
+/// Count budget occurrences whose start date falls within [from, to],
+/// honoring the spec's own from/to bounds. This is hledger's --budget model:
+/// goals accrue per occurrence, not per calendar period touched — a
+/// Jan-15..Feb-5 range holds ONE monthly occurrence (Feb 1), not two.
+pub fn count_occurrences(spec: &PeriodSpec, from: NaiveDate, to: NaiveDate) -> u32 {
+    if to < from {
+        return 0;
+    }
+
+    // Anchor: the spec's start date if given, else natural alignment.
+    let anchor = spec.start.unwrap_or_else(|| align_to_unit(from, spec.unit));
+
+    let mut count = 0u32;
+    let mut current = anchor;
+
+    // Fast-forward close to the range (bounded loop for safety).
+    let mut guard = 0u32;
+    while current < from {
+        match step(current, spec.unit, spec.every) {
+            Some(next) => current = next,
+            None => return count,
+        }
+        guard += 1;
+        if guard > 100_000 {
+            return count;
+        }
+    }
+
+    while current <= to {
+        if let Some(end) = spec.end {
+            if current >= end {
+                break;
+            }
+        }
+        if current >= from && spec.start.map_or(true, |s| current >= s) {
+            count += 1;
+        }
+        match step(current, spec.unit, spec.every) {
+            Some(next) => current = next,
+            None => break,
+        }
+        guard += 1;
+        if guard > 100_000 {
+            break;
+        }
+    }
+
+    count
+}
+
+/// Generate a budget-vs-actual comparison report. Goals from multiple budgets
+/// for the same account+commodity are merged into one row (hledger behavior);
+/// actuals are valued into the entry's commodity via the price database.
 pub fn budget_vs_actual(
     transactions: &[ResolvedTransaction],
     budgets: &[Budget],
+    price_db: &PriceDb,
     target_commodity: &str,
     date_from: Option<NaiveDate>,
     date_to: Option<NaiveDate>,
 ) -> Vec<BudgetRow> {
-    // Default date range: full journal span if not specified
     let from = date_from.unwrap_or_else(|| {
-        transactions.first().map(|t| t.date).unwrap_or_else(|| chrono::Local::now().date_naive())
+        transactions
+            .first()
+            .map(|t| t.date)
+            .unwrap_or_else(|| chrono::Local::now().date_naive())
     });
     let to = date_to.unwrap_or_else(|| {
-        transactions.last().map(|t| t.date).unwrap_or_else(|| chrono::Local::now().date_naive())
+        transactions
+            .last()
+            .map(|t| t.date)
+            .unwrap_or_else(|| chrono::Local::now().date_naive())
     });
 
-    // Compute actual spending per account
+    // Actual amounts per account (inclusive of children), kept as MixedAmount
+    // so valuation is commodity-correct.
     let mut actuals: BTreeMap<String, MixedAmount> = BTreeMap::new();
     for txn in transactions {
-        if txn.date < from || txn.date > to {
-            continue;
-        }
         for posting in &txn.postings {
-            let entry = actuals
+            if posting.date < from || posting.date > to {
+                continue;
+            }
+            actuals
                 .entry(posting.account.full.clone())
-                .or_insert_with(MixedAmount::zero);
-            entry.add_mixed(&posting.amount);
+                .or_insert_with(MixedAmount::zero)
+                .add_mixed(&posting.amount);
         }
     }
-
-    // Also accumulate parent account totals for actuals
-    let leaf_accounts: Vec<String> = actuals.keys().cloned().collect();
-    let mut inclusive_actuals: BTreeMap<String, Decimal> = BTreeMap::new();
-    for (account, amt) in &actuals {
-        let val = get_primary_value_pub(amt, target_commodity);
-        *inclusive_actuals.entry(account.clone()).or_default() += val;
-    }
-    // Add child values to parent accounts
-    for account in &leaf_accounts {
-        let val = get_primary_value_pub(actuals.get(account).unwrap(), target_commodity);
+    // Roll leaf actuals up into parents.
+    let leaves: Vec<(String, MixedAmount)> =
+        actuals.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    for (account, amt) in &leaves {
         let parts: Vec<&str> = account.split(':').collect();
         for depth in 1..parts.len() {
             let parent = parts[..depth].join(":");
-            *inclusive_actuals.entry(parent).or_default() += val;
+            actuals
+                .entry(parent)
+                .or_insert_with(MixedAmount::zero)
+                .add_mixed(amt);
         }
     }
 
-    let mut rows = Vec::new();
-
+    // Merge goals per (account, commodity).
+    let mut goals: BTreeMap<(String, String), Decimal> = BTreeMap::new();
     for budget in budgets {
-        let period_count = count_periods(&budget.period, from, to);
-
+        let occurrences = count_occurrences(&budget.period, from, to);
+        if occurrences == 0 {
+            continue;
+        }
         for entry in &budget.entries {
-            let budget_amount = entry.amount * period_count;
-            let actual_amount = inclusive_actuals.get(&entry.account).copied().unwrap_or(Decimal::ZERO);
-
-            let difference = budget_amount - actual_amount;
-            let percentage = if budget_amount.is_zero() {
-                if actual_amount.is_zero() {
-                    Decimal::ZERO
-                } else {
-                    Decimal::from(100)
-                }
-            } else {
-                (actual_amount / budget_amount * Decimal::from(100)).round_dp(0)
-            };
-
             let commodity = if entry.commodity.is_empty() {
                 target_commodity.to_string()
             } else {
                 entry.commodity.clone()
             };
-
-            rows.push(BudgetRow {
-                account: entry.account.clone(),
-                budget: budget_amount.to_string(),
-                actual: actual_amount.to_string(),
-                difference: difference.to_string(),
-                percentage: format!("{}%", percentage),
-                commodity,
-                over_budget: actual_amount > budget_amount,
-            });
+            *goals
+                .entry((entry.account.clone(), commodity))
+                .or_insert(Decimal::ZERO) += entry.amount * Decimal::from(occurrences);
         }
+    }
+
+    let mut rows = Vec::new();
+    for ((account, commodity), budget_amount) in goals {
+        let actual_mixed = actuals.get(&account).cloned().unwrap_or_default();
+        let (actual_amount, _skipped) =
+            valued_quantity(&actual_mixed, &commodity, price_db, to);
+
+        let difference = budget_amount - actual_amount;
+        let percentage = if budget_amount.is_zero() {
+            if actual_amount.is_zero() {
+                Decimal::ZERO
+            } else {
+                Decimal::from(100)
+            }
+        } else {
+            (actual_amount / budget_amount * Decimal::from(100)).round_dp(0)
+        };
+
+        let is_income = budget_amount < Decimal::ZERO;
+
+        rows.push(BudgetRow {
+            account,
+            budget: budget_amount.to_string(),
+            actual: actual_amount.to_string(),
+            difference: difference.to_string(),
+            percentage: format!("{}%", percentage),
+            commodity,
+            // "Worse than goal" in both directions: spent more than an
+            // expense goal, or earned less than an income goal.
+            over_budget: actual_amount > budget_amount
+                && !is_income
+                || (is_income && actual_amount > budget_amount),
+            is_income,
+        });
     }
 
     rows
 }
 
-/// Generate monthly budget vs actual summary for charts.
+/// Monthly budget-vs-actual chart series. Goals are occurrence-based: a
+/// yearly budget contributes only in the month containing its occurrence,
+/// not 12x across the year. Respects the requested date range.
 pub fn budget_summary_series(
     transactions: &[ResolvedTransaction],
     budgets: &[Budget],
+    price_db: &PriceDb,
     target_commodity: &str,
+    date_from: Option<NaiveDate>,
+    date_to: Option<NaiveDate>,
 ) -> Vec<BudgetSummaryPoint> {
     if transactions.is_empty() || budgets.is_empty() {
         return vec![];
     }
 
-    let first_date = transactions.first().unwrap().date;
-    let last_date = transactions.last().unwrap().date;
+    let first_date = date_from.unwrap_or_else(|| transactions.first().unwrap().date);
+    let last_date = date_to.unwrap_or_else(|| transactions.last().unwrap().date);
+
+    let budget_accounts: Vec<&str> = budgets
+        .iter()
+        .flat_map(|b| b.entries.iter().map(|e| e.account.as_str()))
+        .collect();
 
     let mut points = Vec::new();
     let mut current = NaiveDate::from_ymd_opt(first_date.year(), first_date.month(), 1).unwrap();
 
     while current <= last_date {
         let month_end = end_of_month(current);
+        let bucket_from = current.max(first_date);
+        let bucket_to = month_end.min(last_date);
 
-        // Calculate total budget for this month
+        // Goal: occurrences of each budget starting in this month.
         let mut total_budget = Decimal::ZERO;
         for budget in budgets {
-            let period_count = count_periods(&budget.period, current, month_end);
+            let occurrences = count_occurrences(&budget.period, current, month_end);
+            if occurrences == 0 {
+                continue;
+            }
             for entry in &budget.entries {
-                total_budget += entry.amount * period_count;
+                let goal = entry.amount * Decimal::from(occurrences);
+                let commodity = if entry.commodity.is_empty() {
+                    target_commodity
+                } else {
+                    &entry.commodity
+                };
+                if commodity == target_commodity {
+                    total_budget += goal;
+                } else if let Some(converted) =
+                    price_db.convert(goal, commodity, target_commodity, month_end)
+                {
+                    total_budget += converted;
+                }
             }
         }
 
-        // Collect budget account names
-        let budget_accounts: Vec<&str> = budgets
-            .iter()
-            .flat_map(|b| b.entries.iter().map(|e| e.account.as_str()))
-            .collect();
-
-        // Calculate total actual spending on budgeted accounts
-        let mut total_actual = Decimal::ZERO;
+        // Actual spending on budgeted accounts within the clamped bucket.
+        let mut actual_mixed = MixedAmount::zero();
         for txn in transactions {
-            if txn.date < current || txn.date > month_end {
-                continue;
-            }
             for posting in &txn.postings {
-                // Check if posting account matches any budget account (including children)
+                if posting.date < bucket_from || posting.date > bucket_to {
+                    continue;
+                }
                 for ba in &budget_accounts {
-                    if posting.account.full == *ba || posting.account.full.starts_with(&format!("{}:", ba)) {
-                        total_actual += get_primary_value_pub(&posting.amount, target_commodity);
+                    if posting.account.full == *ba
+                        || posting.account.full.starts_with(&format!("{}:", ba))
+                    {
+                        actual_mixed.add_mixed(&posting.amount);
                         break;
                     }
                 }
             }
         }
+        let (total_actual, _) =
+            valued_quantity(&actual_mixed, target_commodity, price_db, month_end);
 
         points.push(BudgetSummaryPoint {
             period: current.format("%Y-%m").to_string(),
@@ -282,7 +526,6 @@ pub fn budget_summary_series(
             actual: total_actual.to_string(),
         });
 
-        // Next month
         current = if current.month() == 12 {
             NaiveDate::from_ymd_opt(current.year() + 1, 1, 1).unwrap()
         } else {
@@ -328,6 +571,14 @@ mod tests {
         resolve_transactions(&journal).unwrap()
     }
 
+    fn d(y: i32, m: u32, day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, day).unwrap()
+    }
+
+    fn db() -> PriceDb {
+        PriceDb::new()
+    }
+
     #[test]
     fn extract_monthly_budget() {
         let journal = parse(
@@ -337,32 +588,71 @@ mod tests {
         let budgets = extract_budgets(&journal);
 
         assert_eq!(budgets.len(), 1);
-        assert_eq!(budgets[0].period, BudgetPeriod::Monthly);
+        assert_eq!(budgets[0].period.unit, PeriodUnit::Month);
         assert_eq!(budgets[0].entries.len(), 2);
         assert_eq!(budgets[0].entries[0].account, "expenses:food");
         assert_eq!(budgets[0].entries[0].amount, dec!(400.00));
-        assert_eq!(budgets[0].entries[1].account, "expenses:rent");
-        assert_eq!(budgets[0].entries[1].amount, dec!(1200.00));
     }
 
     #[test]
-    fn extract_quarterly_budget() {
+    fn parse_every_n_weeks() {
+        let spec = parse_period_expression("every 2 weeks").unwrap();
+        assert_eq!(spec.unit, PeriodUnit::Week);
+        assert_eq!(spec.every, 2);
+    }
+
+    #[test]
+    fn parse_monthly_from() {
+        let spec = parse_period_expression("monthly from 2026-03").unwrap();
+        assert_eq!(spec.unit, PeriodUnit::Month);
+        assert_eq!(spec.start, Some(d(2026, 3, 1)));
+    }
+
+    #[test]
+    fn unknown_period_is_rejected_with_warning_not_monthly() {
         let journal = parse(
-            "~ quarterly\n    expenses:insurance  $600.00\n    assets:checking\n",
+            "~ every 3rd thursday  Odd budget\n    expenses:x  $10\n    assets:cash\n",
         )
         .unwrap();
-        let budgets = extract_budgets(&journal);
-
-        assert_eq!(budgets.len(), 1);
-        assert_eq!(budgets[0].period, BudgetPeriod::Quarterly);
+        let extraction = extract_budgets_with_warnings(&journal);
+        assert!(extraction.budgets.is_empty());
+        assert_eq!(extraction.warnings.len(), 1);
+        assert!(extraction.warnings[0].contains("unsupported period expression"));
     }
 
     #[test]
-    fn budget_times_three_months() {
-        let from = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
-        let to = NaiveDate::from_ymd_opt(2024, 3, 31).unwrap();
-        let count = count_periods(&BudgetPeriod::Monthly, from, to);
-        assert_eq!(count, dec!(3));
+    fn occurrences_partial_range_not_calendar_touched() {
+        // Jan-15..Feb-5 contains exactly ONE monthly occurrence (Feb 1).
+        let spec = parse_period_expression("monthly").unwrap();
+        assert_eq!(count_occurrences(&spec, d(2026, 1, 15), d(2026, 2, 5)), 1);
+        // A 1-day range mid-month contains none.
+        assert_eq!(count_occurrences(&spec, d(2026, 1, 15), d(2026, 1, 15)), 0);
+        // A full month contains one.
+        assert_eq!(count_occurrences(&spec, d(2026, 1, 1), d(2026, 1, 31)), 1);
+        // Three full months contain three.
+        assert_eq!(count_occurrences(&spec, d(2026, 1, 1), d(2026, 3, 31)), 3);
+    }
+
+    #[test]
+    fn occurrences_every_two_weeks() {
+        let spec = parse_period_expression("every 2 weeks").unwrap();
+        // January 2026: aligned to Monday Dec 29; occurrences Jan 12, Jan 26.
+        let n = count_occurrences(&spec, d(2026, 1, 1), d(2026, 1, 31));
+        assert_eq!(n, 2);
+    }
+
+    #[test]
+    fn occurrences_respect_from_bound() {
+        let spec = parse_period_expression("monthly from 2026-03").unwrap();
+        assert_eq!(count_occurrences(&spec, d(2026, 1, 1), d(2026, 1, 31)), 0);
+        assert_eq!(count_occurrences(&spec, d(2026, 3, 1), d(2026, 3, 31)), 1);
+    }
+
+    #[test]
+    fn occurrences_yearly_only_in_january() {
+        let spec = parse_period_expression("yearly").unwrap();
+        assert_eq!(count_occurrences(&spec, d(2026, 1, 1), d(2026, 1, 31)), 1);
+        assert_eq!(count_occurrences(&spec, d(2026, 6, 1), d(2026, 6, 30)), 0);
     }
 
     #[test]
@@ -373,9 +663,8 @@ mod tests {
         let budgets = extract_budgets(&journal);
         let txns = resolve(input);
 
-        let from = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
-        let to = NaiveDate::from_ymd_opt(2024, 1, 31).unwrap();
-        let report = budget_vs_actual(&txns, &budgets, "$", Some(from), Some(to));
+        let report =
+            budget_vs_actual(&txns, &budgets, &db(), "$", Some(d(2024, 1, 1)), Some(d(2024, 1, 31)));
 
         assert_eq!(report.len(), 1);
         assert_eq!(report[0].account, "expenses:food");
@@ -393,51 +682,94 @@ mod tests {
         let budgets = extract_budgets(&journal);
         let txns = resolve(input);
 
-        let from = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
-        let to = NaiveDate::from_ymd_opt(2024, 1, 31).unwrap();
-        let report = budget_vs_actual(&txns, &budgets, "$", Some(from), Some(to));
+        let report =
+            budget_vs_actual(&txns, &budgets, &db(), "$", Some(d(2024, 1, 1)), Some(d(2024, 1, 31)));
 
-        assert_eq!(report.len(), 1);
         assert!(report[0].over_budget);
         assert_eq!(report[0].percentage, "125%");
     }
 
     #[test]
-    fn budget_vs_actual_under_budget() {
-        let input = "~ monthly\n    expenses:food  $400.00\n    income\n\n\
-                     2024-01-15 Grocery\n    expenses:food  $200.00\n    assets:checking\n";
+    fn duplicate_budgets_merge_into_one_row() {
+        // Two ~ blocks for the same account: goals merge, one row (hledger).
+        let input = "~ monthly\n    expenses:food  $100.00\n    income\n\n\
+                     ~ monthly\n    expenses:food  $150.00\n    income\n\n\
+                     2024-01-15 G\n    expenses:food  $80.00\n    assets:cash\n";
         let journal = parse(input).unwrap();
         let budgets = extract_budgets(&journal);
         let txns = resolve(input);
 
-        let from = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
-        let to = NaiveDate::from_ymd_opt(2024, 1, 31).unwrap();
-        let report = budget_vs_actual(&txns, &budgets, "$", Some(from), Some(to));
-
+        let report =
+            budget_vs_actual(&txns, &budgets, &db(), "$", Some(d(2024, 1, 1)), Some(d(2024, 1, 31)));
         assert_eq!(report.len(), 1);
-        assert!(!report[0].over_budget);
-        assert_eq!(report[0].difference, "200.00");
+        assert_eq!(report[0].budget, "250.00");
+        assert_eq!(report[0].actual, "80.00");
     }
 
     #[test]
-    fn budget_multiple_accounts() {
-        let input = "~ monthly\n    expenses:food  $400.00\n    expenses:rent  $1200.00\n    income\n\n\
-                     2024-01-15 Grocery\n    expenses:food  $350.00\n    assets:checking\n\n\
-                     2024-01-01 Rent\n    expenses:rent  $1200.00\n    assets:checking\n";
+    fn income_budget_signs_coherent() {
+        let input = "~ monthly\n    income:salary  $-3000.00\n    expenses\n\n\
+                     2024-01-15 Pay\n    assets:bank  $3200.00\n    income:salary  $-3200.00\n";
         let journal = parse(input).unwrap();
         let budgets = extract_budgets(&journal);
         let txns = resolve(input);
 
-        let from = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
-        let to = NaiveDate::from_ymd_opt(2024, 1, 31).unwrap();
-        let report = budget_vs_actual(&txns, &budgets, "$", Some(from), Some(to));
+        let report =
+            budget_vs_actual(&txns, &budgets, &db(), "$", Some(d(2024, 1, 1)), Some(d(2024, 1, 31)));
+        let salary = report.iter().find(|r| r.account == "income:salary").unwrap();
+        assert!(salary.is_income);
+        // Earned MORE than the goal: 107%, and not flagged as "over budget".
+        assert_eq!(salary.percentage, "107%");
+        assert!(!salary.over_budget);
+    }
 
-        assert_eq!(report.len(), 2);
-        let food = report.iter().find(|r| r.account == "expenses:food").unwrap();
-        assert_eq!(food.actual, "350.00");
-        let rent = report.iter().find(|r| r.account == "expenses:rent").unwrap();
-        assert_eq!(rent.actual, "1200.00");
-        assert!(!rent.over_budget);
+    #[test]
+    fn income_budget_missed_goal_flagged() {
+        let input = "~ monthly\n    income:salary  $-3000.00\n    expenses\n\n\
+                     2024-01-15 Pay\n    assets:bank  $2000.00\n    income:salary  $-2000.00\n";
+        let journal = parse(input).unwrap();
+        let budgets = extract_budgets(&journal);
+        let txns = resolve(input);
+
+        let report =
+            budget_vs_actual(&txns, &budgets, &db(), "$", Some(d(2024, 1, 1)), Some(d(2024, 1, 31)));
+        let salary = report.iter().find(|r| r.account == "income:salary").unwrap();
+        assert!(salary.over_budget, "missed income goal should be flagged");
+    }
+
+    #[test]
+    fn yearly_budget_not_charged_every_month_in_series() {
+        let input = "~ yearly\n    expenses:insurance  $1200.00\n    assets:cash\n\n\
+                     2024-01-05 Ins\n    expenses:insurance  $1200.00\n    assets:cash\n\n\
+                     2024-06-05 Other\n    expenses:other  $10.00\n    assets:cash\n";
+        let journal = parse(input).unwrap();
+        let budgets = extract_budgets(&journal);
+        let txns = resolve(input);
+
+        let series = budget_summary_series(&txns, &budgets, &db(), "$", None, None);
+        // January: the yearly occurrence.
+        assert_eq!(series[0].budgeted, "1200.00");
+        // June: no occurrence, budget 0.
+        let june = series.iter().find(|p| p.period == "2024-06").unwrap();
+        assert_eq!(june.budgeted, "0");
+    }
+
+    #[test]
+    fn summary_series_respects_date_range() {
+        let input = "~ monthly\n    expenses:food  $100.00\n    income\n\n\
+                     2024-01-15 A\n    expenses:food  $50.00\n    assets:cash\n\n\
+                     2024-03-15 B\n    expenses:food  $70.00\n    assets:cash\n";
+        let journal = parse(input).unwrap();
+        let budgets = extract_budgets(&journal);
+        let txns = resolve(input);
+
+        let series = budget_summary_series(
+            &txns, &budgets, &db(), "$",
+            Some(d(2024, 3, 1)), Some(d(2024, 3, 31)),
+        );
+        assert_eq!(series.len(), 1);
+        assert_eq!(series[0].period, "2024-03");
+        assert_eq!(series[0].actual, "70.00");
     }
 
     #[test]
@@ -452,37 +784,19 @@ mod tests {
     }
 
     #[test]
-    fn count_periods_yearly() {
-        let from = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
-        let to = NaiveDate::from_ymd_opt(2024, 12, 31).unwrap();
-        assert_eq!(count_periods(&BudgetPeriod::Yearly, from, to), dec!(1));
-    }
-
-    #[test]
-    fn count_periods_quarterly() {
-        let from = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
-        let to = NaiveDate::from_ymd_opt(2024, 6, 30).unwrap();
-        assert_eq!(count_periods(&BudgetPeriod::Quarterly, from, to), dec!(2));
-    }
-
-    #[test]
     fn audit_sample_budget_journal() {
         let text = std::fs::read_to_string("../../tests/fixtures/sample-with-budget.journal").unwrap();
         let journal = hledger_parser::parse(&text).expect("parse failed");
         let budgets = extract_budgets(&journal);
         assert_eq!(budgets.len(), 1, "Should find 1 budget");
-        assert_eq!(budgets[0].period, BudgetPeriod::Monthly);
+        assert_eq!(budgets[0].period.unit, PeriodUnit::Month);
         assert_eq!(budgets[0].entries.len(), 6, "Should have 6 budget entries");
 
         let txns = crate::balance::resolve_transactions(&journal).expect("resolve failed");
-        let from = chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
-        let to = chrono::NaiveDate::from_ymd_opt(2026, 1, 31).unwrap();
-        let report = budget_vs_actual(&txns, &budgets, "$", Some(from), Some(to));
-
-        println!("=== Budget vs Actual Jan 2026 ===");
-        for row in &report {
-            println!("  {}: budget={}, actual={}, {}", row.account, row.budget, row.actual, row.percentage);
-        }
+        let report = budget_vs_actual(
+            &txns, &budgets, &db(), "$",
+            Some(d(2026, 1, 1)), Some(d(2026, 1, 31)),
+        );
 
         let rent = report.iter().find(|r| r.account == "expenses:rent").unwrap();
         assert_eq!(rent.percentage, "100%", "Rent should be exactly on budget");

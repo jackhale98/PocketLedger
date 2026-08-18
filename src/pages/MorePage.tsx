@@ -26,8 +26,8 @@ const THEME_OPTIONS: { value: Theme; label: string }[] = [
 ];
 
 export function MorePage() {
-  const { defaultCurrency, setDefaultCurrency, theme, setTheme, setLastJournalPath } = useSettingsStore();
-  const { refresh, summary, switchJournal } = useJournalStore();
+  const { defaultCurrency, setDefaultCurrency, theme, setTheme, setLastJournalPath, lastJournalPath } = useSettingsStore();
+  const { refresh, summary, switchJournal, openJournal } = useJournalStore();
   const [customCurrency, setCustomCurrency] = useState("");
   const [showCustom, setShowCustom] = useState(false);
   const [showReconciliation, setShowReconciliation] = useState(false);
@@ -50,11 +50,23 @@ export function MorePage() {
       });
       if (selected) {
         const path = selected as string;
-        await switchJournal(path);
-        await setLastJournalPath(path);
+        const ok = await switchJournal(path);
+        if (ok) {
+          await setLastJournalPath(path);
+        }
       }
     } catch (err) {
       console.error("Switch journal error:", err);
+    }
+  };
+
+  const handleReloadJournal = async () => {
+    // Re-open from disk (refresh() only re-reads in-memory backend state).
+    // Failures set the journal store's error, shown in the app error banner.
+    if (lastJournalPath) {
+      await openJournal(lastJournalPath);
+    } else {
+      await refresh();
     }
   };
 
@@ -144,7 +156,7 @@ export function MorePage() {
             <span className="text-gray-400">&rsaquo;</span>
           </button>
           <button
-            onClick={() => refresh()}
+            onClick={handleReloadJournal}
             className="w-full px-4 py-3 bg-gray-50 dark:bg-gray-800 rounded-lg text-sm text-left text-gray-900 dark:text-gray-100 active:bg-gray-100 dark:active:bg-gray-700 min-h-[48px] flex items-center justify-between"
           >
             <div>

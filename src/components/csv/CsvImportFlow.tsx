@@ -35,7 +35,15 @@ export function CsvImportFlow({ onDone }: { onDone: () => void }) {
       setPreviewTxns(result.transactions);
       setWarnings(result.warnings);
       setRowsProcessed(result.rowsProcessed);
-      setSelected(new Set(result.transactions.map((_, i) => i)));
+      // Rows already present in the journal start deselected — importing an
+      // overlapping statement used to silently double transactions.
+      setSelected(
+        new Set(
+          result.transactions
+            .map((t, i) => (t.isDuplicate ? -1 : i))
+            .filter((i) => i >= 0)
+        )
+      );
       setStep("preview");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -186,8 +194,16 @@ export function CsvImportFlow({ onDone }: { onDone: () => void }) {
                   </div>
                   <div className="flex-1 min-w-0">
                     <div className="flex justify-between items-center">
-                      <span className="text-sm text-gray-900 dark:text-gray-100 truncate">
-                        {txn.description}
+                      <span className="text-sm text-gray-900 dark:text-gray-100 truncate flex items-center gap-1.5">
+                        {txn.isDuplicate && (
+                          <span
+                            className="shrink-0 text-[10px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-400"
+                            title="A transaction with this date, amount and description is already in the journal"
+                          >
+                            dup
+                          </span>
+                        )}
+                        <span className="truncate" title={txn.description}>{txn.description}</span>
                       </span>
                       <span className={`text-sm font-mono shrink-0 ml-2 ${
                         parseFloat(txn.amount) < 0 ? "text-red-500" : "text-green-500"

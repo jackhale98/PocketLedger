@@ -4,11 +4,19 @@ use std::sync::Mutex;
 
 pub struct AppState {
     pub journal: Option<commands::journal::LoadedJournal>,
+    /// Bumped on every journal mutation or (re)load. Long-running flows like
+    /// reconciliation hold indices into the resolved transaction list; a
+    /// generation mismatch means those indices are stale and must not be
+    /// used to patch the file.
+    pub generation: u64,
 }
 
 impl Default for AppState {
     fn default() -> Self {
-        Self { journal: None }
+        Self {
+            journal: None,
+            generation: 0,
+        }
     }
 }
 
@@ -52,7 +60,9 @@ pub fn run() {
             commands::budget::budget_vs_actual,
             commands::budget::budget_summary_chart,
             commands::budget::save_budget,
+            commands::budget::delete_budget,
             commands::budget::list_budget_accounts,
+            commands::reports::valuation_info,
             commands::journal::switch_journal,
             commands::csv_import::preview_csv_import,
             commands::csv_import::import_csv,

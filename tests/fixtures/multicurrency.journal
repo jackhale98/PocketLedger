@@ -39,6 +39,6 @@ P 2024-02-01 AAPL $188.50
     income:dividends
 
 2024-02-05 Sell Partial Stock
-    assets:investments:aapl  -5 AAPL @ $188.50
+    assets:investments:aapl  -5 AAPL @ $190.00
     assets:bank:usd  $942.50
-    income:capital gains  $-57.50
+    expenses:capital losses  $7.50

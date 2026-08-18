@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect } from "react";
 import { Autocomplete } from "../common/Autocomplete";
 import { useSettingsStore } from "../../store/settingsStore";
 import * as api from "../../api/commands";
+import { normalizeAmountInput } from "../../utils/amount";
 import type { BudgetInfo } from "../../api/types";
 
 const PERIOD_OPTIONS = [
@@ -30,12 +31,22 @@ export function BudgetEditor({ onDone }: { onDone: () => void }) {
   const [preview, setPreview] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** Source line of the budget being edited; null = creating a new one. */
+  const [editingLine, setEditingLine] = useState<number | null>(null);
+  const [deletingLine, setDeletingLine] = useState<number | null>(null);
 
   useEffect(() => {
-    api.getBudgets().then((b) => {
-      setExistingBudgets(b);
-      setLoading(false);
-    });
+    api
+      .getBudgets()
+      .then((b) => {
+        setExistingBudgets(b);
+      })
+      .catch((err) => {
+        setError(err instanceof Error ? err.message : String(err));
+      })
+      .finally(() => {
+        setLoading(false);
+      });
   }, []);
 
   const loadFromExisting = (budget: BudgetInfo) => {
@@ -49,6 +60,7 @@ export function BudgetEditor({ onDone }: { onDone: () => void }) {
     );
     setPreview(null);
     setError(null);
+    setEditingLine(budget.line);
     setEditing(true);
   };
 
@@ -57,7 +69,22 @@ export function BudgetEditor({ onDone }: { onDone: () => void }) {
     setLines([{ account: "", amount: "", commodity: defaultCurrency }]);
     setPreview(null);
     setError(null);
+    setEditingLine(null);
     setEditing(true);
+  };
+
+  const handleDelete = async (budget: BudgetInfo) => {
+    try {
+      setDeletingLine(budget.line);
+      await api.deleteBudget(budget.line);
+      const b = await api.getBudgets();
+      setExistingBudgets(b);
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setDeletingLine(null);
+    }
   };
 
   const updateLine = (index: number, field: keyof BudgetLine, value: string) => {
@@ -81,12 +108,28 @@ export function BudgetEditor({ onDone }: { onDone: () => void }) {
     return api.suggestAccounts(prefix);
   }, []);
 
-  const generatePreview = () => {
+  /** Validate lines and normalize amounts to dot-decimal; sets error and returns null on bad input. */
+  const normalizedLines = (): BudgetLine[] | null => {
     const validLines = lines.filter((l) => l.account && l.amount);
     if (validLines.length === 0) {
       setError("Add at least one budget entry with account and amount");
-      return;
+      return null;
     }
+    const result: BudgetLine[] = [];
+    for (const l of validLines) {
+      const amount = normalizeAmountInput(l.amount);
+      if (amount === null) {
+        setError(`Invalid amount "${l.amount}" for ${l.account}`);
+        return null;
+      }
+      result.push({ ...l, amount });
+    }
+    return result;
+  };
+
+  const generatePreview = () => {
+    const validLines = normalizedLines();
+    if (!validLines) return;
 
     let text = `~ ${period}\n`;
     for (const line of validLines) {
@@ -104,11 +147,8 @@ export function BudgetEditor({ onDone }: { onDone: () => void }) {
   };
 
   const handleSave = async () => {
-    const validLines = lines.filter((l) => l.account && l.amount);
-    if (validLines.length === 0) {
-      setError("Add at least one budget entry with account and amount");
-      return;
-    }
+    const validLines = normalizedLines();
+    if (!validLines) return;
 
     try {
       setSaving(true);
@@ -118,7 +158,10 @@ export function BudgetEditor({ onDone }: { onDone: () => void }) {
           amount: l.amount,
           commodity: l.commodity,
         })),
-        period
+        period,
+        // Editing replaces the existing ~ block in place; the old
+        // append-only flow doubled every budget on each edit.
+        editingLine ?? undefined
       );
       onDone();
     } catch (err) {
@@ -147,6 +190,11 @@ export function BudgetEditor({ onDone }: { onDone: () => void }) {
         </div>
 
         <div className="flex-1 overflow-auto p-4 space-y-4">
+          {error && (
+            <div className="text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/30 px-3 py-2 rounded-lg">
+              {error}
+            </div>
+          )}
           {loading ? (
             <div className="text-sm text-gray-500 text-center py-8">Loading...</div>
           ) : existingBudgets.length === 0 ? (
@@ -167,19 +215,26 @@ export function BudgetEditor({ onDone }: { onDone: () => void }) {
                     <span className="text-sm font-medium text-gray-900 dark:text-gray-100 capitalize">
                       {budget.period}
                     </span>
-                    <div className="flex gap-2">
+                    <div className="flex gap-3">
                       <button
                         onClick={() => loadFromExisting(budget)}
                         className="text-xs text-blue-600 dark:text-blue-400 font-medium"
                       >
-                        Copy &amp; Edit
+                        Edit
+                      </button>
+                      <button
+                        onClick={() => handleDelete(budget)}
+                        disabled={deletingLine === budget.line}
+                        className="text-xs text-red-600 dark:text-red-400 font-medium disabled:opacity-50"
+                      >
+                        {deletingLine === budget.line ? "Deleting..." : "Delete"}
                       </button>
                     </div>
                   </div>
                   <div className="divide-y divide-gray-200 dark:divide-gray-700">
                     {budget.entries.map((entry, ei) => (
                       <div key={ei} className="flex justify-between py-1.5">
-                        <span className="text-xs text-gray-600 dark:text-gray-400 truncate">
+                        <span className="text-xs text-gray-600 dark:text-gray-400 truncate" title={entry.account}>
                           {entry.account}
                         </span>
                         <span className="text-xs font-mono text-gray-900 dark:text-gray-100 shrink-0 ml-2">
@@ -212,7 +267,7 @@ export function BudgetEditor({ onDone }: { onDone: () => void }) {
           &larr;
         </button>
         <h2 className="text-base font-semibold text-gray-900 dark:text-gray-100">
-          {existingBudgets.length > 0 ? "New Budget" : "Create Budget"}
+          {editingLine !== null ? "Edit Budget" : "Create Budget"}
         </h2>
       </div>
 
@@ -222,12 +277,12 @@ export function BudgetEditor({ onDone }: { onDone: () => void }) {
           <label className="text-sm font-medium text-gray-700 dark:text-gray-300 block mb-2">
             Budget Period
           </label>
-          <div className="flex gap-1.5">
+          <div className="flex gap-1.5 flex-wrap">
             {PERIOD_OPTIONS.map((opt) => (
               <button
                 key={opt.value}
                 onClick={() => setPeriod(opt.value)}
-                className={`flex-1 py-2 text-xs font-medium rounded-lg ${
+                className={`flex-1 py-2 px-2 text-xs font-medium rounded-lg ${
                   period === opt.value
                     ? "bg-blue-600 text-white"
                     : "bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400"
@@ -236,6 +291,14 @@ export function BudgetEditor({ onDone }: { onDone: () => void }) {
                 {opt.label}
               </button>
             ))}
+            {!PERIOD_OPTIONS.some((o) => o.value === period) && (
+              <button
+                className="flex-1 py-2 px-2 text-xs font-medium rounded-lg bg-blue-600 text-white"
+                title="Period expression from the journal"
+              >
+                {period}
+              </button>
+            )}
           </div>
         </div>
 
@@ -320,7 +383,7 @@ export function BudgetEditor({ onDone }: { onDone: () => void }) {
             disabled={saving}
             className="flex-1 py-3 bg-blue-600 text-white rounded-lg text-sm font-medium disabled:opacity-50"
           >
-            {saving ? "Saving..." : "Add to Journal"}
+            {saving ? "Saving..." : editingLine !== null ? "Save Changes" : "Add to Journal"}
           </button>
         </div>
       </div>

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
 
 use chrono::NaiveDate;
@@ -7,9 +7,10 @@ use rust_decimal::Decimal;
 use serde::Serialize;
 
 use hledger_parser::ast::{
-    AccountName, AmountStyle, Comment, Posting, PostingAmount, Side, SourceSpan, Status, Transaction,
+    AccountName, AmountStyle, BalanceAssertion, Comment, Posting, PostingAmount, Side, SourceSpan,
+    Status, Transaction,
 };
-use hledger_parser::csv_rules::CsvRules;
+use hledger_parser::csv_rules::{CsvRules, IfBlock};
 
 /// Result of converting CSV rows using rules.
 #[derive(Debug, Serialize)]
@@ -37,6 +38,8 @@ pub fn convert_csv(csv_text: &str, rules: &CsvRules) -> Result<CsvImportResult, 
 
     let mut transactions = Vec::new();
     let mut warnings = Vec::new();
+    // Surface rules-file warnings (e.g. unknown directives) to the caller.
+    warnings.extend(rules.warnings.iter().cloned());
     let mut row_index = 0;
     let mut data_rows = 0;
 
@@ -69,33 +72,137 @@ pub fn convert_csv(csv_text: &str, rules: &CsvRules) -> Result<CsvImportResult, 
     })
 }
 
+/// A single parsed matcher line from an if-block.
+struct MatcherLine<'a> {
+    /// This line ANDs with the previous line's group (`&` prefix).
+    and_prev: bool,
+    /// Negate the match result (`!` prefix; per hledger 1.32 only recognized
+    /// when the line is not `&`-prefixed).
+    negated: bool,
+    /// Match against this named field only (`%fieldname` / `%N` prefix);
+    /// None = match against the whole comma-joined record.
+    field: Option<String>,
+    /// The regex pattern (matched case-insensitively).
+    pattern: &'a str,
+}
+
+fn parse_matcher_line(line: &str) -> MatcherLine<'_> {
+    let mut s = line.trim();
+    let and_prev = s.starts_with('&');
+    if and_prev {
+        s = s[1..].trim_start();
+    }
+    let mut negated = false;
+    // hledger 1.32: '!' negation is only recognized at the start of a
+    // non-'&' matcher line; after '&' it is treated as part of the pattern.
+    if !and_prev && s.starts_with('!') {
+        negated = true;
+        s = s[1..].trim_start();
+    }
+    let mut field = None;
+    if s.starts_with('%') {
+        let end = s.find(char::is_whitespace).unwrap_or(s.len());
+        field = Some(s[1..end].to_lowercase());
+        s = s[end..].trim_start();
+    }
+    MatcherLine { and_prev, negated, field, pattern: s }
+}
+
+/// Evaluate an if-block against a row per hledger semantics:
+/// consecutive matcher lines are OR alternatives; a `&`-prefixed line ANDs
+/// with the preceding line's group. Patterns are case-insensitive regexes.
+fn if_block_matches(
+    if_block: &IfBlock,
+    fields: &[String],
+    row_text: &str,
+    field_index_map: &HashMap<String, usize>,
+) -> bool {
+    if if_block.patterns.is_empty() {
+        return false;
+    }
+
+    let eval_one = |line: &str| -> (bool, bool) {
+        let m = parse_matcher_line(line);
+        let target: &str = match &m.field {
+            None => row_text,
+            Some(name) => {
+                // %N (1-based column index) or %fieldname
+                let idx = if let Ok(n) = name.parse::<usize>() {
+                    if n >= 1 { Some(n - 1) } else { None }
+                } else {
+                    field_index_map.get(name).copied()
+                };
+                match idx {
+                    Some(i) if i < fields.len() => &fields[i],
+                    _ => "",
+                }
+            }
+        };
+        let matched = RegexBuilder::new(m.pattern)
+            .case_insensitive(true)
+            .build()
+            .map(|re| re.is_match(target))
+            .unwrap_or(false);
+        (m.and_prev, if m.negated { !matched } else { matched })
+    };
+
+    let mut group: Option<bool> = None;
+    for line in &if_block.patterns {
+        let (and_prev, result) = eval_one(line);
+        if and_prev {
+            group = Some(group.unwrap_or(true) && result);
+        } else {
+            if group == Some(true) {
+                return true;
+            }
+            group = Some(result);
+        }
+    }
+    group == Some(true)
+}
+
+fn make_posting(
+    line: usize,
+    account: &str,
+    amount: Option<PostingAmount>,
+    balance_assertion: Option<BalanceAssertion>,
+) -> Posting {
+    Posting {
+        span: SourceSpan { start: 0, end: 0, line },
+        status: Status::Unmarked,
+        account: AccountName::new(account),
+        amount,
+        balance_assertion,
+        comment: None,
+        tags: vec![],
+        is_virtual: false,
+        virtual_balanced: false,
+        date: None,
+        date2: None,
+    }
+}
+
 fn convert_row(
     fields: &[String],
     rules: &CsvRules,
     field_index_map: &HashMap<String, usize>,
     row_index: usize,
 ) -> Result<Transaction, String> {
-    // Evaluate if-blocks: join all fields for matching
+    // Evaluate if-blocks: hledger matches `if PATTERN` against the
+    // comma-joined (unquoted) record.
     let row_text = fields.join(",");
     let mut overrides: HashMap<String, String> = HashMap::new();
     for if_block in &rules.if_blocks {
-        let matched = if_block.patterns.iter().any(|pattern| {
-            RegexBuilder::new(pattern)
-                .case_insensitive(true)
-                .build()
-                .map(|re| re.is_match(&row_text))
-                .unwrap_or(false)
-        });
-        if matched {
+        if if_block_matches(if_block, fields, &row_text, field_index_map) {
             for (key, value) in &if_block.assignments {
-                overrides.entry(key.clone()).or_insert_with(|| value.clone());
+                // hledger: later matching if-blocks override earlier ones.
+                overrides.insert(key.clone(), value.clone());
             }
         }
     }
 
-    // Resolve field values
+    // Resolve field values: overrides, then top-level assignments, then CSV columns.
     let resolve = |name: &str| -> Option<String> {
-        // Check overrides first, then top-level assignments, then fields list
         if let Some(val) = overrides.get(name) {
             return Some(substitute_fields(val, fields, field_index_map));
         }
@@ -112,6 +219,8 @@ fn convert_row(
         }
         None
     };
+    let resolve_nonempty =
+        |name: &str| -> Option<String> { resolve(name).filter(|s| !s.trim().is_empty()) };
 
     // Parse date
     let date_str = resolve("date").ok_or("No date field")?;
@@ -121,124 +230,164 @@ fn convert_row(
     // Parse description
     let description = resolve("description").unwrap_or_default();
 
-    // Parse amount
-    let (amount, commodity) = resolve_amount(fields, rules, field_index_map, &overrides)?;
+    // Status: `*` = cleared, `!` = pending, empty/unset = unmarked (hledger default).
+    let status = match resolve_nonempty("status").as_deref() {
+        Some("*") => Status::Cleared,
+        Some("!") => Status::Pending,
+        Some(other) => return Err(format!("Invalid status '{}'", other)),
+        None => Status::Unmarked,
+    };
 
-    // Resolve accounts
-    let account1 = resolve("account1").unwrap_or_else(|| "expenses:unknown".to_string());
-    let account2 = resolve("account2").unwrap_or_else(|| {
-        if amount >= Decimal::ZERO { "income:unknown".to_string() } else { "expenses:unknown".to_string() }
-    });
+    // Code
+    let code = resolve_nonempty("code");
+
+    // Parse the primary (first posting) amount:
+    // amount1 takes precedence, then amount, then amount-in/amount-out.
+    let amount = resolve_primary_amount(rules, &resolve_nonempty)?;
+    let commodity = rules.currency.clone().unwrap_or_default();
 
     // Comment
-    let comment = resolve("comment");
+    let comment = resolve_nonempty("comment");
 
-    // Build transaction
-    let is_symbol = commodity.len() == 1 && "$\u{20AC}\u{00A3}\u{00A5}\u{20B9}\u{20BD}\u{20BF}".contains(&commodity);
-    let style = if is_symbol {
-        AmountStyle { commodity_side: Side::Left, commodity_spaced: false, decimal_mark: '.', precision: 2 }
-    } else if commodity.is_empty() {
-        AmountStyle::default()
-    } else {
-        AmountStyle { commodity_side: Side::Right, commodity_spaced: true, decimal_mark: '.', precision: 2 }
+    let style = amount_style_for(&commodity);
+    let make_amount = |qty: Decimal| PostingAmount {
+        quantity: qty,
+        commodity: commodity.clone(),
+        style: style.clone(),
+        cost: None,
+        multiplier: false,
+    };
+    let make_assertion = |name: &str| -> Result<Option<BalanceAssertion>, String> {
+        match resolve_nonempty(name) {
+            Some(s) => {
+                let qty = parse_amount_str(&s, rules)?;
+                Ok(Some(BalanceAssertion {
+                    strong: false,
+                    inclusive: false,
+                    quantity: qty,
+                    commodity: commodity.clone(),
+                    style: style.clone(),
+                }))
+            }
+            None => Ok(None),
+        }
     };
 
-    let posting1 = Posting {
-        span: SourceSpan { start: 0, end: 0, line: row_index },
-        status: Status::Unmarked,
-        account: AccountName::new(&account1),
-        amount: Some(PostingAmount { quantity: amount, commodity: commodity.clone(), style, cost: None }),
-        balance_assertion: None,
-        comment: None,
-        tags: vec![],
-        is_virtual: false,
-        virtual_balanced: false,
+    // Posting 1: account1, primary amount, balance/balance1 assertion.
+    let account1 = resolve_nonempty("account1").unwrap_or_else(|| "expenses:unknown".to_string());
+    let assertion1 = match make_assertion("balance1")? {
+        Some(a) => Some(a),
+        None => make_assertion("balance")?,
     };
+    let mut postings = vec![make_posting(
+        row_index,
+        &account1,
+        Some(make_amount(amount)),
+        assertion1,
+    )];
 
-    let posting2 = Posting {
-        span: SourceSpan { start: 0, end: 0, line: row_index },
-        status: Status::Unmarked,
-        account: AccountName::new(&account2),
-        amount: None, // Inferred
-        balance_assertion: None,
-        comment: None,
-        tags: vec![],
-        is_virtual: false,
-        virtual_balanced: false,
+    // Posting 2: account2 (defaulting to income:/expenses:unknown by sign),
+    // amount2 if assigned, otherwise inferred (= negation of amount1).
+    let amount2 = match resolve_nonempty("amount2") {
+        Some(s) => Some(parse_amount_str(&s, rules)?),
+        None => None,
     };
+    let account2 = resolve_nonempty("account2").unwrap_or_else(|| {
+        if amount >= Decimal::ZERO {
+            "income:unknown".to_string()
+        } else {
+            "expenses:unknown".to_string()
+        }
+    });
+    postings.push(make_posting(
+        row_index,
+        &account2,
+        amount2.map(make_amount),
+        make_assertion("balance2")?,
+    ));
+
+    // Postings 3..=9: generated when accountN or amountN is assigned.
+    for n in 3..=9usize {
+        let acct_name = format!("account{}", n);
+        let amt_name = format!("amount{}", n);
+        let acct = resolve_nonempty(&acct_name);
+        let amt = match resolve_nonempty(&amt_name) {
+            Some(s) => Some(parse_amount_str(&s, rules)?),
+            None => None,
+        };
+        if acct.is_none() && amt.is_none() {
+            continue;
+        }
+        let account = acct.unwrap_or_else(|| "expenses:unknown".to_string());
+        let assertion = make_assertion(&format!("balance{}", n))?;
+        postings.push(make_posting(row_index, &account, amt.map(make_amount), assertion));
+    }
 
     Ok(Transaction {
         span: SourceSpan { start: 0, end: 0, line: row_index },
         date,
         secondary_date: None,
-        status: Status::Cleared,
-        code: None,
+        status,
+        code,
         description,
         comment: comment.map(|c| Comment { text: c }),
         tags: vec![],
-        postings: vec![posting1, posting2],
+        postings,
     })
 }
 
-fn resolve_amount(
-    fields: &[String],
+fn amount_style_for(commodity: &str) -> AmountStyle {
+    let is_symbol = commodity.len() == 1
+        && "$\u{20AC}\u{00A3}\u{00A5}\u{20B9}\u{20BD}\u{20BF}".contains(commodity);
+    if is_symbol {
+        AmountStyle { commodity_side: Side::Left, commodity_spaced: false, decimal_mark: '.', precision: 2 }
+    } else if commodity.is_empty() {
+        AmountStyle::default()
+    } else {
+        AmountStyle { commodity_side: Side::Right, commodity_spaced: true, decimal_mark: '.', precision: 2 }
+    }
+}
+
+fn resolve_primary_amount(
     rules: &CsvRules,
-    field_index_map: &HashMap<String, usize>,
-    overrides: &HashMap<String, String>,
-) -> Result<(Decimal, String), String> {
-    let resolve = |name: &str| -> Option<String> {
-        if let Some(val) = overrides.get(name) {
-            return Some(substitute_fields(val, fields, field_index_map));
-        }
-        if let Some(val) = rules.field_assignments.get(name) {
-            return Some(substitute_fields(val, fields, field_index_map));
-        }
-        if let Some(&idx) = field_index_map.get(name) {
-            if idx < fields.len() {
-                let val = fields[idx].trim().to_string();
-                if !val.is_empty() {
-                    return Some(val);
-                }
-            }
-        }
-        None
-    };
-
-    let currency = rules.currency.clone().unwrap_or_default();
-
-    // Try "amount" field first
-    if let Some(amt_str) = resolve("amount") {
-        let qty = parse_amount_str(&amt_str, rules)?;
-        return Ok((qty, currency));
+    resolve_nonempty: &dyn Fn(&str) -> Option<String>,
+) -> Result<Decimal, String> {
+    // Modern style: amount1 is the first posting's amount.
+    if let Some(amt_str) = resolve_nonempty("amount1") {
+        return parse_amount_str(&amt_str, rules);
     }
 
-    // Try amount-in / amount-out pair
-    let amount_in = resolve("amount-in").and_then(|s| {
-        let s = s.trim().to_string();
-        if s.is_empty() { None } else { Some(s) }
-    });
-    let amount_out = resolve("amount-out").and_then(|s| {
-        let s = s.trim().to_string();
-        if s.is_empty() { None } else { Some(s) }
-    });
-
-    if let Some(in_str) = amount_in {
-        let qty = parse_amount_str(&in_str, rules)?.abs();
-        return Ok((qty, currency));
+    // Old style: "amount" is the (first posting's) transaction amount.
+    if let Some(amt_str) = resolve_nonempty("amount") {
+        return parse_amount_str(&amt_str, rules);
     }
-    if let Some(out_str) = amount_out {
-        let qty = -(parse_amount_str(&out_str, rules)?.abs());
-        return Ok((qty, currency));
+
+    // amount-in / amount-out pair
+    if let Some(in_str) = resolve_nonempty("amount-in") {
+        return Ok(parse_amount_str(&in_str, rules)?.abs());
+    }
+    if let Some(out_str) = resolve_nonempty("amount-out") {
+        return Ok(-(parse_amount_str(&out_str, rules)?.abs()));
     }
 
     Err("No amount field found".to_string())
 }
 
 fn parse_amount_str(s: &str, rules: &CsvRules) -> Result<Decimal, String> {
+    let trimmed = s.trim();
+
+    // Parenthesized amounts are negative: (12.34) => -12.34
+    let (inner, parenthesized) = if trimmed.starts_with('(') && trimmed.ends_with(')') && trimmed.len() >= 2 {
+        (&trimmed[1..trimmed.len() - 1], true)
+    } else {
+        (trimmed, false)
+    };
+
     // Strip currency symbols and whitespace
-    let cleaned: String = s.chars().filter(|c| {
-        c.is_ascii_digit() || *c == '-' || *c == '+' || *c == '.' || *c == ','
-    }).collect();
+    let cleaned: String = inner
+        .chars()
+        .filter(|c| c.is_ascii_digit() || *c == '-' || *c == '+' || *c == '.' || *c == ',')
+        .collect();
 
     if cleaned.is_empty() {
         return Err("Empty amount".to_string());
@@ -256,17 +405,24 @@ fn parse_amount_str(s: &str, rules: &CsvRules) -> Result<Decimal, String> {
         }
     };
 
-    Decimal::from_str_exact(&normalized)
-        .map_err(|e| format!("Invalid amount '{}': {}", s, e))
+    let qty = Decimal::from_str_exact(&normalized)
+        .map_err(|e| format!("Invalid amount '{}': {}", s, e))?;
+
+    Ok(if parenthesized { -qty.abs() } else { qty })
 }
 
 fn parse_csv_date(date_str: &str, date_format: Option<&str>) -> Result<NaiveDate, String> {
-    let fmt = date_format.unwrap_or("%Y-%m-%d");
-    // Also try common variants
-    NaiveDate::parse_from_str(date_str.trim(), fmt)
-        .or_else(|_| NaiveDate::parse_from_str(date_str.trim(), "%Y/%m/%d"))
-        .or_else(|_| NaiveDate::parse_from_str(date_str.trim(), "%Y-%m-%d"))
-        .map_err(|e| e.to_string())
+    let s = date_str.trim();
+    match date_format {
+        // An explicit date-format must match; no silent fallbacks (hledger
+        // treats a mismatch as an error for that row).
+        Some(fmt) => NaiveDate::parse_from_str(s, fmt).map_err(|e| e.to_string()),
+        // No date-format: accept hledger's simple date forms.
+        None => NaiveDate::parse_from_str(s, "%Y-%m-%d")
+            .or_else(|_| NaiveDate::parse_from_str(s, "%Y/%m/%d"))
+            .or_else(|_| NaiveDate::parse_from_str(s, "%Y.%m.%d"))
+            .map_err(|e| e.to_string()),
+    }
 }
 
 /// Substitute %fieldname and %N references in a value string.
@@ -331,6 +487,46 @@ fn substitute_fields(
     result
 }
 
+// ---------------------------------------------------------------------------
+// Duplicate detection
+// ---------------------------------------------------------------------------
+
+/// Compute a stable fingerprint for a transaction: exact date, first posting
+/// amount (quantity + commodity), and case/whitespace-normalized description.
+pub fn transaction_fingerprint(txn: &Transaction) -> String {
+    let amount = txn
+        .postings
+        .iter()
+        .find_map(|p| p.amount.as_ref())
+        .map(|a| format!("{} {}", a.quantity.normalize(), a.commodity))
+        .unwrap_or_default();
+    format!(
+        "{}|{}|{}",
+        txn.date,
+        amount,
+        normalize_description(&txn.description)
+    )
+}
+
+fn normalize_description(s: &str) -> String {
+    s.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+/// Given candidate (imported) transactions and the existing ledger's
+/// transactions, return a bool per candidate: true = probable duplicate of an
+/// existing transaction (same date, first-posting amount, and normalized
+/// description).
+pub fn mark_probable_duplicates(candidates: &[Transaction], existing: &[Transaction]) -> Vec<bool> {
+    let existing_fps: HashSet<String> = existing.iter().map(transaction_fingerprint).collect();
+    candidates
+        .iter()
+        .map(|t| existing_fps.contains(&transaction_fingerprint(t)))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -366,6 +562,17 @@ account2 expenses:unknown
     }
 
     #[test]
+    fn convert_headerless_csv_without_skip() {
+        // hledger's default skip is 0: a headerless CSV must keep its first row.
+        let rules_text = "fields date, description, amount\naccount1 assets:a\n";
+        let csv_text = "2026-01-01,foo,10\n2026-01-02,bar,20\n";
+        let rules = parse_csv_rules(rules_text).unwrap();
+        let result = convert_csv(csv_text, &rules).unwrap();
+        assert_eq!(result.transactions.len(), 2);
+        assert_eq!(result.transactions[0].description, "foo");
+    }
+
+    #[test]
     fn convert_with_if_blocks() {
         let rules_text = r#"
 skip 1
@@ -385,6 +592,104 @@ if SALARY
 
         assert_eq!(result.transactions[0].postings[1].account.full, "expenses:groceries");
         assert_eq!(result.transactions[1].postings[1].account.full, "income:salary");
+    }
+
+    #[test]
+    fn later_if_block_wins() {
+        // Verified against hledger 1.32.3: later matching if-blocks override
+        // earlier ones.
+        let rules_text = "skip 1\nfields date, description, amount\naccount1 assets:a\n\nif FOODS\n account2 expenses:first\n\nif WHOLE\n account2 expenses:second\n";
+        let csv_text = "date,desc,amt\n2026-01-01,WHOLE FOODS,10\n";
+        let rules = parse_csv_rules(rules_text).unwrap();
+        let result = convert_csv(csv_text, &rules).unwrap();
+        assert_eq!(result.transactions[0].postings[1].account.full, "expenses:second");
+    }
+
+    #[test]
+    fn field_matcher_matches_only_that_field() {
+        // `if %description ^SHOP` must not match "COFFEE SHOP" (anchored to
+        // the field), and `if ^SHOP` must not match the record (which starts
+        // with the date). Verified against hledger 1.32.3.
+        let rules_text = "skip 1\nfields date, description, amount\naccount1 assets:a\n\nif %description ^SHOP\n account2 expenses:matched\n";
+        let csv_text = "date,desc,amt\n2026-01-01,COFFEE SHOP,-4\n2026-01-02,SHOP,-5\n";
+        let rules = parse_csv_rules(rules_text).unwrap();
+        let result = convert_csv(csv_text, &rules).unwrap();
+        assert_eq!(result.transactions[0].postings[1].account.full, "expenses:unknown");
+        assert_eq!(result.transactions[1].postings[1].account.full, "expenses:matched");
+
+        let rules_text2 = "skip 1\nfields date, description, amount\naccount1 assets:a\n\nif ^SHOP\n account2 expenses:matched\n";
+        let rules2 = parse_csv_rules(rules_text2).unwrap();
+        let result2 = convert_csv(csv_text, &rules2).unwrap();
+        assert_eq!(result2.transactions[1].postings[1].account.full, "expenses:unknown");
+    }
+
+    #[test]
+    fn and_combinator() {
+        let rules_text = "skip 1\nfields date, description, amount\naccount1 assets:a\n\nif COFFEE\n& SHOP\n account2 expenses:both\n";
+        let csv_text = "date,desc,amt\n2026-01-01,COFFEE SHOP,-4\n2026-01-02,SHOP,-5\n";
+        let rules = parse_csv_rules(rules_text).unwrap();
+        let result = convert_csv(csv_text, &rules).unwrap();
+        assert_eq!(result.transactions[0].postings[1].account.full, "expenses:both");
+        assert_eq!(result.transactions[1].postings[1].account.full, "expenses:unknown");
+    }
+
+    #[test]
+    fn negation_matcher() {
+        // `if ! COFFEE` and `if !COFFEE` match rows NOT containing COFFEE.
+        for pat in ["if ! COFFEE", "if !COFFEE"] {
+            let rules_text = format!(
+                "skip 1\nfields date, description, amount\naccount1 assets:a\n\n{}\n account2 expenses:notcoffee\n",
+                pat
+            );
+            let csv_text = "date,desc,amt\n2026-01-01,COFFEE SHOP,-4\n2026-01-02,SHOP,-5\n";
+            let rules = parse_csv_rules(&rules_text).unwrap();
+            let result = convert_csv(csv_text, &rules).unwrap();
+            assert_eq!(result.transactions[0].postings[1].account.full, "expenses:unknown");
+            assert_eq!(result.transactions[1].postings[1].account.full, "expenses:notcoffee");
+        }
+    }
+
+    #[test]
+    fn negated_field_matcher() {
+        let rules_text = "skip 1\nfields date, description, amount\naccount1 assets:a\n\nif ! %description COFFEE\n account2 expenses:n2\n";
+        let csv_text = "date,desc,amt\n2026-01-01,COFFEE SHOP,-4\n2026-01-02,SHOP,-5\n";
+        let rules = parse_csv_rules(rules_text).unwrap();
+        let result = convert_csv(csv_text, &rules).unwrap();
+        assert_eq!(result.transactions[0].postings[1].account.full, "expenses:unknown");
+        assert_eq!(result.transactions[1].postings[1].account.full, "expenses:n2");
+    }
+
+    #[test]
+    fn or_and_grouping() {
+        // A \n B \n & X  =>  A OR (B AND X). Verified against hledger 1.32.3.
+        let rules_text = "skip 1\nfields date, description, amount\naccount1 assets:a\n\nif A\nB\n& X\n account2 expenses:g\n";
+        let csv_text = "date,desc,amt\n2026-01-01,AX,-1\n2026-01-02,BX,-2\n2026-01-03,BY,-3\n";
+        let rules = parse_csv_rules(rules_text).unwrap();
+        let result = convert_csv(csv_text, &rules).unwrap();
+        assert_eq!(result.transactions[0].postings[1].account.full, "expenses:g");
+        assert_eq!(result.transactions[1].postings[1].account.full, "expenses:g");
+        assert_eq!(result.transactions[2].postings[1].account.full, "expenses:unknown");
+    }
+
+    #[test]
+    fn negation_after_ampersand_is_literal() {
+        // hledger 1.32.3 does not negate after '&': "& !COFFEE" looks for the
+        // literal regex "!COFFEE", so neither row matches.
+        let rules_text = "skip 1\nfields date, description, amount\naccount1 assets:a\n\nif SHOP\n& !COFFEE\n account2 expenses:x\n";
+        let csv_text = "date,desc,amt\n2026-01-01,COFFEE SHOP,-4\n2026-01-02,SHOP,-5\n";
+        let rules = parse_csv_rules(rules_text).unwrap();
+        let result = convert_csv(csv_text, &rules).unwrap();
+        assert_eq!(result.transactions[0].postings[1].account.full, "expenses:unknown");
+        assert_eq!(result.transactions[1].postings[1].account.full, "expenses:unknown");
+    }
+
+    #[test]
+    fn matchers_are_case_insensitive() {
+        let rules_text = "skip 1\nfields date, description, amount\naccount1 assets:a\n\nif shop\n account2 expenses:ci\n";
+        let csv_text = "date,desc,amt\n2026-01-01,COFFEE SHOP,-4\n";
+        let rules = parse_csv_rules(rules_text).unwrap();
+        let result = convert_csv(csv_text, &rules).unwrap();
+        assert_eq!(result.transactions[0].postings[1].account.full, "expenses:ci");
     }
 
     #[test]
@@ -431,5 +736,222 @@ account1 assets:checking
             result.transactions[1].postings[0].amount.as_ref().unwrap().quantity,
             Decimal::from_str_exact("-200.00").unwrap()
         );
+    }
+
+    #[test]
+    fn parenthesized_amounts_are_negative() {
+        // Verified against hledger 1.32.3: (12.34) => -12.34.
+        let rules_text = "skip 1\nfields date, description, amount\naccount1 assets:a\n";
+        let csv_text = "date,desc,amt\n2026-01-01,thing,(12.34)\n";
+        let rules = parse_csv_rules(rules_text).unwrap();
+        let result = convert_csv(csv_text, &rules).unwrap();
+        assert_eq!(
+            result.transactions[0].postings[0].amount.as_ref().unwrap().quantity,
+            Decimal::from_str_exact("-12.34").unwrap()
+        );
+        // The inferred second posting goes to expenses:unknown for a negative.
+        assert_eq!(result.transactions[0].postings[1].account.full, "expenses:unknown");
+    }
+
+    #[test]
+    fn parenthesized_with_currency_symbol() {
+        let rules_text = "skip 1\nfields date, description, amount\naccount1 assets:a\n";
+        let csv_text = "date,desc,amt\n2026-01-01,thing,\"($1,234.56)\"\n";
+        let rules = parse_csv_rules(rules_text).unwrap();
+        let result = convert_csv(csv_text, &rules).unwrap();
+        assert_eq!(
+            result.transactions[0].postings[0].amount.as_ref().unwrap().quantity,
+            Decimal::from_str_exact("-1234.56").unwrap()
+        );
+    }
+
+    #[test]
+    fn amount1_field_assignment() {
+        // Modern rules style: amount1 %amt must produce transactions.
+        let rules_text = "skip 1\nfields date, description, amt\namount1 %amt\naccount1 assets:a\naccount2 expenses:x\n";
+        let csv_text = "date,desc,amt\n2026-01-01,foo,-5.00\n";
+        let rules = parse_csv_rules(rules_text).unwrap();
+        let result = convert_csv(csv_text, &rules).unwrap();
+        assert_eq!(result.transactions.len(), 1);
+        let t = &result.transactions[0];
+        assert_eq!(t.postings[0].amount.as_ref().unwrap().quantity, Decimal::from_str_exact("-5.00").unwrap());
+        // amount2 unassigned: second posting's amount is inferred (None = negation)
+        assert!(t.postings[1].amount.is_none());
+        assert_eq!(t.postings[1].account.full, "expenses:x");
+    }
+
+    #[test]
+    fn amount1_and_amount2() {
+        let rules_text = "skip 1\nfields date, description, amt\namount1 %amt\namount2 5.00\naccount1 assets:a\naccount2 expenses:x\n";
+        let csv_text = "date,desc,amt\n2026-01-01,foo,-5.00\n";
+        let rules = parse_csv_rules(rules_text).unwrap();
+        let result = convert_csv(csv_text, &rules).unwrap();
+        let t = &result.transactions[0];
+        assert_eq!(t.postings[0].amount.as_ref().unwrap().quantity, Decimal::from_str_exact("-5.00").unwrap());
+        assert_eq!(t.postings[1].amount.as_ref().unwrap().quantity, Decimal::from_str_exact("5.00").unwrap());
+    }
+
+    #[test]
+    fn amount2_without_account2_uses_unknown() {
+        // Verified against hledger 1.32.3: second posting gets
+        // expenses:unknown (first posting is negative).
+        let rules_text = "skip 1\nfields date, description, amt\namount1 %amt\namount2 5.00\naccount1 assets:a\n";
+        let csv_text = "date,desc,amt\n2026-01-01,foo,-5.00\n";
+        let rules = parse_csv_rules(rules_text).unwrap();
+        let result = convert_csv(csv_text, &rules).unwrap();
+        let t = &result.transactions[0];
+        assert_eq!(t.postings[1].account.full, "expenses:unknown");
+        assert_eq!(t.postings[1].amount.as_ref().unwrap().quantity, Decimal::from_str_exact("5.00").unwrap());
+    }
+
+    #[test]
+    fn three_posting_row() {
+        // Verified against hledger 1.32.3 (t4d): amount1/2/3 + account1/2/3.
+        let rules_text = "skip 1\nfields date, description, amt\namount1 %amt\namount2 2.00\namount3 3.00\naccount1 assets:a\naccount2 expenses:x\naccount3 expenses:y\n";
+        let csv_text = "date,desc,amt\n2026-01-01,foo,-5.00\n";
+        let rules = parse_csv_rules(rules_text).unwrap();
+        let result = convert_csv(csv_text, &rules).unwrap();
+        let t = &result.transactions[0];
+        assert_eq!(t.postings.len(), 3);
+        assert_eq!(t.postings[2].account.full, "expenses:y");
+        assert_eq!(t.postings[2].amount.as_ref().unwrap().quantity, Decimal::from_str_exact("3.00").unwrap());
+    }
+
+    #[test]
+    fn amount1_in_if_block() {
+        let rules_text = "skip 1\nfields date, description, amt\naccount1 assets:a\n\nif foo\n  amount1 %amt\n";
+        let csv_text = "date,desc,amt\n2026-01-01,foo,-7.50\n";
+        let rules = parse_csv_rules(rules_text).unwrap();
+        let result = convert_csv(csv_text, &rules).unwrap();
+        assert_eq!(
+            result.transactions[0].postings[0].amount.as_ref().unwrap().quantity,
+            Decimal::from_str_exact("-7.50").unwrap()
+        );
+    }
+
+    #[test]
+    fn default_status_is_unmarked() {
+        // Verified against hledger 1.32.3: no status rule = unmarked.
+        let rules_text = "skip 1\nfields date, description, amount\naccount1 assets:a\n";
+        let csv_text = "date,desc,amt\n2026-01-01,foo,-4\n";
+        let rules = parse_csv_rules(rules_text).unwrap();
+        let result = convert_csv(csv_text, &rules).unwrap();
+        assert_eq!(result.transactions[0].status, Status::Unmarked);
+        assert_eq!(result.transactions[0].code, None);
+    }
+
+    #[test]
+    fn status_and_code_rules() {
+        let rules_text = "skip 1\nfields date, description, amount\naccount1 assets:a\nstatus *\ncode X123\n";
+        let csv_text = "date,desc,amt\n2026-01-01,foo,-4\n";
+        let rules = parse_csv_rules(rules_text).unwrap();
+        let result = convert_csv(csv_text, &rules).unwrap();
+        assert_eq!(result.transactions[0].status, Status::Cleared);
+        assert_eq!(result.transactions[0].code.as_deref(), Some("X123"));
+
+        let rules_text2 = "skip 1\nfields date, description, amount\naccount1 assets:a\nstatus !\n";
+        let rules2 = parse_csv_rules(rules_text2).unwrap();
+        let result2 = convert_csv(csv_text, &rules2).unwrap();
+        assert_eq!(result2.transactions[0].status, Status::Pending);
+    }
+
+    #[test]
+    fn balance_rule_emits_assertion() {
+        // Verified against hledger 1.32.3: balance1 %bal => "= 100.00" on the
+        // first posting; unnumbered balance behaves the same.
+        for balname in ["balance1", "balance"] {
+            let rules_text = format!(
+                "skip 1\nfields date, description, amount, bal\naccount1 assets:a\n{} %bal\n",
+                balname
+            );
+            let csv_text = "date,desc,amt,bal\n2026-01-01,foo,-4,100.00\n";
+            let rules = parse_csv_rules(&rules_text).unwrap();
+            let result = convert_csv(csv_text, &rules).unwrap();
+            let p0 = &result.transactions[0].postings[0];
+            let a = p0.balance_assertion.as_ref().expect("assertion on posting 1");
+            assert_eq!(a.quantity, Decimal::from_str_exact("100.00").unwrap());
+            assert!(!a.strong);
+            assert!(result.transactions[0].postings[1].balance_assertion.is_none());
+        }
+    }
+
+    #[test]
+    fn balance2_rule_on_second_posting() {
+        let rules_text = "skip 1\nfields date, description, amount, bal\naccount1 assets:a\naccount2 expenses:x\nbalance2 50\n";
+        let csv_text = "date,desc,amt,bal\n2026-01-01,foo,-4,100.00\n";
+        let rules = parse_csv_rules(rules_text).unwrap();
+        let result = convert_csv(csv_text, &rules).unwrap();
+        let t = &result.transactions[0];
+        assert!(t.postings[0].balance_assertion.is_none());
+        let a = t.postings[1].balance_assertion.as_ref().expect("assertion on posting 2");
+        assert_eq!(a.quantity, Decimal::from_str_exact("50").unwrap());
+    }
+
+    #[test]
+    fn date_format_mismatch_is_row_error() {
+        // With date-format set, a non-matching date must be a row error, not
+        // silently parsed by a fallback format.
+        let rules_text = "skip 1\nfields date, description, amount\ndate-format %m/%d/%Y\naccount1 assets:a\n";
+        let csv_text = "date,desc,amt\n01/02/2026,foo,-4\n2026-01-03,bar,-5\n";
+        let rules = parse_csv_rules(rules_text).unwrap();
+        let result = convert_csv(csv_text, &rules).unwrap();
+        assert_eq!(result.transactions.len(), 1);
+        assert_eq!(result.transactions[0].date, NaiveDate::from_ymd_opt(2026, 1, 2).unwrap());
+        assert_eq!(result.warnings.len(), 1);
+        assert!(result.warnings[0].contains("2026-01-03"));
+    }
+
+    #[test]
+    fn simple_date_fallbacks_without_date_format() {
+        let rules_text = "fields date, description, amount\naccount1 assets:a\n";
+        let csv_text = "2026-01-01,a,-1\n2026/01/02,b,-2\n2026.01.03,c,-3\n";
+        let rules = parse_csv_rules(rules_text).unwrap();
+        let result = convert_csv(csv_text, &rules).unwrap();
+        assert_eq!(result.transactions.len(), 3);
+        assert_eq!(result.transactions[2].date, NaiveDate::from_ymd_opt(2026, 1, 3).unwrap());
+    }
+
+    #[test]
+    fn rules_warnings_propagate_to_result() {
+        let rules_text = "skipfoo 2\nskip 1\nfields date, description, amount\naccount1 assets:a\n";
+        let csv_text = "date,desc,amt\n2026-01-01,foo,-4\n";
+        let rules = parse_csv_rules(rules_text).unwrap();
+        let result = convert_csv(csv_text, &rules).unwrap();
+        assert!(result.warnings.iter().any(|w| w.contains("skipfoo")));
+        assert_eq!(result.transactions.len(), 1);
+    }
+
+    #[test]
+    fn fingerprint_normalizes_description() {
+        let rules_text = "fields date, description, amount\naccount1 assets:a\n";
+        let rules = parse_csv_rules(rules_text).unwrap();
+        let a = convert_csv("2026-01-01,  Whole   FOODS ,-5.00\n", &rules).unwrap().transactions;
+        let b = convert_csv("2026-01-01,whole foods,-5.0\n", &rules).unwrap().transactions;
+        assert_eq!(transaction_fingerprint(&a[0]), transaction_fingerprint(&b[0]));
+    }
+
+    #[test]
+    fn fingerprint_distinguishes_date_and_amount() {
+        let rules_text = "fields date, description, amount\naccount1 assets:a\n";
+        let rules = parse_csv_rules(rules_text).unwrap();
+        let a = convert_csv("2026-01-01,foo,-5.00\n", &rules).unwrap().transactions;
+        let b = convert_csv("2026-01-02,foo,-5.00\n", &rules).unwrap().transactions;
+        let c = convert_csv("2026-01-01,foo,-6.00\n", &rules).unwrap().transactions;
+        assert_ne!(transaction_fingerprint(&a[0]), transaction_fingerprint(&b[0]));
+        assert_ne!(transaction_fingerprint(&a[0]), transaction_fingerprint(&c[0]));
+    }
+
+    #[test]
+    fn mark_duplicates_against_existing() {
+        let rules_text = "fields date, description, amount\naccount1 assets:a\n";
+        let rules = parse_csv_rules(rules_text).unwrap();
+        let existing = convert_csv("2026-01-01,coffee,-4.00\n2026-01-02,rent,-900\n", &rules)
+            .unwrap()
+            .transactions;
+        let candidates = convert_csv("2026-01-01,COFFEE,-4.0\n2026-01-03,new thing,-1\n", &rules)
+            .unwrap()
+            .transactions;
+        let flags = mark_probable_duplicates(&candidates, &existing);
+        assert_eq!(flags, vec![true, false]);
     }
 }

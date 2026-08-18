@@ -1,11 +1,15 @@
 pub mod amount;
 pub mod budget;
+pub mod classify;
 pub mod csv_import;
 pub mod ledger;
 pub mod price_db;
 pub mod reconciliation;
 pub mod reports;
 
+pub mod balance;
+
 mod account;
-mod balance;
 mod error;
+
+pub use error::LedgerError;

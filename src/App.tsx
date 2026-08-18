@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { BottomNav, type TabId } from "./components/layout/BottomNav";
 import { TransactionsPage } from "./pages/TransactionsPage";
@@ -19,12 +19,19 @@ function App() {
     loadSettings();
   }, [loadSettings]);
 
-  // Auto-open last journal on startup
+  // Auto-open last journal on startup (attempt once — never retry-loop)
+  const autoOpenAttempted = useRef(false);
+  const [autoOpenFailedPath, setAutoOpenFailedPath] = useState<string | null>(null);
   useEffect(() => {
-    if (settingsLoaded && !isLoaded && !isLoading && lastJournalPath) {
-      openJournal(lastJournalPath).catch(() => {
-        // File may have been moved/deleted - clear the saved path
-        setLastJournalPath("");
+    if (settingsLoaded && !isLoaded && !isLoading && lastJournalPath && !autoOpenAttempted.current) {
+      autoOpenAttempted.current = true;
+      const path = lastJournalPath;
+      openJournal(path).then((ok) => {
+        if (!ok) {
+          // File may have been moved/deleted - clear the saved path
+          setAutoOpenFailedPath(path);
+          setLastJournalPath("");
+        }
       });
     }
   }, [settingsLoaded, isLoaded, isLoading, lastJournalPath, openJournal, setLastJournalPath]);
@@ -39,8 +46,11 @@ function App() {
 
       if (selected) {
         const path = selected as string;
-        await openJournal(path);
-        await setLastJournalPath(path);
+        const ok = await openJournal(path);
+        if (ok) {
+          setAutoOpenFailedPath(null);
+          await setLastJournalPath(path);
+        }
       }
     } catch (err) {
       console.error("File picker error:", err);
@@ -65,8 +75,11 @@ function App() {
           path += ".journal";
         }
         await api.createJournal(path, defaultCurrency);
-        await openJournal(path);
-        await setLastJournalPath(path);
+        const ok = await openJournal(path);
+        if (ok) {
+          setAutoOpenFailedPath(null);
+          await setLastJournalPath(path);
+        }
       }
     } catch (err) {
       console.error("Create journal error:", err);
@@ -110,6 +123,13 @@ function App() {
             >
               Create New Journal
             </button>
+          </div>
+        )}
+        {autoOpenFailedPath && (
+          <div className="text-sm text-yellow-700 dark:text-yellow-400 bg-yellow-50 dark:bg-yellow-900/20 px-4 py-2 rounded-lg max-w-xs text-center">
+            <p>Couldn't reopen the last journal:</p>
+            <p className="font-mono text-xs break-all mt-1">{autoOpenFailedPath}</p>
+            <p className="text-xs mt-1">Pick another journal below.</p>
           </div>
         )}
         {error && (

@@ -5,8 +5,7 @@ edition = "2021"
 description = "Parser for hledger/ledger plain text accounting files"
 
 [dependencies]
-pest = "2"
-pest_derive = "2"
+regex = "1"
 rust_decimal = { version = "1", features = ["serde-with-str"] }
 chrono = { version = "0.4", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }

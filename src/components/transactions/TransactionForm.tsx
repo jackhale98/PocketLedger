@@ -1,7 +1,8 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useRef } from "react";
 import { format } from "date-fns";
 import { Autocomplete } from "../common/Autocomplete";
 import * as api from "../../api/commands";
+import { normalizeAmountInput, exactDecimalSum, isDecimalZero } from "../../utils/amount";
 import type { NewPosting } from "../../api/types";
 
 interface PrefillData {
@@ -70,6 +71,7 @@ export function TransactionForm({
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const submittingRef = useRef(false);
 
   const suggestAccounts = useCallback(
     (prefix: string) => api.suggestAccounts(prefix),
@@ -112,9 +114,9 @@ export function TransactionForm({
 
     let total = 0;
     for (const p of filledPostings) {
-      const val = parseFloat(p.amount);
-      if (isNaN(val)) return "";
-      total += val;
+      const normalized = normalizeAmountInput(p.amount);
+      if (normalized === null) return "";
+      total += parseFloat(normalized);
     }
 
     if (total === 0) return "";
@@ -122,10 +124,28 @@ export function TransactionForm({
   };
 
   const handleSubmit = async () => {
+    if (submittingRef.current) return;
     setError(null);
 
     if (!description.trim()) {
       setError("Description is required");
+      return;
+    }
+    if (/[\n;]/.test(description)) {
+      setError("Description cannot contain \";\" or line breaks");
+      return;
+    }
+    if (/\n/.test(comment)) {
+      setError("Note cannot contain line breaks");
+      return;
+    }
+
+    // A posting with an amount must also have an account
+    const orphanIndex = postings.findIndex(
+      (p) => p.amount.trim() !== "" && p.account.trim() === ""
+    );
+    if (orphanIndex !== -1) {
+      setError(`Posting ${orphanIndex + 1} has an amount but no account`);
       return;
     }
 
@@ -135,21 +155,60 @@ export function TransactionForm({
       return;
     }
 
-    // Build postings for the API
-    const apiPostings: NewPosting[] = filledPostings.map((p) => ({
-      account: p.account.trim(),
-      amount: p.amount.trim() || null,
-      commodity: p.amount.trim() ? p.commodity || null : null,
-      comment: p.comment.trim() || null,
-    }));
+    for (let i = 0; i < filledPostings.length; i++) {
+      const p = filledPostings[i];
+      if (/\n/.test(p.account) || /\n/.test(p.comment)) {
+        setError(`Posting ${i + 1} cannot contain line breaks`);
+        return;
+      }
+    }
+
+    // Normalize amounts (accepts comma-decimal input, e.g. "1,5" -> "1.5")
+    const normalizedAmounts: (string | null)[] = [];
+    for (let i = 0; i < filledPostings.length; i++) {
+      const raw = filledPostings[i].amount.trim();
+      if (raw === "") {
+        normalizedAmounts.push(null);
+        continue;
+      }
+      const normalized = normalizeAmountInput(raw);
+      if (normalized === null) {
+        setError(`"${raw}" is not a valid amount (posting ${i + 1})`);
+        return;
+      }
+      normalizedAmounts.push(normalized);
+    }
 
     // Verify at most one posting has no amount
-    const emptyAmountCount = apiPostings.filter((p) => p.amount === null).length;
+    const emptyAmountCount = normalizedAmounts.filter((a) => a === null).length;
     if (emptyAmountCount > 1) {
       setError("At most one posting can have an inferred amount");
       return;
     }
 
+    // When every posting has an explicit amount in the same commodity,
+    // they must sum to exactly zero (exact decimal math, no float rounding).
+    if (emptyAmountCount === 0) {
+      const commodities = new Set(filledPostings.map((p) => p.commodity));
+      if (commodities.size === 1) {
+        const sum = exactDecimalSum(normalizedAmounts as string[]);
+        if (sum !== null && !isDecimalZero(sum)) {
+          const commodity = filledPostings[0].commodity;
+          setError(`Postings don't balance: off by ${sum} ${commodity}. Adjust an amount or leave one empty to infer it.`);
+          return;
+        }
+      }
+    }
+
+    // Build postings for the API (dot-decimal amounts)
+    const apiPostings: NewPosting[] = filledPostings.map((p, i) => ({
+      account: p.account.trim(),
+      amount: normalizedAmounts[i],
+      commodity: normalizedAmounts[i] !== null ? p.commodity || null : null,
+      comment: p.comment.trim() || null,
+    }));
+
+    submittingRef.current = true;
     setSaving(true);
     try {
       await onSave({
@@ -162,6 +221,8 @@ export function TransactionForm({
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
       setSaving(false);
+    } finally {
+      submittingRef.current = false;
     }
   };
 

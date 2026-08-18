@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import * as api from "../api/commands";
 import type { BalanceRow, RegisterRow } from "../api/types";
 
@@ -49,21 +49,34 @@ export function AccountsPage() {
   const [typeFilter, setTypeFilter] = useState("");
   const [valueCurrency, setValueCurrency] = useState<string>("");
   const [commodities, setCommodities] = useState<string[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [registerLoading, setRegisterLoading] = useState(false);
+  const loadSeq = useRef(0);
+  const registerSeq = useRef(0);
 
   const loadAccounts = useCallback(async () => {
+    const seq = ++loadSeq.current;
     setLoading(true);
-    const [data, comms] = await Promise.all([
-      valueCurrency
-        ? api.listAccountsWithBalances({ targetCommodity: valueCurrency })
-        : api.listAccountsWithBalances(),
-      api.listCommodities(),
-    ]);
-    setAllAccounts(data);
-    setCommodities(comms);
-    setLoading(false);
-    // Auto-expand top-level accounts
-    const topLevel = new Set(data.filter((a: BalanceRow) => a.depth === 0).map((a: BalanceRow) => a.account));
-    setExpanded(topLevel);
+    setError(null);
+    try {
+      const [data, comms] = await Promise.all([
+        valueCurrency
+          ? api.listAccountsWithBalances({ targetCommodity: valueCurrency })
+          : api.listAccountsWithBalances(),
+        api.listCommodities(),
+      ]);
+      if (seq !== loadSeq.current) return;
+      setAllAccounts(data);
+      setCommodities(comms);
+      // Auto-expand top-level accounts
+      const topLevel = new Set(data.filter((a: BalanceRow) => a.depth === 0).map((a: BalanceRow) => a.account));
+      setExpanded(topLevel);
+    } catch (err) {
+      if (seq !== loadSeq.current) return;
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      if (seq === loadSeq.current) setLoading(false);
+    }
   }, [valueCurrency]);
 
   useEffect(() => { loadAccounts(); }, [loadAccounts]);
@@ -139,9 +152,21 @@ export function AccountsPage() {
   };
 
   const handleAccountTap = async (account: string) => {
+    const seq = ++registerSeq.current;
     setSelectedAccount(account);
-    const data = await api.registerReport(account);
-    setRegister(data);
+    setRegister([]);
+    setRegisterLoading(true);
+    setError(null);
+    try {
+      const data = await api.registerReport(account);
+      if (seq !== registerSeq.current) return;
+      setRegister(data);
+    } catch (err) {
+      if (seq !== registerSeq.current) return;
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      if (seq === registerSeq.current) setRegisterLoading(false);
+    }
   };
 
   // Register view for selected account
@@ -150,7 +175,7 @@ export function AccountsPage() {
       <div className="flex flex-col h-full">
         <div className="flex items-center gap-2 px-4 py-3 border-b border-gray-200 dark:border-gray-700">
           <button
-            onClick={() => setSelectedAccount(null)}
+            onClick={() => { setSelectedAccount(null); setError(null); }}
             className="p-2 -ml-2 text-gray-600 dark:text-gray-300"
           >
             &larr;
@@ -160,17 +185,28 @@ export function AccountsPage() {
           </h2>
         </div>
         <div className="flex-1 overflow-auto">
-          {register.length === 0 ? (
-            <div className="flex items-center justify-center h-32 text-gray-500 dark:text-gray-400 text-sm">
-              No postings
+          {error && (
+            <div className="mx-4 mt-3 text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/30 px-3 py-2 rounded-lg">
+              {error}
             </div>
+          )}
+          {registerLoading ? (
+            <div className="flex items-center justify-center h-32 text-gray-500 dark:text-gray-400 text-sm">
+              Loading...
+            </div>
+          ) : register.length === 0 ? (
+            !error && (
+              <div className="flex items-center justify-center h-32 text-gray-500 dark:text-gray-400 text-sm">
+                No postings
+              </div>
+            )
           ) : (
             <div className="divide-y divide-gray-100 dark:divide-gray-800">
               {register.map((row, i) => (
                 <div key={i} className="px-4 py-2.5">
                   <div className="flex justify-between items-center">
                     <div className="min-w-0 flex-1">
-                      <div className="text-sm text-gray-900 dark:text-gray-100 truncate">
+                      <div className="text-sm text-gray-900 dark:text-gray-100 truncate" title={row.description}>
                         {row.description}
                       </div>
                       <div className="text-xs text-gray-500 dark:text-gray-400">{row.date}</div>
@@ -256,6 +292,12 @@ export function AccountsPage() {
 
       {/* Account tree */}
       <div className="flex-1 overflow-auto">
+        {error && (
+          <div className="mx-4 mt-3 flex items-center justify-between text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/30 px-3 py-2 rounded-lg">
+            <span className="min-w-0 break-words">{error}</span>
+            <button onClick={loadAccounts} className="text-xs text-red-500 ml-2 shrink-0 underline">Retry</button>
+          </div>
+        )}
         {loading ? (
           <div className="flex items-center justify-center h-32 text-gray-500 dark:text-gray-400 text-sm">
             Loading...
@@ -303,6 +345,7 @@ export function AccountsPage() {
                   {/* Account name */}
                   <button
                     onClick={() => handleAccountTap(row.account)}
+                    title={row.account}
                     className="flex-1 text-left text-sm text-gray-900 dark:text-gray-100 truncate"
                   >
                     {shortName}

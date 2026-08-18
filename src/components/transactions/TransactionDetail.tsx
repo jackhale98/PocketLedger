@@ -7,7 +7,7 @@ interface TransactionDetailProps {
   transaction: TransactionSummary;
   onBack: () => void;
   onEdit: () => void;
-  onDelete: () => void;
+  onDelete: () => void | Promise<void>;
 }
 
 export function TransactionDetail({
@@ -17,6 +17,21 @@ export function TransactionDetail({
   onDelete,
 }: TransactionDetailProps) {
   const [showConfirmDelete, setShowConfirmDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  const handleDelete = async () => {
+    if (deleting) return;
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      await onDelete();
+    } catch (err) {
+      setDeleteError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setDeleting(false);
+    }
+  };
 
   return (
     <div className="flex flex-col h-full">
@@ -98,6 +113,11 @@ export function TransactionDetail({
               <p className="text-sm text-red-600 text-center">
                 This will permanently remove the transaction from your journal file.
               </p>
+              {deleteError && (
+                <div className="text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/30 px-3 py-2 rounded-lg">
+                  {deleteError}
+                </div>
+              )}
               <div className="flex gap-2">
                 <button
                   onClick={() => setShowConfirmDelete(false)}
@@ -106,10 +126,11 @@ export function TransactionDetail({
                   Cancel
                 </button>
                 <button
-                  onClick={onDelete}
-                  className="flex-1 py-3 text-sm font-medium text-white bg-red-600 rounded-lg active:bg-red-700"
+                  onClick={handleDelete}
+                  disabled={deleting}
+                  className="flex-1 py-3 text-sm font-medium text-white bg-red-600 rounded-lg active:bg-red-700 disabled:opacity-50"
                 >
-                  Delete
+                  {deleting ? "Deleting..." : "Delete"}
                 </button>
               </div>
             </div>

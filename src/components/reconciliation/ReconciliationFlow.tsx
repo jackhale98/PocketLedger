@@ -1,5 +1,7 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
+import { format } from "date-fns";
 import * as api from "../../api/commands";
+import { normalizeAmountInput } from "../../utils/amount";
 import type { ReconciliationState } from "../../api/types";
 import { useSettingsStore } from "../../store/settingsStore";
 
@@ -15,7 +17,7 @@ export function ReconciliationFlow({ onDone, onEditTransaction }: Reconciliation
   const [step, setStep] = useState<Step>("setup");
   const [accounts, setAccounts] = useState<string[]>([]);
   const [account, setAccount] = useState("");
-  const [statementDate, setStatementDate] = useState(new Date().toISOString().slice(0, 10));
+  const [statementDate, setStatementDate] = useState(format(new Date(), "yyyy-MM-dd"));
   const [statementBalance, setStatementBalance] = useState("");
   const [commodity, setCommodity] = useState(defaultCurrency);
   const [reconcState, setReconcState] = useState<ReconciliationState | null>(null);
@@ -24,10 +26,17 @@ export function ReconciliationFlow({ onDone, onEditTransaction }: Reconciliation
   const [search, setSearch] = useState("");
   const [showCleared, setShowCleared] = useState(false);
 
+  const toggleSeq = useRef(0);
+
   useEffect(() => {
-    api.listAccountsWithBalances().then((data) => {
-      setAccounts(data.map((a) => a.account).sort());
-    });
+    api
+      .listAccountsWithBalances()
+      .then((data) => {
+        setAccounts(data.map((a) => a.account).sort());
+      })
+      .catch((err) => {
+        setError(err instanceof Error ? err.message : String(err));
+      });
   }, []);
 
   const handleStart = async () => {
@@ -35,23 +44,33 @@ export function ReconciliationFlow({ onDone, onEditTransaction }: Reconciliation
       setError("Account and statement balance are required");
       return;
     }
+    const normalizedBalance = normalizeAmountInput(statementBalance);
+    if (normalizedBalance === null) {
+      setError(`"${statementBalance}" is not a valid amount`);
+      return;
+    }
     setError(null);
     setLoading(true);
     try {
-      const state = await api.startReconciliation({ account, statementDate, statementBalance, commodity });
+      const state = await api.startReconciliation({ account, statementDate, statementBalance: normalizedBalance, commodity });
       setReconcState(state);
       setStep("reconcile");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   };
 
   const handleToggle = async (index: number) => {
+    const seq = ++toggleSeq.current;
     try {
       const state = await api.toggleReconciliationPosting(index);
+      // Ignore stale responses from rapid toggling
+      if (seq !== toggleSeq.current) return;
       setReconcState(state);
     } catch (err) {
+      if (seq !== toggleSeq.current) return;
       setError(err instanceof Error ? err.message : String(err));
     }
   };
@@ -68,8 +87,14 @@ export function ReconciliationFlow({ onDone, onEditTransaction }: Reconciliation
   };
 
   const handleCancel = async () => {
-    await api.cancelReconciliation();
-    onDone();
+    try {
+      await api.cancelReconciliation();
+    } catch (err) {
+      // Session cleanup failure shouldn't trap the user in this screen
+      console.error("Cancel reconciliation error:", err);
+    } finally {
+      onDone();
+    }
   };
 
   // Filtered postings for display
@@ -209,11 +234,11 @@ export function ReconciliationFlow({ onDone, onEditTransaction }: Reconciliation
                     {posting.isCleared && <span className="text-white text-xs font-bold">&#10003;</span>}
                   </div>
                   <div className="flex-1 min-w-0">
-                    <div className="text-sm text-gray-900 dark:text-gray-100 truncate">{posting.description}</div>
+                    <div className="text-sm text-gray-900 dark:text-gray-100 truncate" title={posting.description}>{posting.description}</div>
                     <div className="text-xs text-gray-500 dark:text-gray-400">{posting.date}</div>
                   </div>
                   <span className={`text-sm font-mono shrink-0 ${amount < 0 ? "text-red-500" : "text-green-500"}`}>
-                    {posting.commodity}{Math.abs(amount).toFixed(2)}
+                    {amount < 0 ? "-" : ""}{posting.commodity}{Math.abs(amount).toFixed(2)}
                   </span>
                 </button>
                 {onEditTransaction && (

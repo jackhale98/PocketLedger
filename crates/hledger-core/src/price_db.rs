@@ -3,9 +3,8 @@ use std::collections::BTreeMap;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 
-use hledger_parser::ast::{Cost, Journal, JournalItem, PriceDirective};
+use hledger_parser::ast::{Cost, Journal, JournalItem};
 
-use crate::balance::ResolvedTransaction;
 
 /// Price database for currency/commodity conversions.
 /// Stores historical prices and supports lookups by date.
@@ -80,7 +79,8 @@ impl PriceDb {
     }
 
     /// Get the price of `from` in terms of `to` on or before `date`.
-    /// Returns the most recent available price.
+    /// Uses direct prices, reverse prices, and chained (triangulated)
+    /// conversions through intermediate commodities, like hledger -X.
     pub fn get_price(&self, from: &str, to: &str, date: NaiveDate) -> Option<Decimal> {
         // Direct lookup
         if let Some(rate) = self.lookup_direct(from, to, date) {
@@ -94,7 +94,67 @@ impl PriceDb {
             }
         }
 
+        // BFS over the commodity graph (direct + reverse edges), shortest
+        // chain wins; depth-capped to keep pathological graphs cheap.
+        self.chained_price(from, to, date, 4)
+    }
+
+    fn chained_price(
+        &self,
+        from: &str,
+        to: &str,
+        date: NaiveDate,
+        max_depth: usize,
+    ) -> Option<Decimal> {
+        use std::collections::{HashMap, HashSet, VecDeque};
+
+        // Build the neighbor map lazily from known pairs with a usable rate.
+        let mut edges: HashMap<&str, Vec<(&str, Decimal)>> = HashMap::new();
+        for (fc, tc) in self.prices.keys() {
+            if let Some(rate) = self.lookup_direct(fc, tc, date) {
+                if !rate.is_zero() {
+                    edges.entry(fc.as_str()).or_default().push((tc.as_str(), rate));
+                    edges
+                        .entry(tc.as_str())
+                        .or_default()
+                        .push((fc.as_str(), Decimal::ONE / rate));
+                }
+            }
+        }
+
+        let mut visited: HashSet<&str> = HashSet::new();
+        let mut queue: VecDeque<(&str, Decimal, usize)> = VecDeque::new();
+        visited.insert(from);
+        queue.push_back((from, Decimal::ONE, 0));
+
+        while let Some((commodity, rate, depth)) = queue.pop_front() {
+            if depth >= max_depth {
+                continue;
+            }
+            if let Some(neighbors) = edges.get(commodity) {
+                for (next, edge_rate) in neighbors {
+                    if !visited.insert(next) {
+                        continue;
+                    }
+                    let next_rate = rate * edge_rate;
+                    if *next == to {
+                        return Some(next_rate);
+                    }
+                    queue.push_back((next, next_rate, depth + 1));
+                }
+            }
+        }
         None
+    }
+
+    /// All commodities that have at least one price relationship.
+    pub fn known_commodities(&self) -> Vec<String> {
+        let mut set = std::collections::BTreeSet::new();
+        for (f, t) in self.prices.keys() {
+            set.insert(f.clone());
+            set.insert(t.clone());
+        }
+        set.into_iter().collect()
     }
 
     /// Convert a quantity from one commodity to another using the price on or before `date`.
@@ -184,6 +244,17 @@ mod tests {
     fn same_commodity_conversion() {
         let db = PriceDb::new();
         assert_eq!(db.convert(dec!(100), "USD", "USD", d(2024, 1, 1)), Some(dec!(100)));
+    }
+
+    #[test]
+    fn triangulated_price_lookup() {
+        let mut db = PriceDb::new();
+        db.add_price(d(2024, 1, 1), "EUR", "USD", dec!(1.10));
+        db.add_price(d(2024, 1, 1), "GBP", "USD", dec!(1.25));
+
+        // EUR -> GBP via USD: 1.10 / 1.25 = 0.88
+        let rate = db.get_price("EUR", "GBP", d(2024, 1, 15)).unwrap();
+        assert_eq!(rate, dec!(0.88));
     }
 
     #[test]
