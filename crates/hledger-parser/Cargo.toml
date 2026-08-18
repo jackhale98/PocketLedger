@@ -1,6 +1,6 @@
 [package]
 name = "hledger-parser"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Parser for hledger/ledger plain text accounting files"
 
