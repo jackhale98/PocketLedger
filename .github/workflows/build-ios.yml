@@ -33,8 +33,12 @@ jobs:
           if [ -n "$NEWEST" ]; then
             sudo xcode-select -s "$NEWEST/Contents/Developer"
           fi
-          xcodebuild -version
-          MAJOR=$(xcodebuild -version | head -1 | sed -E 's/Xcode ([0-9]+).*/\1/')
+          # Capture once, parse the variable: piping xcodebuild into head
+          # makes head close the pipe early, which crashes Xcode 26.6's
+          # xcodebuild with NSFileHandleOperationException (broken pipe).
+          VERSION_OUTPUT=$(xcodebuild -version)
+          echo "$VERSION_OUTPUT"
+          MAJOR=$(echo "$VERSION_OUTPUT" | sed -n '1s/Xcode \([0-9]*\).*/\1/p')
           if [ "$MAJOR" -lt 26 ]; then
             echo "::error::Xcode $MAJOR is too old. App Store Connect requires the iOS 26 SDK (Xcode 26+); available: $(ls -d /Applications/Xcode*.app | tr '\n' ' ')"
             exit 1
