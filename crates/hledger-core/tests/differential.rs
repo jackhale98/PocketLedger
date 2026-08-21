@@ -518,3 +518,88 @@ fn forecast_dates_match_hledger() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A rule written by the app must be valid hledger. `check --forecast`
+/// validates periodic rules (plain `check` skips them), so it catches the
+/// mistakes the writer could plausibly make: a single space before the
+/// description, or an elided amount that leaves the rule unbalanced.
+#[test]
+fn written_periodic_rules_stay_hledger_valid() {
+    if !hledger_available() {
+        eprintln!("skipping: hledger not installed");
+        return;
+    }
+
+    let config = hledger_parser::writer::WriterConfig::default();
+    let cases: Vec<(&str, &str, Vec<(String, Option<Decimal>, String)>)> = vec![
+        (
+            "monthly from 2026-01",
+            "Rent",
+            vec![
+                ("expenses:rent".into(), Some(Decimal::new(120000, 2)), "$".into()),
+                ("assets:checking".into(), None, String::new()),
+            ],
+        ),
+        (
+            "every 15th day of month from 2026-01",
+            "Card payment  with awkward  spacing",
+            vec![
+                ("liabilities:card".into(), Some(Decimal::new(30000, 2)), "$".into()),
+                ("assets:checking".into(), None, String::new()),
+            ],
+        ),
+        (
+            "every 2 weeks from 2026-01-05",
+            "",
+            vec![
+                ("assets:checking".into(), Some(Decimal::new(200000, 2)), "$".into()),
+                ("income:salary".into(), Some(Decimal::new(-200000, 2)), "$".into()),
+            ],
+        ),
+    ];
+
+    let dir = std::env::temp_dir().join(format!("hledger-rulewrite-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    for (i, (period, description, postings)) in cases.iter().enumerate() {
+        let rule = hledger_parser::writer::write_periodic_transaction_full(
+            period,
+            description,
+            postings,
+            &config,
+        );
+        let text = format!(
+            "2026-01-01 Seed\n    assets:checking  $5000.00\n    equity:opening\n\n{rule}"
+        );
+        let path = dir.join(format!("rule-{i}.journal"));
+        std::fs::write(&path, &text).unwrap();
+
+        let output = Command::new("hledger")
+            .args(["-f", &path.to_string_lossy(), "check", "--forecast"])
+            .output()
+            .expect("run hledger check --forecast");
+        assert!(
+            output.status.success(),
+            "hledger rejected our rule:\n{text}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        // And it must actually generate something, not silently do nothing.
+        let printed = Command::new("hledger")
+            .args([
+                "-f",
+                &path.to_string_lossy(),
+                "print",
+                "--forecast=2026-01-01..2026-06-01",
+            ])
+            .output()
+            .expect("run hledger print --forecast");
+        let stdout = String::from_utf8_lossy(&printed.stdout);
+        assert!(
+            stdout.matches("\n\n").count() > 1,
+            "rule generated no transactions:\n{text}\n{stdout}"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

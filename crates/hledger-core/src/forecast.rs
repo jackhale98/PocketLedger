@@ -118,6 +118,209 @@ pub fn with_forecast(
     all
 }
 
+/// A recurring transaction rule (`~ PERIODEXPR  DESCRIPTION`) as the user
+/// manages it. The same rules also drive budget goals — hledger has no way to
+/// mark a rule as one or the other, so the UI shows them together.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForecastRule {
+    /// Full period expression, e.g. "monthly from 2026-01".
+    pub period: String,
+    pub description: String,
+    /// Source line of the `~` rule; pass back to replace or delete it.
+    pub line: usize,
+    pub postings: Vec<ForecastPosting>,
+    /// Set when the period expression can't be honored; the rule generates
+    /// nothing and the message says why.
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForecastPosting {
+    pub account: String,
+    /// None for an elided amount (hledger infers it to balance the rule).
+    pub amount: Option<String>,
+    pub commodity: String,
+}
+
+/// Every periodic rule in the journal, in source order. Unparseable ones are
+/// included with an `error` rather than dropped, so the UI can offer to fix
+/// them instead of silently losing them.
+pub fn extract_rules(journal: &Journal) -> Vec<ForecastRule> {
+    let mut rules = Vec::new();
+    for item in &journal.items {
+        let JournalItem::PeriodicTransaction(pt) = item else {
+            continue;
+        };
+        let error = parse_period_expression(&pt.period).is_none().then(|| {
+            format!(
+                "Unsupported period expression '{}' — this rule generates nothing.",
+                pt.period
+            )
+        });
+        rules.push(ForecastRule {
+            period: pt.period.clone(),
+            description: pt.description.clone(),
+            line: pt.span.line,
+            postings: pt
+                .postings
+                .iter()
+                .map(|p| ForecastPosting {
+                    account: p.account.full.clone(),
+                    amount: p.amount.as_ref().map(|a| a.quantity.to_string()),
+                    commodity: p
+                        .amount
+                        .as_ref()
+                        .map(|a| a.commodity.clone())
+                        .unwrap_or_default(),
+                })
+                .collect(),
+            error,
+        });
+    }
+    rules
+}
+
+/// One period of a cash-flow projection.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectionPoint {
+    /// Period label, e.g. "2026-03".
+    pub period: String,
+    /// Money in during the period.
+    pub inflow: String,
+    /// Money out during the period (positive).
+    pub outflow: String,
+    /// Balance at the end of the period.
+    pub closing: String,
+    /// True once the period contains projected rather than recorded activity.
+    pub projected: bool,
+}
+
+/// A projected cash-flow shortfall.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShortfallAlert {
+    pub date: String,
+    pub balance: String,
+    pub description: String,
+}
+
+/// Monthly cash-flow projection for the accounts matching `account_prefix`,
+/// valued in `commodity`. Periods up to and including the last recorded
+/// transaction are actuals; later ones are projections.
+pub fn cash_flow_projection(
+    all: &[ResolvedTransaction],
+    last_real: Option<NaiveDate>,
+    account_prefix: &str,
+    commodity: &str,
+    price_db: &crate::price_db::PriceDb,
+    from: Option<NaiveDate>,
+    to: Option<NaiveDate>,
+) -> Vec<ProjectionPoint> {
+    use crate::reports::{account_matches_prefix, valued_quantity};
+    use rust_decimal::Decimal;
+    use std::collections::BTreeMap;
+
+    // period start -> (inflow, outflow); opening carries everything earlier.
+    let mut buckets: BTreeMap<NaiveDate, (Decimal, Decimal)> = BTreeMap::new();
+    let mut opening = Decimal::ZERO;
+
+    for txn in all {
+        for posting in &txn.postings {
+            if !account_matches_prefix(&posting.account.full, account_prefix) {
+                continue;
+            }
+            if let Some(to) = to {
+                if posting.date > to {
+                    continue;
+                }
+            }
+            let (value, _unconvertible) =
+                valued_quantity(&posting.amount, commodity, price_db, posting.date);
+            if value.is_zero() {
+                continue;
+            }
+            if from.is_some_and(|f| posting.date < f) {
+                opening += value;
+                continue;
+            }
+            let key = month_start(posting.date);
+            let entry = buckets.entry(key).or_insert((Decimal::ZERO, Decimal::ZERO));
+            if value.is_sign_negative() {
+                entry.1 -= value;
+            } else {
+                entry.0 += value;
+            }
+        }
+    }
+
+    let mut running = opening;
+    buckets
+        .into_iter()
+        .map(|(period, (inflow, outflow))| {
+            running += inflow - outflow;
+            ProjectionPoint {
+                period: period.format("%Y-%m").to_string(),
+                inflow: inflow.to_string(),
+                outflow: outflow.to_string(),
+                closing: running.to_string(),
+                projected: last_real.is_some_and(|last| period > month_start(last)),
+            }
+        })
+        .collect()
+}
+
+/// The first projected date on which the matching accounts drop below
+/// `threshold`, if any. Answers "when do I run out of money".
+pub fn first_shortfall(
+    all: &[ResolvedTransaction],
+    account_prefix: &str,
+    commodity: &str,
+    price_db: &crate::price_db::PriceDb,
+    threshold: rust_decimal::Decimal,
+    after: Option<NaiveDate>,
+) -> Option<ShortfallAlert> {
+    use crate::reports::{account_matches_prefix, valued_quantity};
+    use rust_decimal::Decimal;
+
+    // Postings must be walked in date order for the running balance to mean
+    // anything; forecast entries are appended, not merged, upstream.
+    let mut lines: Vec<(NaiveDate, Decimal, &str)> = Vec::new();
+    for txn in all {
+        for posting in &txn.postings {
+            if !account_matches_prefix(&posting.account.full, account_prefix) {
+                continue;
+            }
+            let (value, _unconvertible) =
+                valued_quantity(&posting.amount, commodity, price_db, posting.date);
+            if !value.is_zero() {
+                lines.push((posting.date, value, txn.description.as_str()));
+            }
+        }
+    }
+    lines.sort_by_key(|(d, _, _)| *d);
+
+    let mut running = Decimal::ZERO;
+    for (date, value, description) in lines {
+        running += value;
+        if running < threshold && after.is_none_or(|a| date > a) {
+            return Some(ShortfallAlert {
+                date: date.format("%Y-%m-%d").to_string(),
+                balance: running.to_string(),
+                description: description.to_string(),
+            });
+        }
+    }
+    None
+}
+
+fn month_start(date: NaiveDate) -> NaiveDate {
+    use chrono::Datelike;
+    NaiveDate::from_ymd_opt(date.year(), date.month(), 1).unwrap_or(date)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,5 +420,110 @@ mod tests {
         //   hledger print --forecast=2024-02-01..2024-03-01
         //   -> Paycheck on 2024-02-01, 02-15, 02-29
         assert_eq!(dates, vec![d(2024, 2, 1), d(2024, 2, 15), d(2024, 2, 29)]);
+    }
+}
+
+#[cfg(test)]
+mod projection_tests {
+    use super::*;
+    use crate::price_db::PriceDb;
+    use hledger_parser::parse;
+    use rust_decimal_macros::dec;
+
+    fn d(y: i32, m: u32, day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, day).unwrap()
+    }
+
+    const JOURNAL: &str = "\
+~ monthly from 2024-02-01  Rent
+    expenses:rent  $1000.00
+    assets:checking
+
+2024-01-31 Seed
+    assets:checking  $2500.00
+    equity:opening
+";
+
+    fn projected() -> (Vec<ResolvedTransaction>, NaiveDate) {
+        let journal = parse(JOURNAL).unwrap();
+        let real = resolve_transactions(&journal).unwrap();
+        let last_real = real.iter().map(|t| t.date).max().unwrap();
+        let all = with_forecast(&journal, &real, Some(d(2024, 5, 31)));
+        (all, last_real)
+    }
+
+    #[test]
+    fn projection_marks_future_periods_and_tracks_closing_balance() {
+        let (all, last_real) = projected();
+        let points = cash_flow_projection(
+            &all,
+            Some(last_real),
+            "assets:checking",
+            "$",
+            &PriceDb::default(),
+            None,
+            None,
+        );
+
+        // Jan is actual (+2500); Feb..May are projected rent of 1000 each.
+        assert_eq!(points[0].period, "2024-01");
+        assert!(!points[0].projected);
+        assert_eq!(points[0].closing, "2500.00");
+
+        assert!(points[1..].iter().all(|p| p.projected));
+        assert_eq!(points[1].outflow, "1000.00");
+        assert_eq!(points[1].closing, "1500.00");
+        assert_eq!(points.last().unwrap().closing, "-1500.00");
+    }
+
+    #[test]
+    fn shortfall_reports_the_first_date_the_balance_goes_negative() {
+        let (all, _) = projected();
+        let alert = first_shortfall(
+            &all,
+            "assets:checking",
+            "$",
+            &PriceDb::default(),
+            dec!(0),
+            None,
+        )
+        .expect("balance should go negative");
+
+        // 2500 covers Feb and Mar rent; the April payment overdraws it.
+        assert_eq!(alert.date, "2024-04-01");
+        assert_eq!(alert.balance, "-500.00");
+        assert_eq!(alert.description, "Rent");
+    }
+
+    #[test]
+    fn no_shortfall_when_balance_stays_above_threshold() {
+        let journal = parse("2024-01-31 Seed\n    assets:checking  $10.00\n    equity:opening\n")
+            .unwrap();
+        let real = resolve_transactions(&journal).unwrap();
+        assert!(first_shortfall(
+            &real,
+            "assets:checking",
+            "$",
+            &PriceDb::default(),
+            dec!(0),
+            None
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn rules_are_extracted_with_unparseable_ones_flagged() {
+        let journal = parse(
+            "~ monthly  Good\n    expenses:a  $1.00\n    assets:cash\n\n~ fortnightly  Bad\n    expenses:b  $2.00\n    assets:cash\n",
+        )
+        .unwrap();
+        let rules = extract_rules(&journal);
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0].description, "Good");
+        assert!(rules[0].error.is_none());
+        // The elided balancing posting is preserved as an amount-less entry.
+        assert_eq!(rules[0].postings[1].account, "assets:cash");
+        assert!(rules[0].postings[1].amount.is_none());
+        assert!(rules[1].error.is_some());
     }
 }

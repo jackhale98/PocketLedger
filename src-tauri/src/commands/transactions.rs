@@ -40,6 +40,38 @@ fn has_hidden_details(txn: &hledger_parser::ast::Transaction) -> bool {
         })
 }
 
+/// Summarize forecast-generated transactions. They have no journal entry
+/// behind them, so `index` is a position in this list only and must never be
+/// passed to update_transaction/delete_transaction.
+pub fn summarize_generated(
+    generated: &[hledger_core::balance::ResolvedTransaction],
+    limit: usize,
+) -> Vec<TransactionSummary> {
+    generated
+        .iter()
+        .take(limit)
+        .enumerate()
+        .map(|(i, txn)| TransactionSummary {
+            index: i,
+            date: txn.date.format("%Y-%m-%d").to_string(),
+            status: format!("{:?}", txn.status),
+            description: txn.description.clone(),
+            comment: txn.comment.clone(),
+            postings: txn
+                .postings
+                .iter()
+                .map(|p| PostingSummary {
+                    account: p.account.full.clone(),
+                    amount: p.amount.amounts.values().next().map(|q| q.to_string()),
+                    commodity: p.amount.amounts.keys().next().cloned(),
+                    comment: p.comment.clone(),
+                })
+                .collect(),
+            has_hidden_details: false,
+        })
+        .collect()
+}
+
 fn summarize(
     loaded: &super::journal::LoadedJournal,
     txn: &hledger_core::balance::ResolvedTransaction,

@@ -168,7 +168,7 @@ pub fn unconvertible_commodities(
 }
 
 /// Case-insensitive account-prefix match with a `:` boundary.
-fn account_matches_prefix(account: &str, prefix: &str) -> bool {
+pub fn account_matches_prefix(account: &str, prefix: &str) -> bool {
     if account.len() < prefix.len() {
         return false;
     }

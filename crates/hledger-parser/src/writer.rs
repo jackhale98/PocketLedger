@@ -300,15 +300,44 @@ pub fn write_periodic_transaction(
     postings: &[(String, rust_decimal::Decimal, String)],
     config: &WriterConfig,
 ) -> String {
+    let with_amounts: Vec<_> = postings
+        .iter()
+        .map(|(a, q, c)| (a.clone(), Some(*q), c.clone()))
+        .collect();
+    write_periodic_transaction_full(period, "", &with_amounts, config)
+}
+
+/// Write a periodic transaction with an optional description and optional
+/// per-posting amounts. A `None` amount emits a bare account line, which
+/// hledger balances against the rest — the same elision real transactions use.
+pub fn write_periodic_transaction_full(
+    period: &str,
+    description: &str,
+    postings: &[(String, Option<rust_decimal::Decimal>, String)],
+    config: &WriterConfig,
+) -> String {
     let mut out = String::new();
 
     out.push_str("~ ");
-    out.push_str(period);
+    out.push_str(period.trim());
+    let description = description.trim();
+    if !description.is_empty() {
+        // Two spaces: hledger reads the period expression up to the first
+        // double space, and a single space here is a parse error.
+        out.push_str("  ");
+        out.push_str(description);
+    }
     out.push('\n');
 
     for (account, quantity, commodity) in postings {
         push_indent(&mut out, config.indent);
         out.push_str(account);
+
+        let Some(quantity) = quantity else {
+            // Elided amount: nothing after the account name.
+            out.push('\n');
+            continue;
+        };
 
         let account_chars = account.chars().count();
         let padding = if account_chars < config.account_width {
@@ -817,5 +846,61 @@ mod tests {
         let text = "2024-01-15 Test\n    expenses:food  $50.00\n    assets:checking\n";
         let config = infer_config(text);
         assert_eq!(config.indent, 4);
+    }
+
+    #[test]
+    fn periodic_transaction_with_description_and_elided_amount() {
+        let config = WriterConfig { indent: 4, account_width: 20, ..Default::default() };
+        let out = write_periodic_transaction_full(
+            "monthly from 2026-01",
+            "Rent",
+            &[
+                ("expenses:rent".to_string(), Some(rust_decimal::Decimal::new(120000, 2)), "$".to_string()),
+                ("assets:checking".to_string(), None, String::new()),
+            ],
+            &config,
+        );
+        // Two spaces before the description: hledger reads the period
+        // expression up to the first double space, and one space is an error.
+        assert!(out.starts_with("~ monthly from 2026-01  Rent\n"), "got: {out:?}");
+        assert!(out.contains("expenses:rent"));
+        assert!(out.contains("$1200.00"));
+        // The elided posting is a bare account line.
+        assert!(out.trim_end().ends_with("assets:checking"), "got: {out:?}");
+    }
+
+    #[test]
+    fn periodic_transaction_without_description_has_no_trailing_spaces() {
+        let config = WriterConfig { indent: 4, account_width: 20, ..Default::default() };
+        let out = write_periodic_transaction_full(
+            "monthly",
+            "",
+            &[("expenses:food".to_string(), Some(rust_decimal::Decimal::new(5000, 2)), "$".to_string())],
+            &config,
+        );
+        assert!(out.starts_with("~ monthly\n"), "got: {out:?}");
+    }
+
+    #[test]
+    fn written_periodic_rule_parses_back_identically() {
+        let config = WriterConfig { indent: 4, account_width: 20, ..Default::default() };
+        let out = write_periodic_transaction_full(
+            "every 15th day of month from 2026-01",
+            "Card payment",
+            &[
+                ("liabilities:card".to_string(), Some(rust_decimal::Decimal::new(30000, 2)), "$".to_string()),
+                ("assets:checking".to_string(), None, String::new()),
+            ],
+            &config,
+        );
+        let journal = crate::parse(&out).expect("written rule must parse");
+        let rule = journal.items.iter().find_map(|i| match i {
+            crate::ast::JournalItem::PeriodicTransaction(pt) => Some(pt),
+            _ => None,
+        }).expect("a periodic transaction");
+        assert_eq!(rule.period, "every 15th day of month from 2026-01");
+        assert_eq!(rule.description, "Card payment");
+        assert_eq!(rule.postings.len(), 2);
+        assert!(rule.postings[1].amount.is_none());
     }
 }
