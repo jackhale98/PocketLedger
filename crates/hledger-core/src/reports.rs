@@ -33,6 +33,12 @@ pub struct RegisterRow {
     pub account: String,
     pub amount: Vec<AmountEntry>,
     pub running_total: Vec<AmountEntry>,
+    /// Index of the source transaction, for opening it in the editor. None
+    /// for rows that have no editable source: forecast projections and
+    /// auto-generated postings exist only in memory.
+    pub transaction_index: Option<usize>,
+    /// Forecast or auto-posting output rather than something in the file.
+    pub generated: bool,
 }
 
 /// A data point for time-series charts.
@@ -343,6 +349,8 @@ pub fn register_report(
                 account: posting.account.full.clone(),
                 amount: mixed_to_entries(&posting.amount),
                 running_total: mixed_to_entries(&running_total),
+                transaction_index: (!posting.generated).then_some(posting.transaction_index),
+                generated: posting.generated,
             });
         }
     }

@@ -1,94 +1,37 @@
 //! Forecast: materialize periodic transactions (`~ PERIODEXPR`) into future
-//! transactions, like hledger --forecast. Generated transactions start the
-//! day after the last real transaction and run to the requested horizon.
+//! transactions, like `hledger --forecast`.
+//!
+//! Window semantics match hledger: with no explicit period, forecasting runs
+//! from the day after the last ordinary transaction to six months out, and an
+//! unanchored rule like `~ monthly` inherits the window's start day (see
+//! [`crate::period`]).
+//!
+//! One deliberate deviation: hledger resolves forecast transactions inside the
+//! main journal, so a generated entry landing before a balance assertion can
+//! make that assertion fail. We resolve them separately, keeping a forecast a
+//! view over the books rather than a rewrite of them.
 
-use chrono::{Duration, Months, NaiveDate};
+use chrono::{Months, NaiveDate};
 
 use hledger_parser::ast::{Journal, JournalItem, SourceSpan, Status, Transaction};
 
 use crate::balance::{resolve_transactions, ResolvedTransaction};
-use crate::budget::{parse_period_expression, PeriodSpec, PeriodUnit};
+use crate::period::{forecast_occurrences, parse_period_expression};
 
-/// Default forecast horizon when no explicit end date is given (hledger
-/// defaults to six months from today; we anchor on the journal instead so
-/// results don't depend on the wall clock).
-pub fn default_horizon(last_real: NaiveDate) -> NaiveDate {
-    last_real
-        .checked_add_months(Months::new(6))
-        .unwrap_or(last_real)
-}
-
-fn align(date: NaiveDate, unit: PeriodUnit) -> NaiveDate {
-    use chrono::Datelike;
-    match unit {
-        PeriodUnit::Day => date,
-        PeriodUnit::Week => {
-            date - Duration::days(date.weekday().num_days_from_monday() as i64)
-        }
-        PeriodUnit::Month => NaiveDate::from_ymd_opt(date.year(), date.month(), 1).unwrap(),
-        PeriodUnit::Quarter => {
-            let q_month = ((date.month() - 1) / 3) * 3 + 1;
-            NaiveDate::from_ymd_opt(date.year(), q_month, 1).unwrap()
-        }
-        PeriodUnit::Year => NaiveDate::from_ymd_opt(date.year(), 1, 1).unwrap(),
-    }
-}
-
-fn step(date: NaiveDate, unit: PeriodUnit, every: u32) -> Option<NaiveDate> {
-    match unit {
-        PeriodUnit::Day => date.checked_add_signed(Duration::days(every as i64)),
-        PeriodUnit::Week => date.checked_add_signed(Duration::weeks(every as i64)),
-        PeriodUnit::Month => date.checked_add_months(Months::new(every)),
-        PeriodUnit::Quarter => date.checked_add_months(Months::new(3 * every)),
-        PeriodUnit::Year => date.checked_add_months(Months::new(12 * every)),
-    }
-}
-
-/// Occurrence dates of a period spec in (from, to] — forecast starts strictly
-/// after the last real transaction.
-fn occurrences(spec: &PeriodSpec, after: NaiveDate, to: NaiveDate) -> Vec<NaiveDate> {
-    let anchor = spec.start.unwrap_or_else(|| align(after, spec.unit));
-    let mut dates = Vec::new();
-    let mut current = anchor;
-    let mut guard = 0u32;
-
-    while current <= after {
-        match step(current, spec.unit, spec.every) {
-            Some(next) => current = next,
-            None => return dates,
-        }
-        guard += 1;
-        if guard > 100_000 {
-            return dates;
-        }
-    }
-
-    while current <= to {
-        if let Some(end) = spec.end {
-            if current >= end {
-                break;
-            }
-        }
-        dates.push(current);
-        match step(current, spec.unit, spec.every) {
-            Some(next) => current = next,
-            None => break,
-        }
-        guard += 1;
-        if guard > 100_000 {
-            break;
-        }
-    }
-
-    dates
+/// Default forecast horizon: six months past `from`. hledger measures this
+/// from today; we measure from the journal so results don't shift with the
+/// wall clock (callers pass today when they want hledger's exact behavior).
+pub fn default_horizon(from: NaiveDate) -> NaiveDate {
+    from.checked_add_months(Months::new(6)).unwrap_or(from)
 }
 
 /// Generate resolved forecast transactions from the journal's periodic rules,
-/// covering (after_date, horizon]. Every generated posting is flagged
-/// `generated` so the UI can distinguish projections from bookkept facts.
+/// covering the inclusive window `[window_start, horizon]`. Every generated
+/// posting is flagged `generated` so the UI can distinguish projections from
+/// bookkept facts.
 pub fn forecast_transactions(
     journal: &Journal,
-    after_date: NaiveDate,
+    window_start: NaiveDate,
     horizon: NaiveDate,
 ) -> Vec<ResolvedTransaction> {
     let mut generated_ast: Vec<JournalItem> = Vec::new();
@@ -102,7 +45,7 @@ pub fn forecast_transactions(
         };
         // Periodic transactions used purely as budget goals often have no
         // meaningful description; still forecast them like hledger does.
-        for date in occurrences(&spec, after_date, horizon) {
+        for date in forecast_occurrences(&spec, window_start, horizon) {
             generated_ast.push(JournalItem::Transaction(Transaction {
                 span: SourceSpan { start: 0, end: 0, line: pt.span.line },
                 date,
@@ -146,22 +89,31 @@ pub fn forecast_transactions(
     }
 }
 
+/// The window hledger forecasts over by default: from the day after the last
+/// ordinary transaction, to six months out. Returns None when there is
+/// nothing to forecast.
+pub fn default_window(
+    real: &[ResolvedTransaction],
+    horizon: Option<NaiveDate>,
+) -> Option<(NaiveDate, NaiveDate)> {
+    let last_real = real.iter().map(|t| t.date).max()?;
+    let start = last_real.succ_opt()?;
+    let horizon = horizon.unwrap_or_else(|| default_horizon(last_real));
+    (horizon >= start).then_some((start, horizon))
+}
+
 /// Real transactions plus forecast, sorted by date.
 pub fn with_forecast(
     journal: &Journal,
     real: &[ResolvedTransaction],
     horizon: Option<NaiveDate>,
 ) -> Vec<ResolvedTransaction> {
-    let Some(last_real) = real.last().map(|t| t.date) else {
+    let Some((start, horizon)) = default_window(real, horizon) else {
         return real.to_vec();
     };
-    let horizon = horizon.unwrap_or_else(|| default_horizon(last_real));
-    if horizon <= last_real {
-        return real.to_vec();
-    }
 
     let mut all = real.to_vec();
-    all.extend(forecast_transactions(journal, last_real, horizon));
+    all.extend(forecast_transactions(journal, start, horizon));
     all.sort_by_key(|t| t.date);
     all
 }
@@ -195,9 +147,15 @@ mod tests {
             .iter()
             .filter(|t| t.postings.iter().any(|p| p.generated))
             .collect();
-        // Feb 1, Mar 1, Apr 1.
-        assert_eq!(forecast.len(), 3);
-        assert_eq!(forecast[0].date, d(2024, 2, 1));
+        // Verified against hledger 1.50.3:
+        //   hledger print --forecast=2024-01-06..2024-05-01
+        //   -> Rent on 2024-01-06, 02-06, 03-06, 04-06
+        // The rule has no `from`, so it inherits the window's start day (the
+        // day after the last real transaction) rather than the calendar 1st.
+        assert_eq!(
+            forecast.iter().map(|t| t.date).collect::<Vec<_>>(),
+            vec![d(2024, 1, 6), d(2024, 2, 6), d(2024, 3, 6), d(2024, 4, 6)]
+        );
         assert_eq!(forecast[0].description, "Rent");
         assert_eq!(forecast[0].postings[0].amount.get("$"), dec!(1200));
         // Elided balancing posting inferred.
@@ -255,8 +213,9 @@ mod tests {
             .filter(|t| t.postings.iter().any(|p| p.generated))
             .map(|t| t.date)
             .collect();
-        // Anchored to the Monday-aligned grid; two occurrences in February.
-        assert_eq!(dates.len(), 2, "dates: {:?}", dates);
-        assert_eq!((dates[1] - dates[0]).num_days(), 14);
+        // Verified against hledger 1.50.3:
+        //   hledger print --forecast=2024-02-01..2024-03-01
+        //   -> Paycheck on 2024-02-01, 02-15, 02-29
+        assert_eq!(dates, vec![d(2024, 2, 1), d(2024, 2, 15), d(2024, 2, 29)]);
     }
 }

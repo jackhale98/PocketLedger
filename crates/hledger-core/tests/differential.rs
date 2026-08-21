@@ -413,3 +413,108 @@ fn rewritten_transactions_stay_hledger_valid() {
         let _ = std::fs::remove_file(&tmp);
     }
 }
+
+/// Forecast dates must match `hledger print --forecast=WINDOW` exactly.
+///
+/// This pins the anchoring rule that is easy to get wrong: a periodic rule
+/// with no `from` date inherits the forecast window's START DAY, so a window
+/// opening mid-month recurs mid-month rather than snapping to the 1st.
+#[test]
+fn forecast_dates_match_hledger() {
+    if !hledger_available() {
+        eprintln!("skipping: hledger not installed");
+        return;
+    }
+
+    let journal_text = "\
+~ monthly  Rent
+    expenses:rent  $1200.00
+    assets:checking
+
+~ every 2 weeks from 2024-01-05  Paycheck
+    assets:checking  $2000.00
+    income:salary
+
+~ every 15th day of month  Card payment
+    liabilities:card  $300.00
+    assets:checking
+
+~ every 31st day of month  Month end
+    expenses:fees  $5.00
+    assets:checking
+
+2024-01-05 Seed
+    assets:checking  $5000.00
+    equity:opening
+";
+
+    let dir = std::env::temp_dir().join(format!("hledger-forecast-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("forecast.journal");
+    std::fs::write(&path, journal_text).unwrap();
+
+    // Windows chosen to exercise both a period-aligned and a mid-period start.
+    for (start, end) in [
+        ("2024-01-06", "2024-05-01"),
+        ("2024-03-15", "2024-07-01"),
+        ("2024-02-01", "2024-03-01"),
+        // Spans February, pinning the short-month clamping rule.
+        ("2024-01-01", "2024-06-01"),
+    ] {
+        let output = Command::new("hledger")
+            .args([
+                "-f",
+                &path.to_string_lossy(),
+                "print",
+                &format!("--forecast={start}..{end}"),
+                "--verbose-tags",
+            ])
+            .output()
+            .expect("run hledger print --forecast");
+        assert!(
+            output.status.success(),
+            "hledger failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+
+        // Collect (date, description) for generated transactions only.
+        let mut expected: Vec<(chrono::NaiveDate, String)> = Vec::new();
+        let mut pending: Option<(chrono::NaiveDate, String)> = None;
+        for line in stdout.lines() {
+            if let Some(rest) = line.strip_prefix("20") {
+                let full = format!("20{rest}");
+                let (date_part, desc) = full.split_once(' ').unwrap_or((full.as_str(), ""));
+                if let Ok(date) = chrono::NaiveDate::parse_from_str(date_part, "%Y-%m-%d") {
+                    pending = Some((date, desc.trim().to_string()));
+                }
+            } else if line.contains("generated-transaction:") {
+                if let Some(entry) = pending.take() {
+                    expected.push(entry);
+                }
+            }
+        }
+        expected.sort();
+
+        let journal = hledger_parser::parse(journal_text).unwrap();
+        let window_start = chrono::NaiveDate::parse_from_str(start, "%Y-%m-%d").unwrap();
+        // hledger's window end is exclusive; ours is inclusive.
+        let window_end = chrono::NaiveDate::parse_from_str(end, "%Y-%m-%d")
+            .unwrap()
+            .pred_opt()
+            .unwrap();
+        let mut ours: Vec<(chrono::NaiveDate, String)> =
+            hledger_core::forecast::forecast_transactions(&journal, window_start, window_end)
+                .into_iter()
+                .map(|t| (t.date, t.description))
+                .collect();
+        ours.sort();
+
+        assert_eq!(
+            ours, expected,
+            "forecast mismatch for window {start}..{end}"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

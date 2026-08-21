@@ -6,7 +6,9 @@ import {
 } from "recharts";
 import * as api from "../api/commands";
 import { useSettingsStore } from "../store/settingsStore";
+import { useJournalStore } from "../store/journalStore";
 import { DateFilter } from "../components/common/DateFilter";
+import { TransactionEditorSheet } from "../components/transactions/TransactionEditorSheet";
 import type {
   TimeSeriesPoint, IncomeExpensePoint, PieSlice,
   FinancialStatement, BalanceRow, RegisterRow, ReportParams,
@@ -70,8 +72,9 @@ function StatementView({ statement, onBack }: { statement: FinancialStatement; o
   );
 }
 
-function RegisterView({ accountList, dateFrom, dateTo, currency }: { accountList: string[]; dateFrom: string; dateTo: string; currency: string }) {
+function RegisterView({ accountList, dateFrom, dateTo, currency, onChanged }: { accountList: string[]; dateFrom: string; dateTo: string; currency: string; onChanged: () => void }) {
   const [account, setAccount] = useState("");
+  const [editIndex, setEditIndex] = useState<number | null>(null);
   const [rows, setRows] = useState<RegisterRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -99,6 +102,17 @@ function RegisterView({ accountList, dateFrom, dateTo, currency }: { accountList
 
   const displayRows = newestFirst ? [...rows].reverse() : rows;
 
+  if (editIndex !== null) {
+    return (
+      <TransactionEditorSheet
+        index={editIndex}
+        defaultCurrency={currency}
+        onClose={() => setEditIndex(null)}
+        onChanged={() => { onChanged(); load(); }}
+      />
+    );
+  }
+
   return (
     <div className="space-y-3 min-w-0">
       <div className="flex gap-2 items-stretch">
@@ -120,18 +134,43 @@ function RegisterView({ accountList, dateFrom, dateTo, currency }: { accountList
       {!loading && !error && account && rows.length === 0 && <div className="text-sm text-gray-500 text-center py-4">No postings</div>}
       {displayRows.length > 0 && (
         <div className="divide-y divide-gray-100 dark:divide-gray-800 min-w-0">
-          {displayRows.map((row, i) => (
-            <div key={i} className="py-2.5 flex justify-between items-center gap-2 min-w-0">
-              <div className="min-w-0 flex-1">
-                <div className="text-sm text-gray-900 dark:text-gray-100 truncate" title={row.description}>{row.description}</div>
-                <div className="text-xs text-gray-500 dark:text-gray-400">{row.date}</div>
+          {displayRows.map((row, i) => {
+            const editable = row.transactionIndex !== null;
+            const body = (
+              <>
+                <div className="min-w-0 flex-1">
+                  <div className="text-sm text-gray-900 dark:text-gray-100 truncate flex items-center gap-1.5" title={row.description}>
+                    {row.generated && (
+                      <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-400">
+                        proj
+                      </span>
+                    )}
+                    <span className="truncate">{row.description}</span>
+                  </div>
+                  <div className="text-xs text-gray-500 dark:text-gray-400">{row.date}</div>
+                </div>
+                <div className="text-right ml-3 shrink-0">
+                  <div className={`text-sm font-mono ${parseFloat(row.amount[0]?.quantity ?? "0") < 0 ? "text-red-500" : "text-green-500"}`}>{fmtAmt(row.amount)}</div>
+                  <div className="text-xs text-gray-400 font-mono">{fmtAmt(row.runningTotal)}</div>
+                </div>
+              </>
+            );
+            // Projected rows have no journal entry behind them, so they stay
+            // inert rather than opening an editor that can't save.
+            return editable ? (
+              <button
+                key={i}
+                onClick={() => setEditIndex(row.transactionIndex)}
+                className="w-full py-2.5 flex justify-between items-center gap-2 min-w-0 text-left active:bg-gray-50 dark:active:bg-gray-800"
+              >
+                {body}
+              </button>
+            ) : (
+              <div key={i} className="py-2.5 flex justify-between items-center gap-2 min-w-0">
+                {body}
               </div>
-              <div className="text-right ml-3 shrink-0">
-                <div className={`text-sm font-mono ${parseFloat(row.amount[0]?.quantity ?? "0") < 0 ? "text-red-500" : "text-green-500"}`}>{fmtAmt(row.amount)}</div>
-                <div className="text-xs text-gray-400 font-mono">{fmtAmt(row.runningTotal)}</div>
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>
@@ -492,6 +531,7 @@ function BudgetView({ dateFrom, dateTo, currency }: { dateFrom: string; dateTo: 
 
 export function ReportsPage() {
   const { defaultCurrency } = useSettingsStore();
+  const refreshJournal = useJournalStore((s) => s.refresh);
   const [tab, setTab] = useState<ReportTab>("overview");
   const [drillView, setDrillView] = useState<DrillView>(null);
   const [statement, setStatement] = useState<FinancialStatement | null>(null);
@@ -669,7 +709,7 @@ export function ReportsPage() {
         ) : tab === "table" ? (
           <div className="p-4"><TableView dateFrom={dateFrom} dateTo={dateTo} /></div>
         ) : tab === "register" ? (
-          <div className="p-4"><RegisterView accountList={accountList} dateFrom={dateFrom} dateTo={dateTo} currency={defaultCurrency} /></div>
+          <div className="p-4"><RegisterView accountList={accountList} dateFrom={dateFrom} dateTo={dateTo} currency={defaultCurrency} onChanged={() => { refreshJournal(); loadDashboard(); }} /></div>
         ) : loading ? (
           <div className="flex items-center justify-center h-32 text-gray-500 text-sm">Loading...</div>
         ) : (

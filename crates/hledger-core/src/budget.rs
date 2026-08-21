@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use chrono::{Datelike, Duration, Months, NaiveDate};
+use chrono::{Datelike, NaiveDate};
 use rust_decimal::Decimal;
 use serde::Serialize;
 
@@ -11,30 +11,11 @@ use crate::reports::valued_quantity;
 
 use hledger_parser::ast::{Journal, JournalItem};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum PeriodUnit {
-    Day,
-    Week,
-    Month,
-    Quarter,
-    Year,
-}
-
-/// A parsed hledger period expression: `[every N] UNIT [from DATE] [to DATE]`.
-/// Unrecognized expressions are rejected with a warning — silently defaulting
-/// to monthly falsified budgets.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PeriodSpec {
-    pub unit: PeriodUnit,
-    pub every: u32,
-    pub start: Option<NaiveDate>,
-    /// Exclusive end bound (`to DATE` in hledger).
-    pub end: Option<NaiveDate>,
-    /// The original period expression text.
-    pub raw: String,
-}
+// Period expressions live in one place so budgets and forecasts can't drift
+// apart; re-exported because callers have long imported them from here.
+pub use crate::period::{
+    count_occurrences, parse_period_expression, PeriodSpec, PeriodUnit,
+};
 
 /// A budget definition extracted from a periodic transaction.
 #[derive(Debug, Clone, Serialize)]
@@ -130,211 +111,12 @@ pub fn extract_budgets_with_warnings(journal: &Journal) -> BudgetExtraction {
     BudgetExtraction { budgets, warnings }
 }
 
-/// Parse a period expression. Returns None (→ warning upstream) for syntax we
-/// can't faithfully honor.
-pub fn parse_period_expression(s: &str) -> Option<PeriodSpec> {
-    let raw = s.trim().to_string();
-    let lower = raw.to_lowercase();
-    let mut tokens = lower.split_whitespace().peekable();
 
-    let mut unit: Option<PeriodUnit> = None;
-    let mut every: u32 = 1;
-    let mut start: Option<NaiveDate> = None;
-    let mut end: Option<NaiveDate> = None;
 
-    while let Some(tok) = tokens.next() {
-        match tok {
-            "daily" => unit = Some(PeriodUnit::Day),
-            "weekly" => unit = Some(PeriodUnit::Week),
-            "monthly" => unit = Some(PeriodUnit::Month),
-            "quarterly" => unit = Some(PeriodUnit::Quarter),
-            "yearly" | "annually" => unit = Some(PeriodUnit::Year),
-            "every" => {
-                let next = tokens.next()?;
-                // "every 2 weeks" or "every week"
-                if let Ok(n) = next.parse::<u32>() {
-                    if n == 0 {
-                        return None;
-                    }
-                    every = n;
-                    let u = tokens.next()?;
-                    unit = Some(parse_unit_word(u)?);
-                } else {
-                    unit = Some(parse_unit_word(next)?);
-                }
-            }
-            "from" => {
-                let d = tokens.next()?;
-                start = Some(parse_smart_date(d, false)?);
-            }
-            "to" | "until" => {
-                let d = tokens.next()?;
-                end = Some(parse_smart_date(d, true)?);
-            }
-            "in" => {
-                // "in 2026-03": a single month range
-                let d = tokens.next()?;
-                start = Some(parse_smart_date(d, false)?);
-                end = Some(smart_date_range_end(d)?);
-            }
-            _ => {
-                // A bare date range "2026-01..2026-06" or unknown syntax.
-                if let Some((a, b)) = tok.split_once("..") {
-                    start = Some(parse_smart_date(a, false)?);
-                    end = Some(parse_smart_date(b, true)?);
-                } else {
-                    return None;
-                }
-            }
-        }
-    }
 
-    let unit = match unit {
-        Some(u) => u,
-        // Pure date range with no interval: treat as a single monthly-style
-        // occurrence at the range start; reject when there is no range at all.
-        None if start.is_some() => PeriodUnit::Month,
-        None => return None,
-    };
 
-    Some(PeriodSpec {
-        unit,
-        every,
-        start,
-        end,
-        raw,
-    })
-}
 
-fn parse_unit_word(w: &str) -> Option<PeriodUnit> {
-    match w.trim_end_matches(',') {
-        "day" | "days" => Some(PeriodUnit::Day),
-        "week" | "weeks" => Some(PeriodUnit::Week),
-        "month" | "months" => Some(PeriodUnit::Month),
-        "quarter" | "quarters" => Some(PeriodUnit::Quarter),
-        "year" | "years" => Some(PeriodUnit::Year),
-        _ => None,
-    }
-}
 
-/// Parse YYYY, YYYY-MM, or YYYY-MM-DD. When `as_end`, the date is the
-/// EXCLUSIVE end of the named period (hledger `to 2026-03` = up to Mar 1).
-fn parse_smart_date(s: &str, as_end: bool) -> Option<NaiveDate> {
-    let s = s.trim();
-    let parts: Vec<&str> = s.split(['-', '/', '.']).collect();
-    match parts.len() {
-        1 => {
-            let y: i32 = parts[0].parse().ok()?;
-            if !(1000..10000).contains(&y) {
-                return None;
-            }
-            NaiveDate::from_ymd_opt(y, 1, 1)
-        }
-        2 => {
-            let y: i32 = parts[0].parse().ok()?;
-            let m: u32 = parts[1].parse().ok()?;
-            NaiveDate::from_ymd_opt(y, m, 1)
-        }
-        3 => {
-            let y: i32 = parts[0].parse().ok()?;
-            let m: u32 = parts[1].parse().ok()?;
-            let d: u32 = parts[2].parse().ok()?;
-            NaiveDate::from_ymd_opt(y, m, d)
-        }
-        _ => None,
-    }
-    .map(|d| {
-        if as_end && parts.len() < 3 {
-            d // year/month end bounds are already exclusive starts
-        } else {
-            d
-        }
-    })
-}
-
-fn smart_date_range_end(s: &str) -> Option<NaiveDate> {
-    let start = parse_smart_date(s, false)?;
-    let parts = s.split(['-', '/', '.']).count();
-    match parts {
-        1 => start.checked_add_months(Months::new(12)),
-        2 => start.checked_add_months(Months::new(1)),
-        _ => start.checked_add_signed(Duration::days(1)),
-    }
-}
-
-/// Natural alignment of a unit: where unanchored occurrences start.
-fn align_to_unit(date: NaiveDate, unit: PeriodUnit) -> NaiveDate {
-    match unit {
-        PeriodUnit::Day => date,
-        PeriodUnit::Week => date - Duration::days(date.weekday().num_days_from_monday() as i64),
-        PeriodUnit::Month => NaiveDate::from_ymd_opt(date.year(), date.month(), 1).unwrap(),
-        PeriodUnit::Quarter => {
-            let q_month = ((date.month() - 1) / 3) * 3 + 1;
-            NaiveDate::from_ymd_opt(date.year(), q_month, 1).unwrap()
-        }
-        PeriodUnit::Year => NaiveDate::from_ymd_opt(date.year(), 1, 1).unwrap(),
-    }
-}
-
-fn step(date: NaiveDate, unit: PeriodUnit, every: u32) -> Option<NaiveDate> {
-    match unit {
-        PeriodUnit::Day => date.checked_add_signed(Duration::days(every as i64)),
-        PeriodUnit::Week => date.checked_add_signed(Duration::weeks(every as i64)),
-        PeriodUnit::Month => date.checked_add_months(Months::new(every)),
-        PeriodUnit::Quarter => date.checked_add_months(Months::new(3 * every)),
-        PeriodUnit::Year => date.checked_add_months(Months::new(12 * every)),
-    }
-}
-
-/// Count budget occurrences whose start date falls within [from, to],
-/// honoring the spec's own from/to bounds. This is hledger's --budget model:
-/// goals accrue per occurrence, not per calendar period touched — a
-/// Jan-15..Feb-5 range holds ONE monthly occurrence (Feb 1), not two.
-pub fn count_occurrences(spec: &PeriodSpec, from: NaiveDate, to: NaiveDate) -> u32 {
-    if to < from {
-        return 0;
-    }
-
-    // Anchor: the spec's start date if given, else natural alignment.
-    let anchor = spec.start.unwrap_or_else(|| align_to_unit(from, spec.unit));
-
-    let mut count = 0u32;
-    let mut current = anchor;
-
-    // Fast-forward close to the range (bounded loop for safety).
-    let mut guard = 0u32;
-    while current < from {
-        match step(current, spec.unit, spec.every) {
-            Some(next) => current = next,
-            None => return count,
-        }
-        guard += 1;
-        if guard > 100_000 {
-            return count;
-        }
-    }
-
-    while current <= to {
-        if let Some(end) = spec.end {
-            if current >= end {
-                break;
-            }
-        }
-        if current >= from && spec.start.map_or(true, |s| current >= s) {
-            count += 1;
-        }
-        match step(current, spec.unit, spec.every) {
-            Some(next) => current = next,
-            None => break,
-        }
-        guard += 1;
-        if guard > 100_000 {
-            break;
-        }
-    }
-
-    count
-}
 
 /// Generate a budget-vs-actual comparison report. Goals from multiple budgets
 /// for the same account+commodity are merged into one row (hledger behavior);

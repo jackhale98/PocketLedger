@@ -4,6 +4,7 @@ pub mod classify;
 pub mod csv_import;
 pub mod forecast;
 pub mod ledger;
+pub mod period;
 pub mod periodic_report;
 pub mod price_db;
 pub mod query;

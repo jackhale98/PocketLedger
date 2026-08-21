@@ -101,6 +101,11 @@ export interface RegisterRow {
   account: string;
   amount: AmountEntry[];
   runningTotal: AmountEntry[];
+  /** Source transaction index, for opening the editor. null when the row has
+   *  no editable source (forecast projections, auto-generated postings). */
+  transactionIndex: number | null;
+  /** Projected or auto-generated rather than present in the journal file. */
+  generated: boolean;
 }
 
 /** Time series data point */
