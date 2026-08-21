@@ -28,11 +28,14 @@ export function MobileJournalPicker({
   const [newName, setNewName] = useState("");
   const [busy, setBusy] = useState(false);
 
-  useEffect(() => {
+  const refreshList = () =>
     api
       .listStoredJournals()
       .then(setJournals)
       .catch(() => setJournals([]));
+
+  useEffect(() => {
+    refreshList();
   }, []);
 
   const openPath = async (path: string, name: string): Promise<boolean> => {
@@ -60,9 +63,13 @@ export function MobileJournalPicker({
       setBusy(true);
       const imported = await api.importJournalFile(selected as string);
       if (imported.renamed) {
+        // Don't silently switch to a file under a name they didn't choose;
+        // show it in the list and let them pick.
         setNotice(
-          `A different journal with that name already exists — imported as ${imported.fileName}.`
+          `A different journal named "${imported.fileName.replace(/-\d+(\.[^.]+)?$/, "$1")}" already exists, so this one was saved as ${imported.fileName}.`
         );
+        await refreshList();
+        return;
       }
       await openPath(imported.path, imported.fileName);
     } catch (err) {
@@ -82,6 +89,8 @@ export function MobileJournalPicker({
       await openPath(created.path, created.fileName);
     } catch (err) {
       setNotice(err instanceof Error ? err.message : String(err));
+      // The name may already be taken; show what's there.
+      await refreshList();
     } finally {
       setBusy(false);
     }
