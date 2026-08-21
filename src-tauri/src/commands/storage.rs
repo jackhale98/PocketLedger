@@ -26,21 +26,22 @@ use super::journal::{normalize_path, JournalSummary};
 /// Desktop: an app-data subfolder — unused by the UI (desktop opens files in
 /// place) but kept valid so the commands work everywhere.
 pub fn storage_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    let dir = if cfg!(target_os = "ios") {
-        app.path()
-            .document_dir()
-            .map_err(|e| format!("Cannot resolve documents directory: {e}"))?
-    } else if cfg!(target_os = "android") {
-        app.path()
-            .app_data_dir()
-            .map_err(|e| format!("Cannot resolve app data directory: {e}"))?
-            .join("journals")
-    } else {
-        app.path()
-            .app_data_dir()
-            .map_err(|e| format!("Cannot resolve app data directory: {e}"))?
-            .join("journals")
-    };
+    // iOS: $HOME/Documents inside the app container — the folder Files shows
+    // under "On My iPhone > PocketHLedger", so a git client can link to it.
+    if cfg!(target_os = "ios") {
+        if let Ok(dir) = app.path().document_dir() {
+            if fs::create_dir_all(&dir).is_ok() {
+                return Ok(dir);
+            }
+        }
+        // Falling back keeps the app usable even though the folder is then
+        // private to the app and not visible to Files or a git client.
+    }
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Cannot resolve app data directory: {e}"))?
+        .join("journals");
     fs::create_dir_all(&dir).map_err(|e| format!("Cannot create {}: {e}", dir.display()))?;
     Ok(dir)
 }
