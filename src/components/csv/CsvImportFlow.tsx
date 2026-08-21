@@ -17,15 +17,25 @@ export function CsvImportFlow({ onDone }: { onDone: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
-  const pickCsv = async () => {
-    const selected = await open({ multiple: false });
-    if (selected) setCsvPath(selected as string);
+  // iOS hands us a copy in a temp Inbox directory that the OS can purge at
+  // any moment, so stash the picked file at a stable path before using it.
+  const pickInto = async (setPath: (p: string) => void, label: string) => {
+    setError(null);
+    try {
+      const selected = await open({ multiple: false });
+      if (!selected) return;
+      setPath(await api.stashPickedFile(selected as string));
+    } catch (err) {
+      setError(
+        `Couldn't read the ${label} file: ` +
+          (err instanceof Error ? err.message : String(err))
+      );
+    }
   };
 
-  const pickRules = async () => {
-    const selected = await open({ multiple: false });
-    if (selected) setRulesPath(selected as string);
-  };
+  const pickCsv = () => pickInto(setCsvPath, "CSV");
+
+  const pickRules = () => pickInto(setRulesPath, "rules");
 
   const handlePreview = async () => {
     setError(null);
@@ -91,7 +101,11 @@ export function CsvImportFlow({ onDone }: { onDone: () => void }) {
     return isSymbol ? `${commodity}${qs}` : commodity ? `${qs} ${commodity}` : qs;
   };
 
-  const fileName = (path: string) => path.split("/").pop()?.split("\\").pop() ?? path;
+  // Stashed copies are prefixed with a numeric nonce; show the original name.
+  const fileName = (path: string) => {
+    const base = path.split("/").pop()?.split("\\").pop() ?? path;
+    return base.replace(/^\d{6,}-/, "");
+  };
 
   return (
     <div className="flex flex-col h-full">
@@ -138,7 +152,7 @@ export function CsvImportFlow({ onDone }: { onDone: () => void }) {
             </button>
 
             {error && (
-              <div className="text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/30 px-3 py-2 rounded-lg">
+              <div className="text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/30 px-3 py-2 rounded-lg break-words">
                 {error}
               </div>
             )}
@@ -173,7 +187,7 @@ export function CsvImportFlow({ onDone }: { onDone: () => void }) {
             )}
 
             {error && (
-              <div className="text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/30 px-3 py-2 rounded-lg">
+              <div className="text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/30 px-3 py-2 rounded-lg break-words">
                 {error}
               </div>
             )}

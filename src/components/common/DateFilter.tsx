@@ -99,8 +99,8 @@ export function DateFilter({ dateFrom, dateTo, onChange }: DateFilterProps) {
       {/* Custom date inputs */}
       {showCustom && (
         <>
-          <div className="flex gap-2 items-center">
-            <div className="flex-1">
+          <div className="flex gap-2 items-center min-w-0">
+            <div className="date-field min-w-0">
               <input
                 type="date"
                 value={customFrom}
@@ -112,8 +112,8 @@ export function DateFilter({ dateFrom, dateTo, onChange }: DateFilterProps) {
                 }`}
               />
             </div>
-            <span className="text-xs text-gray-400">to</span>
-            <div className="flex-1">
+            <span className="text-xs text-gray-400 shrink-0">to</span>
+            <div className="date-field min-w-0">
               <input
                 type="date"
                 value={customTo}

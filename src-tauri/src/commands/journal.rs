@@ -662,8 +662,13 @@ fn merge_with_original(
 #[tauri::command]
 pub async fn open_journal(
     path: String,
+    app: tauri::AppHandle,
     state: State<'_, Mutex<crate::AppState>>,
 ) -> Result<JournalSummary, String> {
+    // A path in the iOS picker's Inbox (or any temp dir) is a copy the OS
+    // deletes without warning — loading it directly means later writes fail
+    // with "can no longer be read". Relocate into app storage first.
+    let path = super::storage::relocate_if_transient(&path, &app)?;
     let loaded = load_journal(&path)?;
     let summary = make_summary(&loaded);
 
@@ -672,6 +677,22 @@ pub async fn open_journal(
     app_state.generation = app_state.generation.wrapping_add(1);
 
     Ok(summary)
+}
+
+/// Whether any source file differs from what was loaded. The frontend polls
+/// this when the app returns to the foreground: a git client syncing the
+/// journal folder (Working Copy pulling, say) changes files behind our back,
+/// and reloading blindly would invalidate in-progress flows for no reason.
+#[tauri::command]
+pub async fn journal_changed_on_disk(
+    state: State<'_, Mutex<crate::AppState>>,
+) -> Result<bool, String> {
+    let app_state = state.lock().map_err(|e| e.to_string())?;
+    let loaded = match app_state.journal.as_ref() {
+        Some(l) => l,
+        None => return Ok(false),
+    };
+    Ok(check_stale(loaded).is_err())
 }
 
 #[tauri::command]
@@ -870,8 +891,10 @@ pub async fn delete_transaction(
 #[tauri::command]
 pub async fn switch_journal(
     path: String,
+    app: tauri::AppHandle,
     state: State<'_, Mutex<crate::AppState>>,
 ) -> Result<JournalSummary, String> {
+    let path = super::storage::relocate_if_transient(&path, &app)?;
     let loaded = load_journal(&path)?;
     let summary = make_summary(&loaded);
 

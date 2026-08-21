@@ -30,6 +30,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::journal::open_journal,
             commands::journal::get_journal_info,
+            commands::journal::journal_changed_on_disk,
             commands::journal::save_journal,
             commands::journal::create_journal,
             commands::journal::add_transaction,
@@ -68,6 +69,12 @@ pub fn run() {
             commands::journal::switch_journal,
             commands::csv_import::preview_csv_import,
             commands::csv_import::import_csv,
+            commands::storage::platform_info,
+            commands::storage::resolve_journal_ref,
+            commands::storage::list_stored_journals,
+            commands::storage::import_journal_file,
+            commands::storage::create_stored_journal,
+            commands::storage::stash_picked_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

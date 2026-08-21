@@ -184,7 +184,7 @@ export function AccountsPage() {
             {selectedAccount}
           </h2>
         </div>
-        <div className="flex-1 overflow-auto">
+        <div className="flex-1 overflow-y-auto overflow-x-hidden">
           {error && (
             <div className="mx-4 mt-3 text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/30 px-3 py-2 rounded-lg">
               {error}
@@ -291,7 +291,7 @@ export function AccountsPage() {
       </div>
 
       {/* Account tree */}
-      <div className="flex-1 overflow-auto">
+      <div className="flex-1 overflow-y-auto overflow-x-hidden">
         {error && (
           <div className="mx-4 mt-3 flex items-center justify-between text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/30 px-3 py-2 rounded-lg">
             <span className="min-w-0 break-words">{error}</span>

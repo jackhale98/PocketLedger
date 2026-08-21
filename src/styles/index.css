@@ -50,3 +50,30 @@ body.dark {
     font-size: 16px !important;
   }
 }
+
+/* WebKit sizes date inputs and selects to their CONTENT and gives them an
+ * intrinsic min-width, so in a flex row (or with the 16px rule above) they
+ * refuse to shrink and overflow the screen. Force them to obey their box. */
+input[type="date"],
+input[type="datetime-local"],
+select {
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+input[type="date"],
+input[type="datetime-local"] {
+  -webkit-appearance: none;
+  appearance: none;
+  display: block;
+  /* Keep the picker's own text from being clipped mid-glyph when narrow */
+  text-align: left;
+}
+
+/* Flex/grid children default to min-width:auto, which lets the intrinsic
+ * width above win. Any wrapper holding one of these must be able to shrink. */
+.date-field {
+  min-width: 0;
+  flex: 1 1 0%;
+}

@@ -20,6 +20,10 @@ import type {
   BalanceInterval,
   BalanceAccumulationMode,
   PeriodicBalanceReport,
+  PlatformInfo,
+  StoredJournal,
+  ImportedJournal,
+  CreatedJournal,
 } from "./types";
 
 // ─── Journal ───
@@ -30,6 +34,12 @@ export async function openJournal(path: string): Promise<JournalSummary> {
 
 export async function getJournalInfo(): Promise<JournalSummary> {
   return invoke<JournalSummary>("get_journal_info");
+}
+
+/** True when a source file changed on disk since load (e.g. a git client
+ *  pulled into the journal folder). */
+export async function journalChangedOnDisk(): Promise<boolean> {
+  return invoke<boolean>("journal_changed_on_disk");
 }
 
 export async function saveJournal(): Promise<void> {
@@ -231,6 +241,46 @@ export async function listBudgetAccounts(): Promise<string[]> {
 
 export async function switchJournal(path: string): Promise<JournalSummary> {
   return invoke<JournalSummary>("switch_journal", { path });
+}
+
+// ─── Storage (mobile journal management) ───
+
+export async function platformInfo(): Promise<PlatformInfo> {
+  return invoke<PlatformInfo>("platform_info");
+}
+
+/** Resolve a persisted journal reference (relative on mobile) to an absolute
+ *  path against the CURRENT storage directory. */
+export async function resolveJournalRef(reference: string): Promise<string> {
+  return invoke<string>("resolve_journal_ref", { reference });
+}
+
+export async function listStoredJournals(): Promise<StoredJournal[]> {
+  return invoke<StoredJournal[]>("list_stored_journals");
+}
+
+/** Copy a picked file into app storage (out of the iOS picker Inbox, which
+ *  the OS deletes between launches). Never overwrites an existing journal. */
+export async function importJournalFile(
+  path: string
+): Promise<ImportedJournal> {
+  return invoke<ImportedJournal>("import_journal_file", { path });
+}
+
+export async function createStoredJournal(
+  name: string,
+  defaultCurrency?: string
+): Promise<CreatedJournal> {
+  return invoke<CreatedJournal>("create_stored_journal", {
+    name,
+    defaultCurrency: defaultCurrency ?? null,
+  });
+}
+
+/** Copy a just-picked file (CSV/rules) to a stable cache path that outlives
+ *  the iOS picker Inbox. */
+export async function stashPickedFile(path: string): Promise<string> {
+  return invoke<string>("stash_picked_file", { path });
 }
 
 // ─── CSV Import ───

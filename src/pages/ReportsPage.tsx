@@ -43,7 +43,7 @@ function StatementView({ statement, onBack }: { statement: FinancialStatement; o
         <button onClick={onBack} className="p-2 -ml-2 text-gray-600 dark:text-gray-300">&larr;</button>
         <h2 className="text-base font-semibold text-gray-900 dark:text-gray-100">{statement.title}</h2>
       </div>
-      <div className="flex-1 overflow-auto p-4 space-y-4">
+      <div className="flex-1 overflow-y-auto overflow-x-hidden p-4 space-y-4">
         {statement.sections.map((section, si) => (
           <div key={si}>
             <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 uppercase tracking-wide mb-2">{section.title}</h3>
@@ -100,16 +100,17 @@ function RegisterView({ accountList, dateFrom, dateTo, currency }: { accountList
   const displayRows = newestFirst ? [...rows].reverse() : rows;
 
   return (
-    <div className="space-y-3">
-      <div className="flex gap-2">
+    <div className="space-y-3 min-w-0">
+      <div className="flex gap-2 items-stretch">
         <select value={account} onChange={(e) => setAccount(e.target.value)}
-          className="flex-1 px-3 py-2 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg text-sm text-gray-900 dark:text-gray-100">
+          className="flex-1 min-w-0 truncate px-3 py-2 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg text-sm text-gray-900 dark:text-gray-100">
           <option value="">Select an account...</option>
           {accountList.map((n) => <option key={n} value={n}>{n}</option>)}
         </select>
         <button
           onClick={() => setNewestFirst(!newestFirst)}
-          className="px-3 py-2 bg-gray-100 dark:bg-gray-800 rounded-lg text-xs font-medium text-gray-600 dark:text-gray-400 shrink-0"
+          title={newestFirst ? "Newest first" : "Oldest first"}
+          className="px-3 py-2 bg-gray-100 dark:bg-gray-800 rounded-lg text-xs font-medium text-gray-600 dark:text-gray-400 shrink-0 whitespace-nowrap"
         >
           {newestFirst ? "New \u2193" : "Old \u2191"}
         </button>
@@ -118,9 +119,9 @@ function RegisterView({ accountList, dateFrom, dateTo, currency }: { accountList
       {loading && <div className="text-sm text-gray-500 text-center py-4">Loading...</div>}
       {!loading && !error && account && rows.length === 0 && <div className="text-sm text-gray-500 text-center py-4">No postings</div>}
       {displayRows.length > 0 && (
-        <div className="divide-y divide-gray-100 dark:divide-gray-800">
+        <div className="divide-y divide-gray-100 dark:divide-gray-800 min-w-0">
           {displayRows.map((row, i) => (
-            <div key={i} className="py-2.5 flex justify-between items-center">
+            <div key={i} className="py-2.5 flex justify-between items-center gap-2 min-w-0">
               <div className="min-w-0 flex-1">
                 <div className="text-sm text-gray-900 dark:text-gray-100 truncate" title={row.description}>{row.description}</div>
                 <div className="text-xs text-gray-500 dark:text-gray-400">{row.date}</div>
@@ -648,7 +649,7 @@ export function ReportsPage() {
         )}
       </div>
 
-      <div className="flex-1 overflow-auto">
+      <div className="flex-1 overflow-y-auto overflow-x-hidden">
         {pageError && (
           <div className="mx-4 mt-3 flex items-center justify-between text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/30 px-3 py-2 rounded-lg">
             <span className="min-w-0 break-words">{pageError}</span>

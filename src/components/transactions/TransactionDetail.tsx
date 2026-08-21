@@ -56,7 +56,7 @@ export function TransactionDetail({
       </div>
 
       {/* Content */}
-      <div className="flex-1 overflow-auto p-4 space-y-4">
+      <div className="flex-1 overflow-y-auto overflow-x-hidden p-4 space-y-4">
         {/* Metadata */}
         <div className="flex items-center gap-3">
           <StatusBadge status={transaction.status} />

@@ -5,36 +5,58 @@ import { TransactionsPage } from "./pages/TransactionsPage";
 import { AccountsPage } from "./pages/AccountsPage";
 import { ReportsPage } from "./pages/ReportsPage";
 import { MorePage } from "./pages/MorePage";
+import { MobileJournalPicker } from "./components/common/MobileJournalPicker";
 import { useJournalStore } from "./store/journalStore";
 import { useSettingsStore } from "./store/settingsStore";
+import { getPlatformInfo, resolveJournalRef } from "./utils/platform";
 import * as api from "./api/commands";
 
 function App() {
   const [activeTab, setActiveTab] = useState<TabId>("transactions");
-  const { isLoaded, isLoading, error, summary, openJournal, clearError } =
+  const { isLoaded, isLoading, error, summary, openJournal, reloadFromDisk, clearError } =
     useJournalStore();
   const { defaultCurrency, lastJournalPath, loaded: settingsLoaded, loadSettings, setLastJournalPath } = useSettingsStore();
+  const [isMobile, setIsMobile] = useState<boolean | null>(null);
 
   useEffect(() => {
     loadSettings();
+    getPlatformInfo().then((info) => setIsMobile(info.isMobile));
   }, [loadSettings]);
 
-  // Auto-open last journal on startup (attempt once — never retry-loop)
+  // Auto-open last journal on startup (attempt once — never retry-loop).
+  // The persisted ref is a bare file name on mobile; resolve it against the
+  // app's storage dir, which changes across iOS app updates.
   const autoOpenAttempted = useRef(false);
   const [autoOpenFailedPath, setAutoOpenFailedPath] = useState<string | null>(null);
   useEffect(() => {
-    if (settingsLoaded && !isLoaded && !isLoading && lastJournalPath && !autoOpenAttempted.current) {
+    if (settingsLoaded && isMobile !== null && !isLoaded && !isLoading && lastJournalPath && !autoOpenAttempted.current) {
       autoOpenAttempted.current = true;
-      const path = lastJournalPath;
-      openJournal(path).then((ok) => {
-        if (!ok) {
-          // File may have been moved/deleted - clear the saved path
-          setAutoOpenFailedPath(path);
-          setLastJournalPath("");
-        }
-      });
+      const ref = lastJournalPath;
+      resolveJournalRef(ref)
+        .then((path) => openJournal(path))
+        .then((ok) => {
+          if (!ok) {
+            // File may have been moved/deleted - clear the saved path
+            setAutoOpenFailedPath(ref);
+            setLastJournalPath("");
+          }
+        });
     }
-  }, [settingsLoaded, isLoaded, isLoading, lastJournalPath, openJournal, setLastJournalPath]);
+  }, [settingsLoaded, isMobile, isLoaded, isLoading, lastJournalPath, openJournal, setLastJournalPath]);
+
+  // Pick up outside changes when the app returns to the foreground: a git client
+  // (Working Copy linked to the journal folder) may have pulled new commits.
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === "visible") reloadFromDisk();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", onVisible);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", onVisible);
+    };
+  }, [reloadFromDisk]);
 
   const handleOpenJournal = async () => {
     try {
@@ -107,8 +129,14 @@ function App() {
         <p className="text-gray-600 dark:text-gray-400 text-center">
           Plain text accounting in your pocket
         </p>
-        {isLoading ? (
+        {isLoading || isMobile === null ? (
           <div className="text-sm text-gray-500">Loading...</div>
+        ) : isMobile ? (
+          <MobileJournalPicker
+            mode="open"
+            showCreate
+            onOpened={() => setAutoOpenFailedPath(null)}
+          />
         ) : (
           <div className="flex flex-col gap-3 w-full max-w-xs">
             <button
@@ -134,7 +162,7 @@ function App() {
         )}
         {error && (
           <div className="text-sm text-red-600 bg-red-50 dark:bg-red-900/30 px-4 py-2 rounded-lg max-w-xs text-center">
-            <p>{error}</p>
+            <p className="break-words">{error}</p>
             <button
               onClick={clearError}
               className="mt-2 text-xs text-red-500 underline"
@@ -167,11 +195,11 @@ function App() {
 
       {/* Error banner */}
       {error && (
-        <div className="bg-red-50 dark:bg-red-900/30 px-4 py-2 flex items-center justify-between">
-          <span className="text-sm text-red-600 dark:text-red-400">{error}</span>
+        <div className="bg-red-50 dark:bg-red-900/30 px-4 py-2 flex items-start justify-between gap-2">
+          <span className="text-sm text-red-600 dark:text-red-400 min-w-0 break-words">{error}</span>
           <button
             onClick={clearError}
-            className="text-xs text-red-500 ml-2"
+            className="text-xs text-red-500 ml-2 shrink-0"
           >
             Dismiss
           </button>

@@ -133,7 +133,7 @@ export function ReconciliationFlow({ onDone, onEditTransaction }: Reconciliation
             className="text-blue-600 text-sm font-semibold disabled:opacity-50">{loading ? "..." : "Start"}</button>
         </div>
 
-        <div className="flex-1 overflow-auto p-4 space-y-4">
+        <div className="flex-1 overflow-y-auto overflow-x-hidden p-4 space-y-4">
           {error && <div className="text-sm text-red-600 bg-red-50 dark:bg-red-900/30 px-3 py-2 rounded-lg">{error}</div>}
 
           <div>
@@ -220,7 +220,7 @@ export function ReconciliationFlow({ onDone, onEditTransaction }: Reconciliation
       {error && <div className="mx-4 mt-2 text-sm text-red-600 bg-red-50 dark:bg-red-900/30 px-3 py-2 rounded-lg">{error}</div>}
 
       {/* Posting checklist */}
-      <div className="flex-1 overflow-auto">
+      <div className="flex-1 overflow-y-auto overflow-x-hidden">
         <div className="divide-y divide-gray-100 dark:divide-gray-800">
           {filteredPostings.map((posting) => {
             const amount = parseFloat(posting.amount);

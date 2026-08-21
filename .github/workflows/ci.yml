@@ -49,5 +49,11 @@ jobs:
       - name: Rust tests (parser + core)
         run: cargo test -p hledger-parser -p hledger-core
 
+      # The app crate holds the data-safety tests (atomic writes, staleness
+      # checks, lossless merge, storage path sanitization). They need the
+      # Linux webkit deps above, so they only run here.
+      - name: Rust tests (app)
+        run: cargo test -p pockethledger
+
       - name: Check Tauri compilation
         run: cargo check -p pockethledger

@@ -257,7 +257,7 @@ export function TransactionForm({
         )}
 
         {/* Date */}
-        <div>
+        <div className="min-w-0">
           <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-1">
             Date
           </label>
@@ -265,7 +265,7 @@ export function TransactionForm({
             type="date"
             value={date}
             onChange={(e) => setDate(e.target.value)}
-            className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            className="w-full min-w-0 max-w-full box-border px-3 py-2 border border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
           />
         </div>
 
@@ -321,17 +321,9 @@ export function TransactionForm({
 
         {/* Postings */}
         <div>
-          <div className="flex items-center justify-between mb-2">
-            <label className="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide">
-              Postings
-            </label>
-            <button
-              onClick={addPosting}
-              className="text-xs text-blue-600 font-medium"
-            >
-              + Add Posting
-            </button>
-          </div>
+          <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-2">
+            Postings
+          </label>
 
           <div className="space-y-3">
             {postings.map((posting, index) => {
@@ -413,6 +405,13 @@ export function TransactionForm({
               );
             })}
           </div>
+
+          <button
+            onClick={addPosting}
+            className="mt-3 w-full py-2.5 border border-dashed border-gray-300 dark:border-gray-600 rounded-lg text-sm font-medium text-blue-600 dark:text-blue-400 active:bg-blue-50 dark:active:bg-gray-800 min-h-[44px]"
+          >
+            + Add Posting
+          </button>
         </div>
       </div>
     </div>

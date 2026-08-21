@@ -1,10 +1,12 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useSettingsStore, type Theme } from "../store/settingsStore";
 import { useJournalStore } from "../store/journalStore";
 import { ReconciliationFlow } from "../components/reconciliation/ReconciliationFlow";
 import { BudgetEditor } from "../components/budget/BudgetEditor";
 import { CsvImportFlow } from "../components/csv/CsvImportFlow";
+import { MobileJournalPicker } from "../components/common/MobileJournalPicker";
+import { getPlatformInfo } from "../utils/platform";
 
 const COMMON_CURRENCIES = [
   { symbol: "$", label: "Dollar ($)" },
@@ -26,13 +28,23 @@ const THEME_OPTIONS: { value: Theme; label: string }[] = [
 ];
 
 export function MorePage() {
-  const { defaultCurrency, setDefaultCurrency, theme, setTheme, setLastJournalPath, lastJournalPath } = useSettingsStore();
-  const { refresh, summary, switchJournal, openJournal } = useJournalStore();
+  const { defaultCurrency, setDefaultCurrency, theme, setTheme, setLastJournalPath } = useSettingsStore();
+  const { refresh, summary, switchJournal, openJournal, currentPath } = useJournalStore();
   const [customCurrency, setCustomCurrency] = useState("");
   const [showCustom, setShowCustom] = useState(false);
   const [showReconciliation, setShowReconciliation] = useState(false);
   const [showBudgetEditor, setShowBudgetEditor] = useState(false);
   const [showCsvImport, setShowCsvImport] = useState(false);
+  const [showJournalPicker, setShowJournalPicker] = useState(false);
+  const [isMobile, setIsMobile] = useState(false);
+  const [storageDir, setStorageDir] = useState("");
+
+  useEffect(() => {
+    getPlatformInfo().then((info) => {
+      setIsMobile(info.isMobile);
+      setStorageDir(info.storageDir);
+    });
+  }, []);
 
   const handleCustomSubmit = async () => {
     const val = customCurrency.trim();
@@ -44,6 +56,12 @@ export function MorePage() {
   };
 
   const handleSwitchJournal = async () => {
+    // Mobile: journals must live in app storage (the iOS picker only hands us
+    // a temp copy), so switching goes through the storage-aware picker.
+    if (isMobile) {
+      setShowJournalPicker(true);
+      return;
+    }
     try {
       const selected = await open({
         multiple: false,
@@ -62,13 +80,42 @@ export function MorePage() {
 
   const handleReloadJournal = async () => {
     // Re-open from disk (refresh() only re-reads in-memory backend state).
-    // Failures set the journal store's error, shown in the app error banner.
-    if (lastJournalPath) {
-      await openJournal(lastJournalPath);
+    // Uses the live path, not the persisted ref, which is a bare name on
+    // mobile. Failures set the journal store's error, shown in the banner.
+    if (currentPath) {
+      await openJournal(currentPath);
     } else {
       await refresh();
     }
   };
+
+  if (showJournalPicker) {
+    return (
+      <div className="flex flex-col h-full">
+        <div className="flex items-center gap-2 px-4 py-3 border-b border-gray-200 dark:border-gray-700">
+          <button
+            onClick={() => setShowJournalPicker(false)}
+            className="p-2 -ml-2 text-gray-600 dark:text-gray-300"
+          >
+            &larr;
+          </button>
+          <h2 className="text-base font-semibold text-gray-900 dark:text-gray-100">
+            Journals
+          </h2>
+        </div>
+        <div className="flex-1 overflow-y-auto overflow-x-hidden p-4 flex justify-center">
+          <MobileJournalPicker
+            mode="switch"
+            showCreate
+            onOpened={() => {
+              setShowJournalPicker(false);
+              refresh();
+            }}
+          />
+        </div>
+      </div>
+    );
+  }
 
   if (showReconciliation) {
     return (
@@ -109,7 +156,7 @@ export function MorePage() {
         <h1 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Settings</h1>
       </div>
 
-      <div className="flex-1 overflow-auto">
+      <div className="flex-1 overflow-y-auto overflow-x-hidden">
         {/* Actions */}
         <div className="px-4 py-4 space-y-2">
           <h2 className="text-sm font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wide mb-3">
@@ -267,14 +314,43 @@ export function MorePage() {
             Current File
           </h2>
           <div className="text-sm text-gray-600 dark:text-gray-400 space-y-1">
-            <p className="font-mono text-xs">{summary?.fileName ?? "No file loaded"}</p>
+            <p className="font-mono text-xs break-all">{summary?.fileName ?? "No file loaded"}</p>
             {summary && (
               <p className="text-xs text-gray-500 dark:text-gray-400">
                 {summary.transactionCount} transactions, {summary.accountCount} accounts
               </p>
             )}
+            {isMobile && storageDir && (
+              <p className="text-xs text-gray-500 dark:text-gray-400 pt-1">
+                Journals are stored in this app and visible in the Files app
+                under On My iPhone &rsaquo; PocketHLedger.
+              </p>
+            )}
           </div>
         </div>
+
+        {isMobile && (
+          <>
+            <div className="h-2 bg-gray-100 dark:bg-gray-800" />
+            <div className="px-4 py-4">
+              <h2 className="text-sm font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wide mb-3">
+                Version Control
+              </h2>
+              <div className="text-xs text-gray-600 dark:text-gray-400 space-y-2">
+                <p>
+                  Your journals live in this app&rsquo;s folder, which a git
+                  client can track in place. In Working Copy, open a repository,
+                  choose <span className="font-medium">Link Repository to Folder</span>,
+                  and pick On My iPhone &rsaquo; PocketHLedger.
+                </p>
+                <p>
+                  Commit and push from Working Copy. After you pull, return to
+                  this app and it reloads the journal automatically.
+                </p>
+              </div>
+            </div>
+          </>
+        )}
 
         <div className="h-2 bg-gray-100 dark:bg-gray-800" />
 
@@ -284,7 +360,7 @@ export function MorePage() {
             About
           </h2>
           <div className="text-sm text-gray-600 dark:text-gray-400 space-y-1">
-            <p>PocketHLedger v0.1.0</p>
+            <p>PocketHLedger v0.2.0</p>
             <p className="text-xs text-gray-400 dark:text-gray-500">
               Plain text accounting in your pocket
             </p>

@@ -173,6 +173,38 @@ export interface BudgetInfo {
   entries: BudgetEntry[];
 }
 
+/** Platform + storage info (mobile journals live in the app's documents dir) */
+export interface PlatformInfo {
+  isMobile: boolean;
+  storageDir: string;
+}
+
+/** A journal file in the app's storage directory */
+export interface StoredJournal {
+  name: string;
+  path: string;
+  /** Unix seconds; 0 if unknown */
+  modified: number;
+  size: number;
+}
+
+/** Result of importing an external journal into app storage */
+export interface ImportedJournal {
+  path: string;
+  fileName: string;
+  /** Identical copy already stored; reused as-is */
+  reused: boolean;
+  /** Name conflict with different content; imported under a numbered name */
+  renamed: boolean;
+}
+
+/** Result of creating a journal in app storage */
+export interface CreatedJournal {
+  path: string;
+  fileName: string;
+  summary: JournalSummary;
+}
+
 /** CSV import preview transaction */
 export interface CsvPreviewTransaction {
   date: string;
