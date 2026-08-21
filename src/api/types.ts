@@ -316,4 +316,9 @@ export interface ForecastProjection {
   horizon: string | null;
   commodity: string;
   noRules: boolean;
+  /** Rules that generated nothing, with the reason. */
+  ruleErrors: string[];
+  /** Days between the last recorded transaction and today; large values mean
+   *  the projection starts from a balance that hasn't been updated lately. */
+  daysSinceLastActual: number | null;
 }

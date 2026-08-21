@@ -603,3 +603,97 @@ fn written_periodic_rules_stay_hledger_valid() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The Forecast tab's projection window must equal `hledger --forecast -b
+/// TODAY`, for both an up-to-date journal and a stale one.
+///
+/// hledger uses `forecastStart = max(journalEnd + 1, reportStart)`. The stale
+/// case is the one that matters in practice: a journal last touched years ago
+/// must project from today, not replay every month since.
+#[test]
+fn projection_matches_hledger_from_today() {
+    if !hledger_available() {
+        eprintln!("skipping: hledger not installed");
+        return;
+    }
+
+    let today = chrono::NaiveDate::from_ymd_opt(2026, 8, 21).unwrap();
+    let horizon = chrono::NaiveDate::from_ymd_opt(2026, 12, 31).unwrap();
+
+    let cases = [
+        // Stale: last transaction years before today.
+        "~ monthly from 2024-01-01  Rent\n    expenses:rent  $1800.00\n    assets:checking\n\n\
+         ~ monthly from 2024-01-01  Dining out\n    expenses:dining  $400.00\n    assets:checking\n\n\
+         2023-12-21 Groceries\n    expenses:food  $120.00\n    assets:checking\n",
+        // Up to date: last transaction is today.
+        "~ monthly  Rent\n    expenses:rent  $100.00\n    assets:checking\n\n\
+         2026-08-21 Today\n    assets:checking  $500.00\n    equity:opening\n",
+        // Running into the future: forecast must start after the last entry.
+        "~ monthly  Rent\n    expenses:rent  $100.00\n    assets:checking\n\n\
+         2027-01-01 Future\n    assets:checking  $500.00\n    equity:opening\n",
+    ];
+
+    let dir = std::env::temp_dir().join(format!("hledger-projwin-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    for (i, text) in cases.iter().enumerate() {
+        let path = dir.join(format!("proj-{i}.journal"));
+        std::fs::write(&path, text).unwrap();
+
+        let output = Command::new("hledger")
+            .args([
+                "-f",
+                &path.to_string_lossy(),
+                "print",
+                "--forecast",
+                "--verbose-tags",
+                "-b",
+                &today.to_string(),
+                "-e",
+                &horizon.succ_opt().unwrap().to_string(),
+                "--today",
+                &today.to_string(),
+            ])
+            .output()
+            .expect("run hledger print --forecast -b today");
+        assert!(
+            output.status.success(),
+            "hledger failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+
+        let mut expected: Vec<chrono::NaiveDate> = Vec::new();
+        let mut pending: Option<chrono::NaiveDate> = None;
+        for line in stdout.lines() {
+            if let Some(rest) = line.strip_prefix("20") {
+                let full = format!("20{rest}");
+                let date_part = full.split_once(' ').map(|(d, _)| d).unwrap_or(&full);
+                pending = chrono::NaiveDate::parse_from_str(date_part, "%Y-%m-%d").ok();
+            } else if line.contains("generated-transaction:") {
+                if let Some(d) = pending.take() {
+                    expected.push(d);
+                }
+            }
+        }
+        expected.sort();
+
+        let journal = hledger_parser::parse(text).unwrap();
+        let real = hledger_core::balance::resolve_transactions(&journal).unwrap();
+        let mut ours: Vec<chrono::NaiveDate> =
+            match hledger_core::forecast::projection_window(&real, today, Some(horizon)) {
+                Some((start, end)) => {
+                    hledger_core::forecast::forecast_transactions(&journal, start, end)
+                        .into_iter()
+                        .map(|t| t.date)
+                        .collect()
+                }
+                None => vec![],
+            };
+        ours.sort();
+
+        assert_eq!(ours, expected, "projection window mismatch for case {i}:\n{text}");
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -633,7 +633,8 @@ function ForecastView({ accountList, dateFrom, dateTo, currency }: { accountList
     );
   }
 
-  const { points, shortfall, lastActual, commodity } = projection;
+  const { points, shortfall, lastActual, commodity, daysSinceLastActual, ruleErrors } = projection;
+  const stale = (daysSinceLastActual ?? 0) > 45;
   const cutoff = lastActual ? lastActual.slice(0, 7) : null;
   // The last actual point is repeated on the projected series so the two
   // lines meet instead of leaving a gap at the cutoff.
@@ -652,6 +653,24 @@ function ForecastView({ accountList, dateFrom, dateTo, currency }: { accountList
   return (
     <div className="space-y-4 min-w-0">
       {controls}
+
+      {ruleErrors.length > 0 && (
+        <div className="rounded-lg px-3 py-2 bg-amber-50 dark:bg-amber-900/20 space-y-1">
+          <div className="text-xs font-medium text-amber-700 dark:text-amber-400">
+            Some recurring rules generated nothing:
+          </div>
+          {ruleErrors.map((e, i) => (
+            <div key={i} className="text-xs text-amber-700 dark:text-amber-400 break-words">{e}</div>
+          ))}
+        </div>
+      )}
+
+      {stale && (
+        <div className="rounded-lg px-3 py-2 bg-amber-50 dark:bg-amber-900/20 text-xs text-amber-700 dark:text-amber-400 break-words">
+          Your last recorded transaction was {lastActual}. The projection starts
+          from today using that balance, so it assumes nothing has happened since.
+        </div>
+      )}
 
       {shortfall && (
         <div className="rounded-lg p-3 bg-red-50 dark:bg-red-900/30 border border-red-300 dark:border-red-700 space-y-1">

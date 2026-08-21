@@ -25,6 +25,13 @@ pub fn default_horizon(from: NaiveDate) -> NaiveDate {
     from.checked_add_months(Months::new(6)).unwrap_or(from)
 }
 
+/// Forecast output plus anything that stopped a rule from contributing.
+pub struct ForecastOutcome {
+    pub transactions: Vec<ResolvedTransaction>,
+    /// (source line, reason) for each rule that generated nothing.
+    pub errors: Vec<(usize, String)>,
+}
+
 /// Generate resolved forecast transactions from the journal's periodic rules,
 /// covering the inclusive window `[window_start, horizon]`. Every generated
 /// posting is flagged `generated` so the UI can distinguish projections from
@@ -34,64 +41,94 @@ pub fn forecast_transactions(
     window_start: NaiveDate,
     horizon: NaiveDate,
 ) -> Vec<ResolvedTransaction> {
-    let mut generated_ast: Vec<JournalItem> = Vec::new();
+    forecast_checked(journal, window_start, horizon).transactions
+}
+
+/// As [`forecast_transactions`], but reporting why any rule contributed
+/// nothing.
+///
+/// Each rule is resolved on its own. Resolving them together meant a single
+/// unbalanced rule failed the whole batch, so one bad rule silently emptied
+/// the entire forecast. hledger hard-errors on such a rule under `--forecast`;
+/// an editor can't refuse to open the file, so it forecasts what it can and
+/// reports the rest.
+pub fn forecast_checked(
+    journal: &Journal,
+    window_start: NaiveDate,
+    horizon: NaiveDate,
+) -> ForecastOutcome {
+    let mut transactions = Vec::new();
+    let mut errors = Vec::new();
 
     for item in &journal.items {
         let JournalItem::PeriodicTransaction(pt) = item else {
             continue;
         };
         let Some(spec) = parse_period_expression(&pt.period) else {
-            continue; // already warned at budget extraction
+            errors.push((
+                pt.span.line,
+                format!("Unsupported period expression '{}'.", pt.period),
+            ));
+            continue;
         };
+
+        let dates = forecast_occurrences(&spec, window_start, horizon);
+        if dates.is_empty() {
+            continue;
+        }
+
         // Periodic transactions used purely as budget goals often have no
         // meaningful description; still forecast them like hledger does.
-        for date in forecast_occurrences(&spec, window_start, horizon) {
-            generated_ast.push(JournalItem::Transaction(Transaction {
-                span: SourceSpan { start: 0, end: 0, line: pt.span.line },
-                date,
-                secondary_date: None,
-                status: Status::Unmarked,
-                code: None,
-                description: if pt.description.is_empty() {
-                    "Forecast".to_string()
-                } else {
-                    pt.description.clone()
-                },
-                comment: None,
-                tags: vec![],
-                postings: pt.postings.clone(),
-            }));
-        }
-    }
+        let generated: Vec<JournalItem> = dates
+            .into_iter()
+            .map(|date| {
+                JournalItem::Transaction(Transaction {
+                    span: SourceSpan { start: 0, end: 0, line: pt.span.line },
+                    date,
+                    secondary_date: None,
+                    status: Status::Unmarked,
+                    code: None,
+                    description: if pt.description.is_empty() {
+                        "Forecast".to_string()
+                    } else {
+                        pt.description.clone()
+                    },
+                    comment: None,
+                    tags: vec![],
+                    postings: pt.postings.clone(),
+                })
+            })
+            .collect();
 
-    if generated_ast.is_empty() {
-        return vec![];
-    }
+        let temp = Journal {
+            items: generated,
+            source_path: None,
+            warnings: vec![],
+        };
 
-    let temp = Journal {
-        items: generated_ast,
-        source_path: None,
-        warnings: vec![],
-    };
-
-    match resolve_transactions(&temp) {
-        Ok(mut txns) => {
-            for txn in &mut txns {
-                for posting in &mut txn.postings {
-                    posting.generated = true;
+        match resolve_transactions(&temp) {
+            Ok(mut txns) => {
+                for txn in &mut txns {
+                    for posting in &mut txn.postings {
+                        posting.generated = true;
+                    }
                 }
+                transactions.append(&mut txns);
             }
-            txns
+            Err(e) => errors.push((
+                pt.span.line,
+                format!("This rule doesn't balance, so it generates nothing ({e})."),
+            )),
         }
-        // A periodic rule that doesn't balance can't be forecast; budgets
-        // already surface this as a warning.
-        Err(_) => vec![],
     }
+
+    transactions.sort_by_key(|t| t.date);
+    ForecastOutcome { transactions, errors }
 }
 
-/// The window hledger forecasts over by default: from the day after the last
-/// ordinary transaction, to six months out. Returns None when there is
-/// nothing to forecast.
+/// The window `hledger --forecast` covers with no report start: from the day
+/// after the last ordinary transaction to six months out. Returns None when
+/// there is nothing to forecast.
 pub fn default_window(
     real: &[ResolvedTransaction],
     horizon: Option<NaiveDate>,
@@ -100,6 +137,48 @@ pub fn default_window(
     let start = last_real.succ_opt()?;
     let horizon = horizon.unwrap_or_else(|| default_horizon(last_real));
     (horizon >= start).then_some((start, horizon))
+}
+
+/// The window a user-facing projection covers, equivalent to
+/// `hledger --forecast -b <today>`.
+///
+/// hledger computes `forecastStart = max(journalEnd + 1, reportStart)`, so
+/// asking it to report from today gives exactly this: the day after the last
+/// transaction for a journal that is up to date, and today for one that is
+/// stale. [`default_window`] is the same rule with no report start, which is
+/// what a bare `--forecast` does; that replays every month since the journal
+/// was last touched, which is right for the CLI flag but useless as a "what
+/// happens from here" projection.
+///
+/// Verified against hledger 1.50.3 — see the `projection_matches_hledger_from_today`
+/// differential test.
+pub fn projection_window(
+    real: &[ResolvedTransaction],
+    today: NaiveDate,
+    horizon: Option<NaiveDate>,
+) -> Option<(NaiveDate, NaiveDate)> {
+    let start = match real.iter().map(|t| t.date).max() {
+        Some(last) => last.succ_opt()?.max(today),
+        None => today,
+    };
+    let horizon = horizon.unwrap_or_else(|| default_horizon(today));
+    (horizon >= start).then_some((start, horizon))
+}
+
+/// Real transactions plus a projection running from `today` to the horizon.
+pub fn with_projection(
+    journal: &Journal,
+    real: &[ResolvedTransaction],
+    today: NaiveDate,
+    horizon: Option<NaiveDate>,
+) -> Vec<ResolvedTransaction> {
+    let Some((start, horizon)) = projection_window(real, today, horizon) else {
+        return real.to_vec();
+    };
+    let mut all = real.to_vec();
+    all.extend(forecast_transactions(journal, start, horizon));
+    all.sort_by_key(|t| t.date);
+    all
 }
 
 /// Real transactions plus forecast, sorted by date.
@@ -445,6 +524,7 @@ mod tests {
 #[cfg(test)]
 mod projection_tests {
     use super::*;
+    use crate::forecast;
     use crate::price_db::PriceDb;
     use hledger_parser::parse;
     use rust_decimal_macros::dec;
@@ -528,6 +608,71 @@ mod projection_tests {
             None
         )
         .is_none());
+    }
+
+    #[test]
+    fn projection_starts_from_today_not_the_end_of_a_stale_journal() {
+        let journal = parse(JOURNAL).unwrap();
+        let real = resolve_transactions(&journal).unwrap();
+        // Journal ends 2024-02-01 (last generated rent is not real); today is
+        // far later. Replaying from the journal end would invent years of rent.
+        let today = d(2026, 8, 21);
+        let horizon = d(2027, 8, 21);
+        let (start, end) = forecast::projection_window(&real, today, Some(horizon)).unwrap();
+        assert_eq!(start, today);
+        assert_eq!(end, horizon);
+
+        let all = with_projection(&journal, &real, today, Some(horizon));
+        let first_projected = all
+            .iter()
+            .filter(|t| t.postings.iter().any(|p| p.generated))
+            .map(|t| t.date)
+            .min()
+            .unwrap();
+        assert!(first_projected >= today, "projected into the past: {first_projected}");
+    }
+
+    #[test]
+    fn projection_still_starts_after_a_journal_that_runs_into_the_future() {
+        let journal = parse(
+            "2027-01-01 Future\n    assets:checking  $10.00\n    equity:opening\n",
+        )
+        .unwrap();
+        let real = resolve_transactions(&journal).unwrap();
+        let today = d(2026, 8, 21);
+        let (start, _) = forecast::projection_window(&real, today, Some(d(2028, 1, 1))).unwrap();
+        assert_eq!(start, d(2027, 1, 2));
+    }
+
+    #[test]
+    fn one_unbalanced_rule_does_not_silence_the_others() {
+        // hledger hard-errors on an unbalanced rule under --forecast. We can't
+        // refuse to open the file, so the good rule must still forecast and the
+        // bad one must be reported rather than silently dropping everything.
+        let journal = parse(
+            concat!(
+                "~ monthly from 2024-02-01  Good\n",
+                "    expenses:rent  $100.00\n",
+                "    assets:cash\n\n",
+                "~ monthly from 2024-02-01  Bad\n",
+                "    expenses:a  $10.00\n",
+                "    expenses:b  $20.00\n\n",
+                "2024-01-05 Seed\n",
+                "    assets:cash  $500.00\n",
+                "    equity:opening\n",
+            ),
+        )
+        .unwrap();
+
+        let outcome = forecast::forecast_checked(&journal, d(2024, 2, 1), d(2024, 4, 30));
+        assert_eq!(outcome.transactions.len(), 3, "the good rule must still run");
+        assert!(outcome.transactions.iter().all(|t| t.description == "Good"));
+        assert_eq!(outcome.errors.len(), 1);
+        assert!(
+            outcome.errors[0].1.contains("balance"),
+            "unhelpful error: {}",
+            outcome.errors[0].1
+        );
     }
 
     #[test]

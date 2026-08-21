@@ -169,6 +169,14 @@ pub struct ForecastProjection {
     pub commodity: String,
     /// True when the journal has no periodic rules to project from.
     pub no_rules: bool,
+    /// Rules that generated nothing, with the reason. hledger refuses to load
+    /// a journal with an unbalanced rule under --forecast; we forecast what we
+    /// can and report the rest.
+    pub rule_errors: Vec<String>,
+    /// Days between the last recorded transaction and today. A large value
+    /// means the projection starts from a balance that hasn't been updated
+    /// in a while, which the UI should say out loud.
+    pub days_since_last_actual: Option<i64>,
 }
 
 /// Project cash flow for `account` (default: all asset accounts) forward to
@@ -194,8 +202,25 @@ pub async fn forecast_projection(
 
     let real: Vec<_> = loaded.ledger.transactions().cloned().collect();
     let last_actual = real.iter().map(|t| t.date).max();
+    let today = chrono::Local::now().date_naive();
     let horizon_date = parse_date(&horizon);
-    let all = forecast::with_forecast(&loaded.journal, &real, horizon_date);
+    // Project forward from today, not from the end of the journal — see
+    // forecast::projection_window.
+    let (all, rule_errors) = match forecast::projection_window(&real, today, horizon_date) {
+        Some((start, end)) => {
+            let outcome = forecast::forecast_checked(&loaded.journal, start, end);
+            let errors = outcome
+                .errors
+                .iter()
+                .map(|(line, msg)| format!("line {line}: {msg}"))
+                .collect();
+            let mut all = real.clone();
+            all.extend(outcome.transactions);
+            all.sort_by_key(|t| t.date);
+            (all, errors)
+        }
+        None => (real.clone(), Vec::new()),
+    };
 
     let no_rules = !loaded
         .journal
@@ -203,13 +228,22 @@ pub async fn forecast_projection(
         .iter()
         .any(|i| matches!(i, JournalItem::PeriodicTransaction(_)));
 
+    // Without a window the chart would span the entire journal, squeezing the
+    // part the user cares about into the last few pixels. Default to a few
+    // months of recent actuals for context; an explicit filter still wins.
+    // Anchored on today rather than the last transaction: for a stale journal
+    // the months before the projection hold nothing, so the chart starts at
+    // the projection instead of implying old activity is recent.
+    let chart_from = parse_date(&params.date_from)
+        .or_else(|| today.checked_sub_months(chrono::Months::new(CONTEXT_MONTHS)));
+
     let points = forecast::cash_flow_projection(
         &all,
         last_actual,
         &selector,
         &commodity,
         loaded.ledger.price_db(),
-        parse_date(&params.date_from),
+        chart_from,
         parse_date(&params.date_to),
     );
 
@@ -224,7 +258,8 @@ pub async fn forecast_projection(
         last_actual,
     );
 
-    let effective_horizon = forecast::default_window(&real, horizon_date).map(|(_, end)| end);
+    let effective_horizon =
+        forecast::projection_window(&real, today, horizon_date).map(|(_, end)| end);
 
     Ok(ForecastProjection {
         points,
@@ -233,8 +268,13 @@ pub async fn forecast_projection(
         horizon: effective_horizon.map(|d| d.format("%Y-%m-%d").to_string()),
         commodity,
         no_rules,
+        rule_errors,
+        days_since_last_actual: last_actual.map(|d| (today - d).num_days()),
     })
 }
+
+/// Months of recorded history shown before the projection starts, for context.
+const CONTEXT_MONTHS: u32 = 3;
 
 /// The generated transactions themselves, for an "upcoming" list.
 #[tauri::command]
@@ -247,7 +287,9 @@ pub async fn upcoming_transactions(
     let loaded = app_state.journal.as_ref().ok_or("No journal loaded")?;
 
     let real: Vec<_> = loaded.ledger.transactions().cloned().collect();
-    let Some((start, end)) = forecast::default_window(&real, parse_date(&horizon)) else {
+    let today = chrono::Local::now().date_naive();
+    let Some((start, end)) = forecast::projection_window(&real, today, parse_date(&horizon))
+    else {
         return Ok(vec![]);
     };
 
