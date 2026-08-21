@@ -184,12 +184,13 @@ pub async fn forecast_projection(
     let loaded = app_state.journal.as_ref().ok_or("No journal loaded")?;
 
     let commodity = resolve_target_commodity(loaded, params.target_commodity.as_deref());
-    let account = account
-        .as_deref()
-        .map(str::trim)
-        .filter(|a| !a.is_empty())
-        .unwrap_or("assets")
-        .to_string();
+    // No account chosen: project every asset/cash account by classification,
+    // so journals whose asset tree isn't literally named "assets" still work.
+    let account = account.as_deref().map(str::trim).filter(|a| !a.is_empty());
+    let selector = match account {
+        Some(prefix) => forecast::AccountSelector::Prefix(prefix),
+        None => forecast::AccountSelector::Assets(loaded.ledger.classifier()),
+    };
 
     let real: Vec<_> = loaded.ledger.transactions().cloned().collect();
     let last_actual = real.iter().map(|t| t.date).max();
@@ -205,7 +206,7 @@ pub async fn forecast_projection(
     let points = forecast::cash_flow_projection(
         &all,
         last_actual,
-        &account,
+        &selector,
         &commodity,
         loaded.ledger.price_db(),
         parse_date(&params.date_from),
@@ -216,7 +217,7 @@ pub async fn forecast_projection(
     // the user already lived through.
     let shortfall = forecast::first_shortfall(
         &all,
-        &account,
+        &selector,
         &commodity,
         loaded.ledger.price_db(),
         rust_decimal::Decimal::ZERO,

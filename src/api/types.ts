@@ -261,3 +261,59 @@ export interface ReconciliationState {
   isReconciled: boolean;
   postings: ReconciliationPosting[];
 }
+
+/** A posting of a periodic (~) rule as read from the journal */
+export interface ForecastPosting {
+  account: string;
+  /** null = elided; hledger infers it to balance the rule */
+  amount: string | null;
+  commodity: string;
+}
+
+/** A periodic (~) rule in the journal */
+export interface ForecastRule {
+  /** Full period expression, e.g. "monthly from 2026-01" */
+  period: string;
+  description: string;
+  /** Source line of the rule; use for replace/delete */
+  line: number;
+  postings: ForecastPosting[];
+  /** Set when the period expression can't be honored; the rule generates nothing */
+  error: string | null;
+}
+
+/** Posting input for creating/editing a periodic rule */
+export interface SaveForecastPosting {
+  account: string;
+  amount: string | null;
+  commodity: string | null;
+}
+
+/** One month of a cash-flow projection */
+export interface ProjectionPoint {
+  /** "YYYY-MM" */
+  period: string;
+  inflow: string;
+  /** Money out, positive */
+  outflow: string;
+  closing: string;
+  /** false = recorded activity, true = projected */
+  projected: boolean;
+}
+
+/** A projected cash-flow shortfall */
+export interface ShortfallAlert {
+  date: string;
+  balance: string;
+  description: string;
+}
+
+/** Cash-flow projection for an account tree */
+export interface ForecastProjection {
+  points: ProjectionPoint[];
+  shortfall: ShortfallAlert | null;
+  lastActual: string | null;
+  horizon: string | null;
+  commodity: string;
+  noRules: boolean;
+}

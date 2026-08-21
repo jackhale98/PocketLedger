@@ -24,6 +24,9 @@ import type {
   StoredJournal,
   ImportedJournal,
   CreatedJournal,
+  ForecastRule,
+  SaveForecastPosting,
+  ForecastProjection,
 } from "./types";
 
 // ─── Journal ───
@@ -346,4 +349,52 @@ export async function valuationInfo(
 
 export async function cancelReconciliation(): Promise<void> {
   return invoke<void>("cancel_reconciliation");
+}
+
+// ─── Forecast ───
+
+export async function getForecastRules(): Promise<ForecastRule[]> {
+  return invoke<ForecastRule[]>("get_forecast_rules");
+}
+
+export async function saveForecastRule(
+  period: string,
+  description: string,
+  postings: SaveForecastPosting[],
+  replaceLine?: number | null
+): Promise<JournalSummary> {
+  return invoke<JournalSummary>("save_forecast_rule", {
+    period,
+    description,
+    postings,
+    replaceLine: replaceLine ?? null,
+  });
+}
+
+export async function deleteForecastRule(
+  line: number
+): Promise<JournalSummary> {
+  return invoke<JournalSummary>("delete_forecast_rule", { line });
+}
+
+export async function forecastProjection(
+  account: string | null,
+  horizon: string | null,
+  params: ReportParams = {}
+): Promise<ForecastProjection> {
+  return invoke<ForecastProjection>("forecast_projection", {
+    account,
+    horizon,
+    params,
+  });
+}
+
+export async function upcomingTransactions(
+  horizon: string | null,
+  limit?: number | null
+): Promise<TransactionSummary[]> {
+  return invoke<TransactionSummary[]>("upcoming_transactions", {
+    horizon,
+    limit: limit ?? null,
+  });
 }

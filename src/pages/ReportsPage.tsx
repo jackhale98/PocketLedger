@@ -14,9 +14,10 @@ import type {
   FinancialStatement, BalanceRow, RegisterRow, ReportParams,
   BudgetRow, BudgetSummaryPoint,
   AmountEntry, BalanceInterval, BalanceAccumulationMode, PeriodicBalanceReport,
+  ForecastProjection, TransactionSummary,
 } from "../api/types";
 
-type ReportTab = "overview" | "table" | "register" | "budget";
+type ReportTab = "overview" | "table" | "register" | "budget" | "forecast";
 type DrillView = "balance-sheet" | "income-statement" | "cash-flow" | null;
 
 const COLORS = ["#3b82f6","#ef4444","#22c55e","#f59e0b","#8b5cf6","#ec4899","#06b6d4","#84cc16","#f97316","#6366f1"];
@@ -529,6 +530,214 @@ function BudgetView({ dateFrom, dateTo, currency }: { dateFrom: string; dateTo: 
   );
 }
 
+const HORIZON_OPTIONS: [number, string][] = [[3, "3m"], [6, "6m"], [12, "1y"], [24, "2y"]];
+
+/** N months from today as YYYY-MM-DD, in local time (toISOString would shift). */
+function horizonDate(months: number): string {
+  const now = new Date();
+  const d = new Date(now.getFullYear(), now.getMonth() + months, now.getDate());
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${d.getFullYear()}-${mm}-${dd}`;
+}
+
+function ForecastView({ accountList, dateFrom, dateTo, currency }: { accountList: string[]; dateFrom: string; dateTo: string; currency: string }) {
+  // Empty means "let the backend pick every asset account by type".
+  const [account, setAccount] = useState("");
+  const [months, setMonths] = useState(12);
+  const [projection, setProjection] = useState<ForecastProjection | null>(null);
+  const [upcoming, setUpcoming] = useState<TransactionSummary[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const loadSeq = useRef(0);
+
+  const load = useCallback(async () => {
+    const seq = ++loadSeq.current;
+    setLoading(true);
+    setError(null);
+    const horizon = horizonDate(months);
+    const params: ReportParams = {
+      targetCommodity: currency,
+      dateFrom: dateFrom || null,
+      dateTo: dateTo || null,
+    };
+    try {
+      const [proj, up] = await Promise.all([
+        api.forecastProjection(account || null, horizon, params),
+        api.upcomingTransactions(horizon, 50),
+      ]);
+      if (seq !== loadSeq.current) return;
+      setProjection(proj);
+      setUpcoming(up);
+    } catch (err) {
+      if (seq !== loadSeq.current) return;
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      if (seq === loadSeq.current) setLoading(false);
+    }
+  }, [account, months, dateFrom, dateTo, currency]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const controls = (
+    <div className="space-y-2">
+      <select value={account} onChange={(e) => setAccount(e.target.value)}
+        className="w-full min-w-0 truncate px-3 py-2 min-h-[48px] bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg text-sm text-gray-900 dark:text-gray-100">
+        <option value="">All assets</option>
+        {accountList.map((n) => <option key={n} value={n}>{n}</option>)}
+      </select>
+      <div className="flex items-center gap-2">
+        <span className="text-xs text-gray-500 dark:text-gray-400 shrink-0">Look ahead</span>
+        <div className="flex gap-1.5 flex-1 min-w-0">
+          {HORIZON_OPTIONS.map(([m, label]) => (
+            <button key={m} onClick={() => setMonths(m)}
+              className={`flex-1 py-2 text-xs font-medium rounded-lg ${m === months ? "bg-blue-600 text-white" : "bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400"}`}>
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+
+  if (error) {
+    return (
+      <div className="space-y-3">
+        {controls}
+        <div className="text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/30 px-3 py-2 rounded-lg break-words">{error}</div>
+        <button onClick={load} className="w-full py-2 text-sm text-blue-600 font-medium">Retry</button>
+      </div>
+    );
+  }
+
+  if (loading || !projection) {
+    return (
+      <div className="space-y-3">
+        {controls}
+        <div className="text-sm text-gray-500 text-center py-8">Loading...</div>
+      </div>
+    );
+  }
+
+  if (projection.noRules) {
+    return (
+      <div className="space-y-3">
+        {controls}
+        <div className="text-center py-8 space-y-2">
+          <div className="text-sm text-gray-500 dark:text-gray-400">No recurring transactions yet</div>
+          <p className="text-xs text-gray-400 dark:text-gray-500">
+            Add rent, salary or subscriptions in Settings &gt; Manage Recurring to project your balance forward
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  const { points, shortfall, lastActual, commodity } = projection;
+  const cutoff = lastActual ? lastActual.slice(0, 7) : null;
+  // The last actual point is repeated on the projected series so the two
+  // lines meet instead of leaving a gap at the cutoff.
+  const chartData = points.map((p, i) => {
+    const closing = parseFloat(p.closing);
+    const bridge = !p.projected && points[i + 1]?.projected === true;
+    return {
+      period: p.period,
+      actual: p.projected ? null : closing,
+      projected: p.projected || bridge ? closing : null,
+    };
+  });
+  const hasCutoff = cutoff !== null && points.some((p) => p.period === cutoff);
+  const last = points[points.length - 1];
+
+  return (
+    <div className="space-y-4 min-w-0">
+      {controls}
+
+      {shortfall && (
+        <div className="rounded-lg p-3 bg-red-50 dark:bg-red-900/30 border border-red-300 dark:border-red-700 space-y-1">
+          <div className="text-sm font-semibold text-red-700 dark:text-red-400">
+            You run out of money on {shortfall.date}
+          </div>
+          <div className="text-sm text-red-600 dark:text-red-400 font-mono">
+            Projected balance {fmtBudgetAmt(shortfall.balance, commodity)}
+          </div>
+          <div className="text-xs text-red-600/80 dark:text-red-400/80 break-words">
+            after &ldquo;{shortfall.description}&rdquo;
+          </div>
+        </div>
+      )}
+
+      {!shortfall && last && (
+        <div className="bg-gray-50 dark:bg-gray-800 rounded-lg p-3 text-center">
+          <div className="text-xs text-gray-500 dark:text-gray-400">Projected balance by {last.period}</div>
+          <div className={`text-lg font-semibold font-mono ${parseFloat(last.closing) < 0 ? "text-red-500" : "text-green-500"}`}>
+            {fmtBudgetAmt(last.closing, commodity)}
+          </div>
+        </div>
+      )}
+
+      {chartData.length > 1 && (
+        <div>
+          <h2 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-2">Projected Balance</h2>
+          <div className="bg-gray-50 dark:bg-gray-800 rounded-lg p-2">
+            <ResponsiveContainer width="100%" height={200}>
+              <LineChart data={chartData}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#4b5563" />
+                <XAxis dataKey="period" tick={{ fontSize: 10, fill: "#9ca3af" }} />
+                <YAxis tick={{ fontSize: 10, fill: "#9ca3af" }} width={60} />
+                <Tooltip contentStyle={{ backgroundColor: "#1f2937", border: "none", borderRadius: 8, color: "#f3f4f6" }} />
+                <Legend wrapperStyle={{ fontSize: 11 }} />
+                <ReferenceLine y={0} stroke="#6b7280" />
+                {hasCutoff && <ReferenceLine x={cutoff ?? undefined} stroke="#f59e0b" strokeDasharray="4 4" />}
+                <Line type="monotone" dataKey="actual" name="Actual" stroke="#3b82f6" strokeWidth={2} dot={false} connectNulls={false} />
+                <Line type="monotone" dataKey="projected" name="Projected" stroke="#8b5cf6" strokeWidth={2} strokeDasharray="5 4" dot={false} connectNulls={false} />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+          {hasCutoff && (
+            <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">
+              Everything after {cutoff} is projected from your recurring transactions
+            </p>
+          )}
+        </div>
+      )}
+
+      <div>
+        <h2 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-2">Upcoming</h2>
+        {upcoming.length === 0 ? (
+          <div className="text-sm text-gray-500 text-center py-4">Nothing projected before the horizon</div>
+        ) : (
+          <div className="divide-y divide-gray-100 dark:divide-gray-800 min-w-0">
+            {upcoming.map((txn, i) => {
+              const posting = txn.postings.find((p) => p.amount !== null);
+              return (
+                // Projections have no journal entry behind them, so these rows
+                // are inert — never pass their index to the editor.
+                <div key={i} className="py-2.5 flex justify-between items-center gap-2 min-w-0">
+                  <div className="min-w-0 flex-1">
+                    <div className="text-sm text-gray-900 dark:text-gray-100 truncate flex items-center gap-1.5" title={txn.description}>
+                      <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-400">
+                        proj
+                      </span>
+                      <span className="truncate">{txn.description}</span>
+                    </div>
+                    <div className="text-xs text-gray-500 dark:text-gray-400">{txn.date}</div>
+                  </div>
+                  {posting && posting.amount !== null && (
+                    <div className={`text-sm font-mono shrink-0 ${parseFloat(posting.amount) < 0 ? "text-red-500" : "text-green-500"}`}>
+                      {fmtCompactEntry({ commodity: posting.commodity ?? "", quantity: posting.amount })}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function ReportsPage() {
   const { defaultCurrency } = useSettingsStore();
   const refreshJournal = useJournalStore((s) => s.refresh);
@@ -673,9 +882,9 @@ export function ReportsPage() {
       <div className="px-4 py-3 border-b border-gray-200 dark:border-gray-700 space-y-2">
         <h1 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Reports</h1>
         <div className="flex gap-1">
-          {([["overview", "Overview"], ["table", "Table"], ["register", "Register"], ["budget", "Budget"]] as [ReportTab, string][]).map(([t, label]) => (
+          {([["overview", "Overview"], ["table", "Table"], ["register", "Register"], ["budget", "Budget"], ["forecast", "Forecast"]] as [ReportTab, string][]).map(([t, label]) => (
             <button key={t} onClick={() => setTab(t)}
-              className={`flex-1 py-2 text-sm font-medium rounded-lg ${t === tab ? "bg-blue-600 text-white" : "bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400"}`}>
+              className={`flex-1 min-w-0 truncate py-2 text-sm font-medium rounded-lg ${t === tab ? "bg-blue-600 text-white" : "bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400"}`}>
               {label}
             </button>
           ))}
@@ -706,6 +915,8 @@ export function ReportsPage() {
         )}
         {tab === "budget" ? (
           <div className="p-4"><BudgetView dateFrom={dateFrom} dateTo={dateTo} currency={defaultCurrency} /></div>
+        ) : tab === "forecast" ? (
+          <div className="p-4"><ForecastView accountList={accountList} dateFrom={dateFrom} dateTo={dateTo} currency={defaultCurrency} /></div>
         ) : tab === "table" ? (
           <div className="p-4"><TableView dateFrom={dateFrom} dateTo={dateTo} /></div>
         ) : tab === "register" ? (

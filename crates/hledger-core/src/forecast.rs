@@ -207,19 +207,38 @@ pub struct ShortfallAlert {
     pub description: String,
 }
 
-/// Monthly cash-flow projection for the accounts matching `account_prefix`,
+/// Which accounts a projection covers.
+pub enum AccountSelector<'a> {
+    /// A specific account and its subaccounts.
+    Prefix(&'a str),
+    /// Every asset/cash account, by declared `type:` or name inference. Used
+    /// when no account is chosen, so journals whose asset tree isn't spelled
+    /// "assets" still project correctly.
+    Assets(&'a crate::classify::AccountClassifier),
+}
+
+impl AccountSelector<'_> {
+    fn matches(&self, account: &str) -> bool {
+        match self {
+            Self::Prefix(prefix) => crate::reports::account_matches_prefix(account, prefix),
+            Self::Assets(classifier) => classifier.classify(account).is_asset(),
+        }
+    }
+}
+
+/// Monthly cash-flow projection for the accounts matching `selector`,
 /// valued in `commodity`. Periods up to and including the last recorded
 /// transaction are actuals; later ones are projections.
 pub fn cash_flow_projection(
     all: &[ResolvedTransaction],
     last_real: Option<NaiveDate>,
-    account_prefix: &str,
+    selector: &AccountSelector<'_>,
     commodity: &str,
     price_db: &crate::price_db::PriceDb,
     from: Option<NaiveDate>,
     to: Option<NaiveDate>,
 ) -> Vec<ProjectionPoint> {
-    use crate::reports::{account_matches_prefix, valued_quantity};
+    use crate::reports::valued_quantity;
     use rust_decimal::Decimal;
     use std::collections::BTreeMap;
 
@@ -229,7 +248,7 @@ pub fn cash_flow_projection(
 
     for txn in all {
         for posting in &txn.postings {
-            if !account_matches_prefix(&posting.account.full, account_prefix) {
+            if !selector.matches(&posting.account.full) {
                 continue;
             }
             if let Some(to) = to {
@@ -276,13 +295,13 @@ pub fn cash_flow_projection(
 /// `threshold`, if any. Answers "when do I run out of money".
 pub fn first_shortfall(
     all: &[ResolvedTransaction],
-    account_prefix: &str,
+    selector: &AccountSelector<'_>,
     commodity: &str,
     price_db: &crate::price_db::PriceDb,
     threshold: rust_decimal::Decimal,
     after: Option<NaiveDate>,
 ) -> Option<ShortfallAlert> {
-    use crate::reports::{account_matches_prefix, valued_quantity};
+    use crate::reports::valued_quantity;
     use rust_decimal::Decimal;
 
     // Postings must be walked in date order for the running balance to mean
@@ -290,7 +309,7 @@ pub fn first_shortfall(
     let mut lines: Vec<(NaiveDate, Decimal, &str)> = Vec::new();
     for txn in all {
         for posting in &txn.postings {
-            if !account_matches_prefix(&posting.account.full, account_prefix) {
+            if !selector.matches(&posting.account.full) {
                 continue;
             }
             let (value, _unconvertible) =
@@ -458,7 +477,7 @@ mod projection_tests {
         let points = cash_flow_projection(
             &all,
             Some(last_real),
-            "assets:checking",
+            &AccountSelector::Prefix("assets:checking"),
             "$",
             &PriceDb::default(),
             None,
@@ -481,7 +500,7 @@ mod projection_tests {
         let (all, _) = projected();
         let alert = first_shortfall(
             &all,
-            "assets:checking",
+            &AccountSelector::Prefix("assets:checking"),
             "$",
             &PriceDb::default(),
             dec!(0),
@@ -502,7 +521,7 @@ mod projection_tests {
         let real = resolve_transactions(&journal).unwrap();
         assert!(first_shortfall(
             &real,
-            "assets:checking",
+            &AccountSelector::Prefix("assets:checking"),
             "$",
             &PriceDb::default(),
             dec!(0),
