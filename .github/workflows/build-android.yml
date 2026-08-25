@@ -51,7 +51,14 @@ jobs:
         run: npm ci
 
       - name: Initialize Android project
-        run: npx tauri android init
+        run: |
+          # Only when missing: the generated project carries manifest and
+          # plugin customisations, and re-running init would discard them.
+          if [ -d src-tauri/gen/android ]; then
+            echo "Using the committed android project"
+          else
+            npx tauri android init
+          fi
 
       - name: Build frontend
         run: npm run build

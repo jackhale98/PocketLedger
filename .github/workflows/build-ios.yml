@@ -69,7 +69,14 @@ jobs:
       - name: Initialize iOS project
         env:
           APPLE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_TEAM_ID }}
-        run: npx tauri ios init
+        run: |
+          # Only when missing: the generated project carries manifest and
+          # plugin customisations, and re-running init would discard them.
+          if [ -d src-tauri/gen/apple ]; then
+            echo "Using the committed ios project"
+          else
+            npx tauri ios init
+          fi
 
       - name: Copy app icons into generated Xcode project
         run: |
@@ -83,6 +90,7 @@ jobs:
 
       - name: Expose the app's Documents folder in Files
         run: |
+          set -euo pipefail
           # This pair is what makes Documents visible and editable in place
           # under "On My iPhone > PocketHLedger", which is what lets a git
           # client track the journals.
@@ -93,15 +101,31 @@ jobs:
           # "Document Storage" row to iOS Settings that cannot actually move
           # the app's Documents directory — it only steers a document browser
           # we don't use, so it misleads more than it helps.
+          #
+          # PlistBuddy, not sed: `sed '/<\/dict>/i'` inserts before the FIRST
+          # </dict>, which in a plist containing any nested dict silently buries
+          # these keys inside it, where they have no effect. PlistBuddy
+          # addresses the root dictionary by key path, and re-running is a
+          # no-op rather than a duplicate insert.
           PLIST="src-tauri/gen/apple/PocketHLedger_iOS/Info.plist"
-          if [ -f "$PLIST" ]; then
-            sed -i '' '/<\/dict>/i\
-            <key>UIFileSharingEnabled</key>\
-            <true/>\
-            <key>LSSupportsOpeningDocumentsInPlace</key>\
-            <true/>' "$PLIST"
-            echo "Patched Info.plist with file sharing keys"
+          if [ ! -f "$PLIST" ]; then
+            PLIST=$(find src-tauri/gen/apple -name "Info.plist" -path "*_iOS*" | head -1)
           fi
+          if [ -z "$PLIST" ] || [ ! -f "$PLIST" ]; then
+            echo "::error::No iOS Info.plist found; the app's files would be invisible in Files"
+            exit 1
+          fi
+
+          set_bool() {
+            /usr/libexec/PlistBuddy -c "Add :$1 bool $2" "$PLIST" 2>/dev/null \
+              || /usr/libexec/PlistBuddy -c "Set :$1 $2" "$PLIST"
+          }
+          set_bool UIFileSharingEnabled true
+          set_bool LSSupportsOpeningDocumentsInPlace true
+
+          echo "Info.plist file-sharing keys:"
+          /usr/libexec/PlistBuddy -c "Print :UIFileSharingEnabled" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Print :LSSupportsOpeningDocumentsInPlace" "$PLIST"
 
       - name: Declare export compliance
         run: |

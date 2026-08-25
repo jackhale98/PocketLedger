@@ -6,8 +6,19 @@ Cargo.lock
 node_modules/
 dist/
 
-# Tauri generated
-src-tauri/gen/
+# Tauri generated. The platform projects themselves are NOT ignored: once
+# generated they hold customisations (manifests, entitlements, plugin wiring)
+# that must survive CI, and CI only runs `tauri <platform> init` when the
+# project is missing. Build output inside them is still ignored.
+src-tauri/gen/schemas/
+src-tauri/gen/android/.gradle/
+src-tauri/gen/android/build/
+src-tauri/gen/android/app/build/
+src-tauri/gen/android/local.properties
+src-tauri/gen/apple/build/
+src-tauri/gen/apple/Externals/
+src-tauri/gen/apple/*.xcodeproj/project.xcworkspace/
+src-tauri/gen/apple/*.xcodeproj/xcuserdata/
 
 # IDE
 .vscode/
