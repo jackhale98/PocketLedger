@@ -13,7 +13,7 @@ import { TransactionEditorSheet } from "../components/transactions/TransactionEd
 import type {
   TimeSeriesPoint, IncomeExpensePoint, PieSlice,
   FinancialStatement, BalanceRow, RegisterRow, ReportParams,
-  BudgetRow, BudgetSummaryPoint,
+  BudgetRow, BudgetSummaryPoint, ForecastRule,
   AmountEntry, BalanceInterval, BalanceAccumulationMode, PeriodicBalanceReport,
   ForecastProjection, TransactionSummary,
 } from "../api/types";
@@ -363,6 +363,9 @@ function TableView({ dateFrom, dateTo }: { dateFrom: string; dateTo: string }) {
 function BudgetView({ dateFrom, dateTo, currency }: { dateFrom: string; dateTo: string; currency: string }) {
   const [budgetRows, setBudgetRows] = useState<BudgetRow[]>([]);
   const [budgetChart, setBudgetChart] = useState<BudgetSummaryPoint[]>([]);
+  // Rules are fetched alongside so an empty report can say whether there are
+  // simply no rules, or rules the engine had to skip.
+  const [rules, setRules] = useState<ForecastRule[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const loadSeq = useRef(0);
@@ -377,13 +380,15 @@ function BudgetView({ dateFrom, dateTo, currency }: { dateFrom: string; dateTo: 
       dateTo: dateTo || null,
     };
     try {
-      const [rows, chart] = await Promise.all([
+      const [rows, chart, ruleList] = await Promise.all([
         api.budgetVsActual(params),
         api.budgetSummaryChart(params),
+        api.getForecastRules(),
       ]);
       if (seq !== loadSeq.current) return;
       setBudgetRows(rows);
       setBudgetChart(chart);
+      setRules(ruleList);
     } catch (err) {
       if (seq !== loadSeq.current) return;
       setError(err instanceof Error ? err.message : String(err));
@@ -408,12 +413,30 @@ function BudgetView({ dateFrom, dateTo, currency }: { dateFrom: string; dateTo: 
   }
 
   if (budgetRows.length === 0) {
+    const broken = rules.filter((r) => r.error);
     return (
-      <div className="text-center py-8 space-y-2">
-        <div className="text-sm text-gray-500 dark:text-gray-400">No budgets defined</div>
-        <p className="text-xs text-gray-400 dark:text-gray-500">
-          Add periodic transactions (~ monthly) to your journal or use Settings &gt; Manage Budget
-        </p>
+      <div className="py-8 space-y-2">
+        <div className="text-sm text-gray-500 dark:text-gray-400 text-center">
+          {rules.length === 0 ? "No budgets defined" : "No budget goals from your recurring rules"}
+        </div>
+        {broken.length > 0 ? (
+          <div className="bg-amber-50 dark:bg-amber-900/20 rounded-lg px-3 py-2 space-y-1">
+            <div className="text-xs font-medium text-amber-700 dark:text-amber-400">
+              {broken.length} rule{broken.length === 1 ? "" : "s"} could not be used:
+            </div>
+            {broken.map((r, i) => (
+              <div key={i} className="text-xs text-amber-700 dark:text-amber-400 break-words">
+                line {r.line}: {r.error}
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="text-xs text-gray-400 dark:text-gray-500 text-center">
+            {rules.length === 0
+              ? "Add periodic transactions (~ monthly) to your journal, or use Settings > Manage Budget"
+              : "Your rules parsed fine but produced no goals in this date range — try widening it."}
+          </p>
+        )}
       </div>
     );
   }

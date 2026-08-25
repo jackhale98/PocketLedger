@@ -1303,6 +1303,42 @@ mod tests {
     }
 
     #[test]
+    fn periodic_rules_in_included_files_are_found() {
+        // Budgets and forecasts both read `~` rules off the merged journal.
+        // A rule living in an included file (the usual layout) must be picked
+        // up just like one in the main file.
+        let dir = temp_dir("included-periodics");
+        let main = dir.join("main.journal");
+        std::fs::write(
+            dir.join("budget.journal"),
+            "~ monthly  Budget goals\n    expenses:food  $400.00\n    assets\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("recurring.journal"),
+            "~ monthly from 2024-01-01  Rent\n    expenses:rent  $1200.00\n    assets:checking\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &main,
+            "include budget.journal\ninclude recurring.journal\n\n2024-01-05 Seed\n    assets:checking  $5000.00\n    equity:opening\n",
+        )
+        .unwrap();
+
+        let loaded = load_journal(&main.to_string_lossy()).unwrap();
+        assert!(loaded.missing_includes.is_empty());
+
+        let budgets = hledger_core::budget::extract_budgets(&loaded.journal);
+        assert_eq!(budgets.len(), 2, "both rules are budget-shaped");
+
+        let rules = hledger_core::forecast::extract_rules(&loaded.journal);
+        let descriptions: Vec<&str> = rules.iter().map(|r| r.description.as_str()).collect();
+        assert!(descriptions.contains(&"Budget goals"), "got {descriptions:?}");
+        assert!(descriptions.contains(&"Rent"), "got {descriptions:?}");
+        assert!(rules.iter().all(|r| r.error.is_none()), "{rules:?}");
+    }
+
+    #[test]
     fn include_cycle_warns_instead_of_crashing() {
         let dir = temp_dir("cycle");
         let main = dir.join("a.journal");
