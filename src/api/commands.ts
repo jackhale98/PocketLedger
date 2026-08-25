@@ -270,6 +270,11 @@ export async function importJournalFile(
   return invoke<ImportedJournal>("import_journal_file", { path });
 }
 
+/** Remove a journal (and its .bak) from app storage. */
+export async function deleteStoredJournal(name: string): Promise<void> {
+  return invoke<void>("delete_stored_journal", { name });
+}
+
 export async function createStoredJournal(
   name: string,
   defaultCurrency?: string

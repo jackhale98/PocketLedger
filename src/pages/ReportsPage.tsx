@@ -7,6 +7,7 @@ import {
 import * as api from "../api/commands";
 import { useSettingsStore } from "../store/settingsStore";
 import { useJournalStore } from "../store/journalStore";
+import { useNavStore } from "../store/navStore";
 import { DateFilter } from "../components/common/DateFilter";
 import { TransactionEditorSheet } from "../components/transactions/TransactionEditorSheet";
 import type {
@@ -39,12 +40,15 @@ function fmtBudgetAmt(value: string, commodity: string): string {
   return commodity ? `${qs} ${commodity}` : qs;
 }
 
-function StatementView({ statement, onBack }: { statement: FinancialStatement; onBack: () => void }) {
+function StatementView({ statement, subtitle, onBack }: { statement: FinancialStatement; subtitle?: string | null; onBack: () => void }) {
   return (
     <div className="flex flex-col h-full">
       <div className="flex items-center gap-2 px-4 py-3 border-b border-gray-200 dark:border-gray-700">
         <button onClick={onBack} className="p-2 -ml-2 text-gray-600 dark:text-gray-300">&larr;</button>
-        <h2 className="text-base font-semibold text-gray-900 dark:text-gray-100">{statement.title}</h2>
+        <div className="min-w-0">
+          <h2 className="text-base font-semibold text-gray-900 dark:text-gray-100 truncate">{statement.title}</h2>
+          {subtitle && <div className="text-xs text-gray-500 dark:text-gray-400">{subtitle}</div>}
+        </div>
       </div>
       <div className="flex-1 overflow-y-auto overflow-x-hidden p-4 space-y-4">
         {statement.sections.map((section, si) => (
@@ -73,8 +77,7 @@ function StatementView({ statement, onBack }: { statement: FinancialStatement; o
   );
 }
 
-function RegisterView({ accountList, dateFrom, dateTo, currency, onChanged }: { accountList: string[]; dateFrom: string; dateTo: string; currency: string; onChanged: () => void }) {
-  const [account, setAccount] = useState("");
+function RegisterView({ accountList, account, onAccountChange, dateFrom, dateTo, currency, onChanged }: { accountList: string[]; account: string; onAccountChange: (a: string) => void; dateFrom: string; dateTo: string; currency: string; onChanged: () => void }) {
   const [editIndex, setEditIndex] = useState<number | null>(null);
   const [rows, setRows] = useState<RegisterRow[]>([]);
   const [loading, setLoading] = useState(false);
@@ -117,9 +120,10 @@ function RegisterView({ accountList, dateFrom, dateTo, currency, onChanged }: { 
   return (
     <div className="space-y-3 min-w-0">
       <div className="flex gap-2 items-stretch">
-        <select value={account} onChange={(e) => setAccount(e.target.value)}
+        <select value={account} onChange={(e) => onAccountChange(e.target.value)}
           className="flex-1 min-w-0 truncate px-3 py-2 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg text-sm text-gray-900 dark:text-gray-100">
           <option value="">Select an account...</option>
+          {account && !accountList.includes(account) && <option value={account}>{account}</option>}
           {accountList.map((n) => <option key={n} value={n}>{n}</option>)}
         </select>
         <button
@@ -530,6 +534,13 @@ function BudgetView({ dateFrom, dateTo, currency }: { dateFrom: string; dateTo: 
   );
 }
 
+/** First and last day of a "YYYY-MM" period label. */
+function monthRange(period: string): { from: string; to: string } {
+  const [y, m] = period.split("-").map(Number);
+  const last = new Date(y, m, 0).getDate();
+  return { from: `${period}-01`, to: `${period}-${String(last).padStart(2, "0")}` };
+}
+
 const HORIZON_OPTIONS: [number, string][] = [[3, "3m"], [6, "6m"], [12, "1y"], [24, "2y"]];
 
 /** N months from today as YYYY-MM-DD, in local time (toISOString would shift). */
@@ -760,7 +771,12 @@ function ForecastView({ accountList, dateFrom, dateTo, currency }: { accountList
 export function ReportsPage() {
   const { defaultCurrency } = useSettingsStore();
   const refreshJournal = useJournalStore((s) => s.refresh);
+  const navIntent = useNavStore((s) => s.intent);
+  const clearNavIntent = useNavStore((s) => s.clearIntent);
   const [tab, setTab] = useState<ReportTab>("overview");
+  const [registerAccount, setRegisterAccount] = useState("");
+  // Period a statement was opened for, when it differs from the page filter.
+  const [statementRange, setStatementRange] = useState<{ from: string; to: string } | null>(null);
   const [drillView, setDrillView] = useState<DrillView>(null);
   const [statement, setStatement] = useState<FinancialStatement | null>(null);
   const [netWorth, setNetWorth] = useState<TimeSeriesPoint[]>([]);
@@ -873,14 +889,44 @@ export function ReportsPage() {
     }
   };
 
-  const openStatement = async (type: DrillView) => {
+  useEffect(() => {
+    if (!navIntent) return;
+    if (navIntent.kind === "register") {
+      setRegisterAccount(navIntent.account);
+      if (navIntent.dateFrom !== undefined) setDateFrom(navIntent.dateFrom);
+      if (navIntent.dateTo !== undefined) setDateTo(navIntent.dateTo);
+      setDrillView(null);
+      setTab("register");
+    } else if (navIntent.kind === "income-statement") {
+      const range =
+        navIntent.dateFrom && navIntent.dateTo
+          ? { from: navIntent.dateFrom, to: navIntent.dateTo }
+          : undefined;
+      setTab("overview");
+      openStatement("income-statement", range);
+    }
+    clearNavIntent();
+    // openStatement is recreated each render; re-running on it would loop.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [navIntent, clearNavIntent]);
+
+  const setRegisterFor = (account: string) => {
+    setRegisterAccount(account);
+    setDrillView(null);
+    setTab("register");
+  };
+
+  const openStatement = async (type: DrillView, range?: { from: string; to: string }) => {
     if (!type) return;
-    const params = makeParams();
+    const params = range
+      ? { ...makeParams(), dateFrom: range.from, dateTo: range.to }
+      : makeParams();
     try {
       const data = type === "balance-sheet" ? await api.balanceSheetReport(params)
         : type === "income-statement" ? await api.incomeStatementReport(params)
         : await api.cashFlowReport(params);
       setStatement(data);
+      setStatementRange(range ?? null);
       setDrillView(type);
     } catch (err) {
       setPageError(err instanceof Error ? err.message : String(err));
@@ -888,12 +934,19 @@ export function ReportsPage() {
   };
 
   if (drillView && statement) {
-    return <StatementView statement={statement} onBack={() => setDrillView(null)} />;
+    return (
+      <StatementView
+        statement={statement}
+        subtitle={statementRange ? `${statementRange.from} to ${statementRange.to}` : null}
+        onBack={() => { setDrillView(null); setStatementRange(null); }}
+      />
+    );
   }
 
   const nwData = netWorth.map((p) => ({ date: p.date.slice(0, 7), value: parseFloat(p.value) }));
   const ieData = incomeExpense.map((p) => ({ period: p.period, income: parseFloat(p.income), expenses: parseFloat(p.expenses) }));
   const pieData = expenseBreakdown.map((s) => ({ name: s.name, value: parseFloat(s.value) }));
+  const pieTotal = pieData.reduce((sum, d) => sum + d.value, 0);
   const acctData = accountSeries.map((p) => ({ date: p.date.slice(0, 7), value: parseFloat(p.value) }));
 
   return (
@@ -939,7 +992,7 @@ export function ReportsPage() {
         ) : tab === "table" ? (
           <div className="p-4"><TableView dateFrom={dateFrom} dateTo={dateTo} /></div>
         ) : tab === "register" ? (
-          <div className="p-4"><RegisterView accountList={accountList} dateFrom={dateFrom} dateTo={dateTo} currency={defaultCurrency} onChanged={() => { refreshJournal(); loadDashboard(); }} /></div>
+          <div className="p-4"><RegisterView accountList={accountList} account={registerAccount} onAccountChange={setRegisterAccount} dateFrom={dateFrom} dateTo={dateTo} currency={defaultCurrency} onChanged={() => { refreshJournal(); loadDashboard(); }} /></div>
         ) : loading ? (
           <div className="flex items-center justify-center h-32 text-gray-500 text-sm">Loading...</div>
         ) : (
@@ -977,7 +1030,16 @@ export function ReportsPage() {
                 <h2 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-2">Income vs Expenses</h2>
                 <div className="bg-gray-50 dark:bg-gray-800 rounded-lg p-2">
                   <ResponsiveContainer width="100%" height={200}>
-                    <BarChart data={ieData} stackOffset="sign">
+                    <BarChart
+                      data={ieData}
+                      stackOffset="sign"
+                      style={{ cursor: "pointer" }}
+                      onClick={(e) => {
+                        const period = e?.activeLabel;
+                        if (typeof period === "string" && period)
+                          openStatement("income-statement", monthRange(period));
+                      }}
+                    >
                       <CartesianGrid strokeDasharray="3 3" stroke="#4b5563" />
                       <XAxis dataKey="period" tick={{ fontSize: 10, fill: "#9ca3af" }} />
                       <YAxis tick={{ fontSize: 10, fill: "#9ca3af" }} width={60} />
@@ -989,6 +1051,7 @@ export function ReportsPage() {
                     </BarChart>
                   </ResponsiveContainer>
                 </div>
+                <p className="text-xs text-gray-400 dark:text-gray-500 mt-1 text-center">Tap a month for its income statement</p>
                 {forecast && <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">includes forecast from periodic transactions</p>}
               </div>
             )}
@@ -1020,22 +1083,40 @@ export function ReportsPage() {
                         formatter={(value) => Number(value).toLocaleString(undefined, { minimumFractionDigits: 2 })} />
                     </PieChart>
                   </ResponsiveContainer>
-                  <div className="flex flex-wrap gap-x-3 gap-y-1 mt-2 justify-center">
+                  <div className="mt-2 divide-y divide-gray-200 dark:divide-gray-700 min-w-0">
                     {pieData.map((item, i) => {
-                      const total = pieData.reduce((s, d) => s + d.value, 0);
-                      const pct = total > 0 ? ((item.value / total) * 100).toFixed(0) : "0";
+                      const pct = pieTotal > 0 ? ((item.value / pieTotal) * 100).toFixed(0) : "0";
+                      // "other" aggregates the small categories, so there is no
+                      // single account whose register we could open.
+                      const isAggregate = item.name === "other";
+                      const account = expensePrefix ? `${expensePrefix}:${item.name}` : `expenses:${item.name}`;
                       return (
-                        <button key={item.name} onClick={() => drillIntoExpense(item.name)} title={item.name}
-                          className="flex items-center gap-1 text-xs text-gray-700 dark:text-gray-300">
+                        <button
+                          key={item.name}
+                          disabled={isAggregate}
+                          onClick={() => setRegisterFor(account)}
+                          title={isAggregate ? "Aggregate of smaller categories" : `Show ${account} transactions`}
+                          className="w-full py-2 flex items-center gap-2 min-w-0 text-left disabled:opacity-60"
+                        >
                           <span className="w-2.5 h-2.5 rounded-sm shrink-0" style={{ backgroundColor: COLORS[i % COLORS.length] }} />
-                          <span className="truncate max-w-[80px]">{item.name}</span>
-                          <span className="text-gray-400">{pct}%</span>
+                          <span className="flex-1 min-w-0 truncate text-sm text-gray-800 dark:text-gray-200">{item.name}</span>
+                          <span className="text-xs text-gray-400 shrink-0 w-9 text-right">{pct}%</span>
+                          <span className="text-sm font-mono shrink-0 text-gray-800 dark:text-gray-200">
+                            {fmtBudgetAmt(String(item.value), defaultCurrency)}
+                          </span>
                         </button>
                       );
                     })}
+                    <div className="py-2 flex items-center gap-2 min-w-0 font-semibold">
+                      <span className="w-2.5 shrink-0" />
+                      <span className="flex-1 min-w-0 text-sm text-gray-900 dark:text-gray-100">Total</span>
+                      <span className="text-sm font-mono shrink-0 text-gray-900 dark:text-gray-100">
+                        {fmtBudgetAmt(String(pieTotal), defaultCurrency)}
+                      </span>
+                    </div>
                   </div>
                   {drillHint && <p className="text-xs text-amber-600 dark:text-amber-400 mt-1 text-center">{drillHint}</p>}
-                  {!drillHint && expensePath.length === 0 && <p className="text-xs text-gray-400 mt-1 text-center">Tap a slice to drill down</p>}
+                  <p className="text-xs text-gray-400 mt-1 text-center">Tap a slice to drill down, or a row for its transactions</p>
                 </div>
               </div>
             )}

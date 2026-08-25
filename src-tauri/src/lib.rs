@@ -78,6 +78,7 @@ pub fn run() {
             commands::storage::resolve_journal_ref,
             commands::storage::list_stored_journals,
             commands::storage::import_journal_file,
+            commands::storage::delete_stored_journal,
             commands::storage::create_stored_journal,
             commands::storage::stash_picked_file,
         ])

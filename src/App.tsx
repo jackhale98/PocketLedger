@@ -1,18 +1,22 @@
 import { useState, useEffect, useRef } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import { BottomNav, type TabId } from "./components/layout/BottomNav";
+import { BottomNav } from "./components/layout/BottomNav";
 import { TransactionsPage } from "./pages/TransactionsPage";
 import { AccountsPage } from "./pages/AccountsPage";
 import { ReportsPage } from "./pages/ReportsPage";
 import { MorePage } from "./pages/MorePage";
 import { MobileJournalPicker } from "./components/common/MobileJournalPicker";
+import { MissingIncludesBanner } from "./components/common/MissingIncludesBanner";
 import { useJournalStore } from "./store/journalStore";
+import { useNavStore } from "./store/navStore";
 import { useSettingsStore } from "./store/settingsStore";
 import { getPlatformInfo, resolveJournalRef } from "./utils/platform";
 import * as api from "./api/commands";
 
 function App() {
-  const [activeTab, setActiveTab] = useState<TabId>("transactions");
+  // Tab selection lives in a store so charts and lists can jump between tabs.
+  const activeTab = useNavStore((s) => s.activeTab);
+  const setActiveTab = useNavStore((s) => s.setActiveTab);
   const { isLoaded, isLoading, error, summary, openJournal, reloadFromDisk, clearError } =
     useJournalStore();
   const { defaultCurrency, lastJournalPath, loaded: settingsLoaded, loadSettings, setLastJournalPath } = useSettingsStore();
@@ -108,6 +112,11 @@ function App() {
     }
   };
 
+  // The missing-include banner already reports these, with a way to fix them.
+  const otherWarnings = (summary?.warnings ?? []).filter(
+    (w) => !w.startsWith("Could not include ")
+  );
+
   const renderPage = () => {
     switch (activeTab) {
       case "transactions":
@@ -184,11 +193,15 @@ function App() {
         </div>
       </div>
 
-      {/* Warning banner for include failures */}
-      {summary?.warnings && summary.warnings.length > 0 && (
-        <div className="bg-yellow-50 dark:bg-yellow-900/20 px-4 py-1.5">
-          {summary.warnings.map((w, i) => (
-            <div key={i} className="text-xs text-yellow-700 dark:text-yellow-400">{w}</div>
+      {summary?.missingIncludes && summary.missingIncludes.length > 0 && (
+        <MissingIncludesBanner missing={summary.missingIncludes} />
+      )}
+
+      {/* Remaining load warnings */}
+      {otherWarnings.length > 0 && (
+        <div className="bg-yellow-50 dark:bg-yellow-900/20 px-4 py-1.5 max-h-24 overflow-y-auto">
+          {otherWarnings.map((w, i) => (
+            <div key={i} className="text-xs text-yellow-700 dark:text-yellow-400 break-words">{w}</div>
           ))}
         </div>
       )}

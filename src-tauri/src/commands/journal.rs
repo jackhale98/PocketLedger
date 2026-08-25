@@ -50,6 +50,10 @@ pub struct LoadedJournal {
     pub writer_config: WriterConfig,
     /// Warnings gathered at load: include problems + parse warnings.
     pub load_warnings: Vec<String>,
+    /// `include` targets that could not be found, as written in the journal.
+    /// On mobile these are usually siblings that were never imported, so the
+    /// UI offers to fetch them by name.
+    pub missing_includes: Vec<String>,
 }
 
 impl LoadedJournal {
@@ -94,6 +98,8 @@ pub struct JournalSummary {
     pub transaction_count: usize,
     pub account_count: usize,
     pub warnings: Vec<String>,
+    /// Names of `include` targets that could not be resolved.
+    pub missing_includes: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -135,6 +141,7 @@ fn make_summary(loaded: &LoadedJournal) -> JournalSummary {
         transaction_count: loaded.ledger.transaction_count(),
         account_count: loaded.ledger.account_count(),
         warnings: loaded.all_warnings(),
+        missing_includes: loaded.missing_includes.clone(),
     }
 }
 
@@ -157,6 +164,7 @@ struct LoadContext<'a> {
     items: Vec<JournalItem>,
     item_files: Vec<usize>,
     warnings: Vec<String>,
+    missing_includes: Vec<String>,
     visited: HashSet<PathBuf>,
 }
 
@@ -226,6 +234,7 @@ fn load_one_file(ctx: &mut LoadContext, path: &Path) -> Result<(), String> {
                 if inc_path.exists() {
                     load_one_file(ctx, &inc_path)?;
                 } else {
+                    ctx.missing_includes.push(inc_str.clone());
                     ctx.warnings.push(format!(
                         "Could not include '{}': file not found (resolved to {})",
                         inc_str,
@@ -254,6 +263,7 @@ fn load_journal_with_overlay(
         items: Vec::new(),
         item_files: Vec::new(),
         warnings: Vec::new(),
+        missing_includes: Vec::new(),
         visited: HashSet::new(),
     };
 
@@ -275,6 +285,7 @@ fn load_journal_with_overlay(
         ledger,
         writer_config,
         load_warnings: ctx.warnings,
+        missing_includes: ctx.missing_includes,
     })
 }
 

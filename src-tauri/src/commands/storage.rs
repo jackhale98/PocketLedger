@@ -180,6 +180,30 @@ fn scan_dir(
     Ok(())
 }
 
+/// Remove a journal from app storage. `name` is the storage-relative name
+/// from `list_stored_journals`; anything that escapes the storage directory
+/// is refused rather than trusted.
+#[tauri::command]
+pub async fn delete_stored_journal(name: String, app: AppHandle) -> Result<(), String> {
+    let dir = storage_dir(&app)?;
+    let target = dir.join(&name);
+
+    // A traversal-safe check that doesn't need the file to still exist.
+    let canonical_dir = fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
+    let canonical_target = match fs::canonicalize(&target) {
+        Ok(p) => p,
+        Err(e) => return Err(format!("Cannot remove '{name}': {e}")),
+    };
+    if !canonical_target.starts_with(&canonical_dir) || !canonical_target.is_file() {
+        return Err(format!("'{name}' is not a journal in this app's folder."));
+    }
+
+    fs::remove_file(&canonical_target).map_err(|e| format!("Cannot remove '{name}': {e}"))?;
+    // Its backup is ours too, and leaving it behind would strand the data.
+    let _ = fs::remove_file(canonical_target.with_extension("bak"));
+    Ok(())
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportedJournal {

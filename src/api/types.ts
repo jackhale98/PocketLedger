@@ -4,6 +4,9 @@ export interface JournalSummary {
   transactionCount: number;
   accountCount: number;
   warnings: string[];
+  /** `include` targets that couldn't be resolved, as written in the journal.
+   *  On mobile these are usually siblings that were never imported. */
+  missingIncludes: string[];
 }
 
 /** Mirrors the Rust TransactionSummary struct */
