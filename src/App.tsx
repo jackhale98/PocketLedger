@@ -138,54 +138,56 @@ function App() {
 
   if (!isLoaded) {
     return (
-      <div className="flex flex-col items-center justify-center h-full gap-4 p-8 bg-white dark:bg-gray-900">
-        <img src="/app-icon.svg" alt="PocketHLedger" className="w-20 h-20 rounded-2xl" />
-        <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">PocketHLedger</h1>
-        <p className="text-gray-600 dark:text-gray-400 text-center">
-          Plain text accounting in your pocket
-        </p>
-        {isLoading || isMobile === null ? (
-          <div className="text-sm text-gray-500">Loading...</div>
-        ) : isMobile ? (
-          <MobileJournalPicker
-            mode="open"
-            showCreate
-            onOpened={() => setAutoOpenFailedPath(null)}
-          />
-        ) : (
-          <div className="flex flex-col gap-3 w-full max-w-xs">
-            <button
-              onClick={handleOpenJournal}
-              className="w-full px-6 py-3 bg-blue-600 text-white rounded-lg font-medium active:bg-blue-700 min-h-[48px]"
-            >
-              Open Journal
-            </button>
-            <button
-              onClick={handleCreateJournal}
-              className="w-full px-6 py-3 bg-white dark:bg-gray-800 text-blue-600 border border-blue-600 rounded-lg font-medium active:bg-blue-50 dark:active:bg-gray-700 min-h-[48px]"
-            >
-              Create New Journal
-            </button>
-          </div>
-        )}
-        {autoOpenFailedPath && (
-          <div className="text-sm text-yellow-700 dark:text-yellow-400 bg-yellow-50 dark:bg-yellow-900/20 px-4 py-2 rounded-lg max-w-xs text-center">
-            <p>Couldn't reopen the last journal:</p>
-            <p className="font-mono text-xs break-all mt-1">{autoOpenFailedPath}</p>
-            <p className="text-xs mt-1">Pick another journal below.</p>
-          </div>
-        )}
-        {error && (
-          <div className="text-sm text-red-600 bg-red-50 dark:bg-red-900/30 px-4 py-2 rounded-lg max-w-xs text-center">
-            <p className="break-words">{error}</p>
-            <button
-              onClick={clearError}
-              className="mt-2 text-xs text-red-500 underline"
-            >
-              Dismiss
-            </button>
-          </div>
-        )}
+      <div className="h-full overflow-y-auto overflow-x-hidden bg-white dark:bg-gray-900">
+        <div className="min-h-full flex flex-col items-center justify-center gap-4 p-8">
+          <img src="/app-icon.svg" alt="PocketHLedger" className="w-20 h-20 rounded-2xl" />
+          <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">PocketHLedger</h1>
+          <p className="text-gray-600 dark:text-gray-400 text-center">
+            Plain text accounting in your pocket
+          </p>
+          {isLoading || isMobile === null ? (
+            <div className="text-sm text-gray-500">Loading...</div>
+          ) : isMobile ? (
+            <MobileJournalPicker
+              mode="open"
+              showCreate
+              onOpened={() => setAutoOpenFailedPath(null)}
+            />
+          ) : (
+            <div className="flex flex-col gap-3 w-full max-w-xs">
+              <button
+                onClick={handleOpenJournal}
+                className="w-full px-6 py-3 bg-blue-600 text-white rounded-lg font-medium active:bg-blue-700 min-h-[48px]"
+              >
+                Open Journal
+              </button>
+              <button
+                onClick={handleCreateJournal}
+                className="w-full px-6 py-3 bg-white dark:bg-gray-800 text-blue-600 border border-blue-600 rounded-lg font-medium active:bg-blue-50 dark:active:bg-gray-700 min-h-[48px]"
+              >
+                Create New Journal
+              </button>
+            </div>
+          )}
+          {autoOpenFailedPath && (
+            <div className="text-sm text-yellow-700 dark:text-yellow-400 bg-yellow-50 dark:bg-yellow-900/20 px-4 py-2 rounded-lg max-w-xs text-center">
+              <p>Couldn't reopen the last journal:</p>
+              <p className="font-mono text-xs break-all mt-1">{autoOpenFailedPath}</p>
+              <p className="text-xs mt-1">Pick another journal below.</p>
+            </div>
+          )}
+          {error && (
+            <div className="text-sm text-red-600 bg-red-50 dark:bg-red-900/30 px-4 py-2 rounded-lg max-w-xs text-center">
+              <p className="break-words">{error}</p>
+              <button
+                onClick={clearError}
+                className="mt-2 text-xs text-red-500 underline"
+              >
+                Dismiss
+              </button>
+            </div>
+          )}
+        </div>
       </div>
     );
   }
