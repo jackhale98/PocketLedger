@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import * as api from "../api/commands";
 import { useNavStore } from "../store/navStore";
+import { useAccountsViewStore } from "../store/accountsViewStore";
 import type { BalanceRow } from "../api/types";
 
 const ACCOUNT_TYPES = [
@@ -42,11 +43,17 @@ function matchesType(account: string, typeFilter: string): boolean {
 
 export function AccountsPage() {
   const [allAccounts, setAllAccounts] = useState<BalanceRow[]>([]);
-  const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
-  const [search, setSearch] = useState("");
-  const [typeFilter, setTypeFilter] = useState("");
-  const [valueCurrency, setValueCurrency] = useState<string>("");
+  // Filters and the opened tree survive a drill-down into the register.
+  const expanded = useAccountsViewStore((s) => s.expanded);
+  const setExpanded = useAccountsViewStore((s) => s.setExpanded);
+  const initializeExpanded = useAccountsViewStore((s) => s.initializeExpanded);
+  const search = useAccountsViewStore((s) => s.search);
+  const setSearch = useAccountsViewStore((s) => s.setSearch);
+  const typeFilter = useAccountsViewStore((s) => s.typeFilter);
+  const setTypeFilter = useAccountsViewStore((s) => s.setTypeFilter);
+  const valueCurrency = useAccountsViewStore((s) => s.valueCurrency);
+  const setValueCurrency = useAccountsViewStore((s) => s.setValueCurrency);
   const [commodities, setCommodities] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const loadSeq = useRef(0);
@@ -67,7 +74,7 @@ export function AccountsPage() {
       setCommodities(comms);
       // Auto-expand top-level accounts
       const topLevel = new Set(data.filter((a: BalanceRow) => a.depth === 0).map((a: BalanceRow) => a.account));
-      setExpanded(topLevel);
+      initializeExpanded(topLevel);
     } catch (err) {
       if (seq !== loadSeq.current) return;
       setError(err instanceof Error ? err.message : String(err));
@@ -139,19 +146,17 @@ export function AccountsPage() {
   const navigate = useNavStore((s) => s.navigate);
 
   const toggleExpand = (account: string) => {
-    setExpanded((prev) => {
-      const next = new Set(prev);
-      if (next.has(account)) {
-        next.delete(account);
-      } else {
-        next.add(account);
-      }
-      return next;
-    });
+    const next = new Set(expanded);
+    if (next.has(account)) {
+      next.delete(account);
+    } else {
+      next.add(account);
+    }
+    setExpanded(next);
   };
 
   const handleAccountTap = (account: string) => {
-    navigate("reports", { kind: "register", account });
+    navigate("reports", { kind: "register", account }, { tab: "accounts" });
   };
 
   return (

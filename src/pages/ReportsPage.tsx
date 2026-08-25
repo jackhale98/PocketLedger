@@ -7,7 +7,7 @@ import {
 import * as api from "../api/commands";
 import { useSettingsStore } from "../store/settingsStore";
 import { useJournalStore } from "../store/journalStore";
-import { useNavStore } from "../store/navStore";
+import { useNavStore, type ReportTab } from "../store/navStore";
 import { DateFilter } from "../components/common/DateFilter";
 import { TransactionEditorSheet } from "../components/transactions/TransactionEditorSheet";
 import type {
@@ -18,7 +18,6 @@ import type {
   ForecastProjection, TransactionSummary,
 } from "../api/types";
 
-type ReportTab = "overview" | "table" | "register" | "budget" | "forecast";
 type DrillView = "balance-sheet" | "income-statement" | "cash-flow" | null;
 
 const COLORS = ["#3b82f6","#ef4444","#22c55e","#f59e0b","#8b5cf6","#ec4899","#06b6d4","#84cc16","#f97316","#6366f1"];
@@ -796,6 +795,9 @@ export function ReportsPage() {
   const refreshJournal = useJournalStore((s) => s.refresh);
   const navIntent = useNavStore((s) => s.intent);
   const clearNavIntent = useNavStore((s) => s.clearIntent);
+  const navigate = useNavStore((s) => s.navigate);
+  const goBack = useNavStore((s) => s.goBack);
+  const canGoBack = useNavStore((s) => s.history.length > 0);
   const [tab, setTab] = useState<ReportTab>("overview");
   const [registerAccount, setRegisterAccount] = useState("");
   // Period a statement was opened for, when it differs from the page filter.
@@ -920,6 +922,9 @@ export function ReportsPage() {
       if (navIntent.dateTo !== undefined) setDateTo(navIntent.dateTo);
       setDrillView(null);
       setTab("register");
+    } else if (navIntent.kind === "report-tab") {
+      setDrillView(null);
+      setTab(navIntent.tab);
     } else if (navIntent.kind === "income-statement") {
       const range =
         navIntent.dateFrom && navIntent.dateTo
@@ -934,9 +939,7 @@ export function ReportsPage() {
   }, [navIntent, clearNavIntent]);
 
   const setRegisterFor = (account: string) => {
-    setRegisterAccount(account);
-    setDrillView(null);
-    setTab("register");
+    navigate("reports", { kind: "register", account }, { tab: "reports", reportTab: tab });
   };
 
   const openStatement = async (type: DrillView, range?: { from: string; to: string }) => {
@@ -975,7 +978,14 @@ export function ReportsPage() {
   return (
     <div className="flex flex-col h-full">
       <div className="px-4 py-3 border-b border-gray-200 dark:border-gray-700 space-y-2">
-        <h1 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Reports</h1>
+        <div className="flex items-center gap-2 min-w-0">
+          {canGoBack && (
+            <button onClick={goBack} className="p-1 -ml-1 text-blue-600 dark:text-blue-400 text-sm shrink-0">
+              &larr; Back
+            </button>
+          )}
+          <h1 className="text-lg font-semibold text-gray-900 dark:text-gray-100 truncate">Reports</h1>
+        </div>
         <div className="flex gap-1">
           {([["overview", "Overview"], ["table", "Table"], ["register", "Register"], ["budget", "Budget"], ["forecast", "Forecast"]] as [ReportTab, string][]).map(([t, label]) => (
             <button key={t} onClick={() => setTab(t)}
