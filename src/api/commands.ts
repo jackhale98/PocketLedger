@@ -11,7 +11,7 @@ import type {
   IncomeExpensePoint,
   PieSlice,
   ReconciliationState,
-  BudgetRow,
+  BudgetComparison,
   BudgetSummaryPoint,
   BudgetInfo,
   BudgetEntry,
@@ -222,8 +222,8 @@ export async function getBudgets(): Promise<BudgetInfo[]> {
 
 export async function budgetVsActual(
   params: ReportParams = {}
-): Promise<BudgetRow[]> {
-  return invoke<BudgetRow[]>("budget_vs_actual", { params });
+): Promise<BudgetComparison> {
+  return invoke<BudgetComparison>("budget_vs_actual", { params });
 }
 
 export async function budgetSummaryChart(

@@ -13,7 +13,7 @@ import { TransactionEditorSheet } from "../components/transactions/TransactionEd
 import type {
   TimeSeriesPoint, IncomeExpensePoint, PieSlice,
   FinancialStatement, BalanceRow, RegisterRow, ReportParams,
-  BudgetRow, BudgetSummaryPoint, ForecastRule,
+  BudgetRow, BudgetSummaryPoint, ForecastRule, InactiveBudget,
   AmountEntry, BalanceInterval, BalanceAccumulationMode, PeriodicBalanceReport,
   ForecastProjection, TransactionSummary,
 } from "../api/types";
@@ -361,6 +361,8 @@ function TableView({ dateFrom, dateTo }: { dateFrom: string; dateTo: string }) {
 
 function BudgetView({ dateFrom, dateTo, currency }: { dateFrom: string; dateTo: string; currency: string }) {
   const [budgetRows, setBudgetRows] = useState<BudgetRow[]>([]);
+  const [inactive, setInactive] = useState<InactiveBudget[]>([]);
+  const [range, setRange] = useState<{ from: string; to: string } | null>(null);
   const [budgetChart, setBudgetChart] = useState<BudgetSummaryPoint[]>([]);
   // Rules are fetched alongside so an empty report can say whether there are
   // simply no rules, or rules the engine had to skip.
@@ -385,7 +387,9 @@ function BudgetView({ dateFrom, dateTo, currency }: { dateFrom: string; dateTo: 
         api.getForecastRules(),
       ]);
       if (seq !== loadSeq.current) return;
-      setBudgetRows(rows);
+      setBudgetRows(rows.rows);
+      setInactive(rows.inactive);
+      setRange({ from: rows.from, to: rows.to });
       setBudgetChart(chart);
       setRules(ruleList);
     } catch (err) {
@@ -411,13 +415,33 @@ function BudgetView({ dateFrom, dateTo, currency }: { dateFrom: string; dateTo: 
     );
   }
 
+  const inactiveNotice = inactive.length > 0 && (
+    <div className="bg-amber-50 dark:bg-amber-900/20 rounded-lg px-3 py-2 space-y-1">
+      <div className="text-xs font-medium text-amber-700 dark:text-amber-400">
+        {inactive.length} budget{inactive.length === 1 ? "" : "s"} outside{" "}
+        {range ? `${range.from} to ${range.to}` : "this range"}
+      </div>
+      {inactive.map((b, i) => (
+        <div key={i} className="text-xs text-amber-700 dark:text-amber-400 break-words">
+          {b.accounts.join(", ") || b.description || `line ${b.line}`}
+          {b.starts ? ` starts ${b.starts}` : ` (${b.period})`}
+        </div>
+      ))}
+      <div className="text-xs text-amber-700/80 dark:text-amber-400/80">
+        Reports cover the dates your journal spans, so a budget starting later
+        has no goal yet. Widen the date filter to include it.
+      </div>
+    </div>
+  );
+
   if (budgetRows.length === 0) {
     const broken = rules.filter((r) => r.error);
     return (
       <div className="py-8 space-y-2">
         <div className="text-sm text-gray-500 dark:text-gray-400 text-center">
-          {rules.length === 0 ? "No budgets defined" : "No budget goals from your recurring rules"}
+          {rules.length === 0 ? "No budgets defined" : "No budget goals in this date range"}
         </div>
+        {inactiveNotice}
         {broken.length > 0 ? (
           <div className="bg-amber-50 dark:bg-amber-900/20 rounded-lg px-3 py-2 space-y-1">
             <div className="text-xs font-medium text-amber-700 dark:text-amber-400">
@@ -464,6 +488,8 @@ function BudgetView({ dateFrom, dateTo, currency }: { dateFrom: string; dateTo: 
 
   return (
     <div className="space-y-4">
+      {inactiveNotice}
+
       {/* Summary cards (expense budgets, dominant commodity) */}
       {mainTotal && (
         <div>

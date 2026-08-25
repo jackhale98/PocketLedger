@@ -344,10 +344,14 @@ export function MorePage() {
               </p>
             )}
             {isMobile && storageDir && (
-              <p className="text-xs text-gray-500 dark:text-gray-400 pt-1">
-                Journals are stored in this app and visible in the Files app
-                under On My iPhone &rsaquo; PocketHLedger.
-              </p>
+              <div className="pt-1 space-y-0.5">
+                <p className="text-xs text-gray-500 dark:text-gray-400">
+                  Journals are stored in this app&rsquo;s own folder:
+                </p>
+                <p className="font-mono text-[10px] text-gray-400 dark:text-gray-500 break-all">
+                  {storageDir}
+                </p>
+              </div>
             )}
           </div>
         </div>

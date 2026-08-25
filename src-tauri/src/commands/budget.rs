@@ -68,14 +68,14 @@ pub async fn get_budgets(
 pub async fn budget_vs_actual(
     params: ReportParams,
     state: State<'_, Mutex<crate::AppState>>,
-) -> Result<Vec<budget::BudgetRow>, String> {
+) -> Result<budget::BudgetComparison, String> {
     let app_state = state.lock().map_err(|e| e.to_string())?;
     let loaded = app_state.journal.as_ref().ok_or("No journal loaded")?;
 
     let budgets = budget::extract_budgets(&loaded.journal);
     let commodity = resolve_target_commodity(loaded, params.target_commodity.as_deref());
     let txns: Vec<_> = loaded.ledger.transactions().cloned().collect();
-    Ok(budget::budget_vs_actual(
+    Ok(budget::budget_comparison(
         &txns,
         &budgets,
         loaded.ledger.price_db(),

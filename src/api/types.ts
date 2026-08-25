@@ -166,6 +166,26 @@ export interface BudgetRow {
   isIncome: boolean;
 }
 
+/** A budget whose period yields no goal in the reported range */
+export interface InactiveBudget {
+  line: number;
+  /** Period expression as written */
+  period: string;
+  description: string;
+  accounts: string[];
+  /** First occurrence date, when the rule specifies one */
+  starts: string | null;
+}
+
+/** Budget goals vs actuals, plus budgets outside the reported range */
+export interface BudgetComparison {
+  rows: BudgetRow[];
+  inactive: InactiveBudget[];
+  /** The range actually reported on; "all time" means the journal's own span */
+  from: string;
+  to: string;
+}
+
 /** Budget vs actual chart data point */
 export interface BudgetSummaryPoint {
   period: string;

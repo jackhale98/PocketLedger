@@ -121,6 +121,32 @@ pub fn extract_budgets_with_warnings(journal: &Journal) -> BudgetExtraction {
 /// Generate a budget-vs-actual comparison report. Goals from multiple budgets
 /// for the same account+commodity are merged into one row (hledger behavior);
 /// actuals are valued into the entry's commodity via the price database.
+/// A budget that contributed no goal to the reported range, so the user can
+/// see it was considered rather than wondering where it went.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InactiveBudget {
+    pub line: usize,
+    /// The period expression as written.
+    pub period: String,
+    pub description: String,
+    pub accounts: Vec<String>,
+    /// First occurrence outside the range, when the rule has one.
+    pub starts: Option<String>,
+}
+
+/// Budget goals against actuals, plus the budgets that fell outside the range.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BudgetComparison {
+    pub rows: Vec<BudgetRow>,
+    pub inactive: Vec<InactiveBudget>,
+    /// The range actually reported on, which for "all time" is the journal's
+    /// own span — a budget starting after it legitimately has no goal.
+    pub from: String,
+    pub to: String,
+}
+
 pub fn budget_vs_actual(
     transactions: &[ResolvedTransaction],
     budgets: &[Budget],
@@ -129,6 +155,25 @@ pub fn budget_vs_actual(
     date_from: Option<NaiveDate>,
     date_to: Option<NaiveDate>,
 ) -> Vec<BudgetRow> {
+    budget_comparison(
+        transactions,
+        budgets,
+        price_db,
+        target_commodity,
+        date_from,
+        date_to,
+    )
+    .rows
+}
+
+pub fn budget_comparison(
+    transactions: &[ResolvedTransaction],
+    budgets: &[Budget],
+    price_db: &PriceDb,
+    target_commodity: &str,
+    date_from: Option<NaiveDate>,
+    date_to: Option<NaiveDate>,
+) -> BudgetComparison {
     let from = date_from.unwrap_or_else(|| {
         transactions
             .first()
@@ -172,9 +217,17 @@ pub fn budget_vs_actual(
 
     // Merge goals per (account, commodity).
     let mut goals: BTreeMap<(String, String), Decimal> = BTreeMap::new();
+    let mut inactive = Vec::new();
     for budget in budgets {
         let occurrences = count_occurrences(&budget.period, from, to);
         if occurrences == 0 {
+            inactive.push(InactiveBudget {
+                line: budget.line,
+                period: budget.period.raw.clone(),
+                description: budget.description.clone(),
+                accounts: budget.entries.iter().map(|e| e.account.clone()).collect(),
+                starts: budget.period.start.map(|d| d.to_string()),
+            });
             continue;
         }
         for entry in &budget.entries {
@@ -224,7 +277,12 @@ pub fn budget_vs_actual(
         });
     }
 
-    rows
+    BudgetComparison {
+        rows,
+        inactive,
+        from: from.to_string(),
+        to: to.to_string(),
+    }
 }
 
 /// Monthly budget-vs-actual chart series. Goals are occurrence-based: a
@@ -435,6 +493,33 @@ mod tests {
         let spec = parse_period_expression("yearly").unwrap();
         assert_eq!(count_occurrences(&spec, d(2026, 1, 1), d(2026, 1, 31)), 1);
         assert_eq!(count_occurrences(&spec, d(2026, 6, 1), d(2026, 6, 30)), 0);
+    }
+
+    #[test]
+    fn budgets_outside_the_range_are_reported_not_dropped() {
+        // A goal starting after the journal ends legitimately contributes
+        // nothing, but silently vanishing makes it look like the app failed
+        // to read it.
+        let input = concat!(
+            "~ monthly from 2026-09-01  Future\n",
+            "    expenses:food  $400.00\n",
+            "    assets\n\n",
+            "2024-01-15 Grocery\n",
+            "    expenses:food  $50.00\n",
+            "    assets:checking\n",
+        );
+        let journal = parse(input).unwrap();
+        let budgets = extract_budgets(&journal);
+        let txns = resolve_transactions(&journal).unwrap();
+
+        let report = budget_comparison(&txns, &budgets, &PriceDb::default(), "$", None, None);
+        assert!(report.rows.is_empty());
+        assert_eq!(report.inactive.len(), 1);
+        assert_eq!(report.inactive[0].starts.as_deref(), Some("2026-09-01"));
+        assert_eq!(report.inactive[0].accounts, vec!["expenses:food".to_string()]);
+        // The reported range is the journal's own span, which is why the goal
+        // falls outside it.
+        assert_eq!(report.to, "2024-01-15");
     }
 
     #[test]
