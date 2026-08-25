@@ -3,8 +3,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { useSettingsStore, type Theme } from "../store/settingsStore";
 import { useJournalStore } from "../store/journalStore";
 import { ReconciliationFlow } from "../components/reconciliation/ReconciliationFlow";
-import { BudgetEditor } from "../components/budget/BudgetEditor";
-import { ForecastEditor } from "../components/forecast/ForecastEditor";
+import { RecurringEditor } from "../components/recurring/RecurringEditor";
 import { CsvImportFlow } from "../components/csv/CsvImportFlow";
 import { MobileJournalPicker } from "../components/common/MobileJournalPicker";
 import { getPlatformInfo } from "../utils/platform";
@@ -34,8 +33,7 @@ export function MorePage() {
   const [customCurrency, setCustomCurrency] = useState("");
   const [showCustom, setShowCustom] = useState(false);
   const [showReconciliation, setShowReconciliation] = useState(false);
-  const [showBudgetEditor, setShowBudgetEditor] = useState(false);
-  const [showForecastEditor, setShowForecastEditor] = useState(false);
+  const [showRecurringEditor, setShowRecurringEditor] = useState(false);
   const [showCsvImport, setShowCsvImport] = useState(false);
   const [showJournalPicker, setShowJournalPicker] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
@@ -130,22 +128,11 @@ export function MorePage() {
     );
   }
 
-  if (showBudgetEditor) {
+  if (showRecurringEditor) {
     return (
-      <BudgetEditor
+      <RecurringEditor
         onDone={() => {
-          setShowBudgetEditor(false);
-          refresh();
-        }}
-      />
-    );
-  }
-
-  if (showForecastEditor) {
-    return (
-      <ForecastEditor
-        onDone={() => {
-          setShowForecastEditor(false);
+          setShowRecurringEditor(false);
           refresh();
         }}
       />
@@ -186,22 +173,12 @@ export function MorePage() {
             <span className="text-gray-400">&rsaquo;</span>
           </button>
           <button
-            onClick={() => setShowBudgetEditor(true)}
+            onClick={() => setShowRecurringEditor(true)}
             className="w-full px-4 py-3 bg-gray-50 dark:bg-gray-800 rounded-lg text-sm text-left text-gray-900 dark:text-gray-100 active:bg-gray-100 dark:active:bg-gray-700 min-h-[48px] flex items-center justify-between"
           >
             <div>
-              <div className="font-medium">Manage Budget</div>
-              <div className="text-xs text-gray-500 dark:text-gray-400">Create or edit periodic budgets</div>
-            </div>
-            <span className="text-gray-400">&rsaquo;</span>
-          </button>
-          <button
-            onClick={() => setShowForecastEditor(true)}
-            className="w-full px-4 py-3 bg-gray-50 dark:bg-gray-800 rounded-lg text-sm text-left text-gray-900 dark:text-gray-100 active:bg-gray-100 dark:active:bg-gray-700 min-h-[48px] flex items-center justify-between"
-          >
-            <div>
-              <div className="font-medium">Manage Recurring</div>
-              <div className="text-xs text-gray-500 dark:text-gray-400">Recurring transactions and forecasts</div>
+              <div className="font-medium">Recurring Rules</div>
+              <div className="text-xs text-gray-500 dark:text-gray-400">Budget goals and forecast transactions</div>
             </div>
             <span className="text-gray-400">&rsaquo;</span>
           </button>

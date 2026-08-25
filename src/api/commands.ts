@@ -13,8 +13,6 @@ import type {
   ReconciliationState,
   BudgetComparison,
   BudgetSummaryPoint,
-  BudgetInfo,
-  BudgetEntry,
   CsvPreview,
   CsvImportResult,
   BalanceInterval,
@@ -216,10 +214,6 @@ export async function periodicBalance(
 
 // ─── Budget ───
 
-export async function getBudgets(): Promise<BudgetInfo[]> {
-  return invoke<BudgetInfo[]>("get_budgets");
-}
-
 export async function budgetVsActual(
   params: ReportParams = {}
 ): Promise<BudgetComparison> {
@@ -230,26 +224,6 @@ export async function budgetSummaryChart(
   params: ReportParams = {}
 ): Promise<BudgetSummaryPoint[]> {
   return invoke<BudgetSummaryPoint[]>("budget_summary_chart", { params });
-}
-
-export async function saveBudget(
-  entries: BudgetEntry[],
-  period: string,
-  replaceLine?: number
-): Promise<JournalSummary> {
-  return invoke<JournalSummary>("save_budget", {
-    entries,
-    period,
-    replaceLine: replaceLine ?? null,
-  });
-}
-
-export async function deleteBudget(line: number): Promise<JournalSummary> {
-  return invoke<JournalSummary>("delete_budget", { line });
-}
-
-export async function listBudgetAccounts(): Promise<string[]> {
-  return invoke<string[]>("list_budget_accounts");
 }
 
 export async function switchJournal(path: string): Promise<JournalSummary> {

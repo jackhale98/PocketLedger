@@ -19,7 +19,7 @@ interface RuleLine {
   commodity: string;
 }
 
-export function ForecastEditor({ onDone }: { onDone: () => void }) {
+export function RecurringEditor({ onDone }: { onDone: () => void }) {
   const { defaultCurrency } = useSettingsStore();
   const [rules, setRules] = useState<ForecastRule[]>([]);
   const [loading, setLoading] = useState(true);
@@ -187,7 +187,7 @@ export function ForecastEditor({ onDone }: { onDone: () => void }) {
           <button onClick={onDone} className="p-2 -ml-2 text-gray-600 dark:text-gray-300">
             &larr;
           </button>
-          <h2 className="text-base font-semibold text-gray-900 dark:text-gray-100">Manage Recurring</h2>
+          <h2 className="text-base font-semibold text-gray-900 dark:text-gray-100">Recurring Rules</h2>
         </div>
 
         <div className="flex-1 overflow-y-auto overflow-x-hidden p-4 space-y-4">
@@ -198,17 +198,19 @@ export function ForecastEditor({ onDone }: { onDone: () => void }) {
           )}
 
           <p className="text-xs text-gray-500 dark:text-gray-400">
-            Recurring transactions drive the forecast &mdash; and double as your budget
-            goals, since hledger uses the same rules for both.
+            One list, two uses: hledger drives both budget goals and forecasts
+            from the same recurring rules. Each rule here becomes a goal in the
+            Budget report and a projected transaction in the Forecast report.
           </p>
 
           {loading ? (
             <div className="text-sm text-gray-500 text-center py-8">Loading...</div>
           ) : rules.length === 0 ? (
             <div className="text-center py-8 space-y-3">
-              <div className="text-sm text-gray-500 dark:text-gray-400">No recurring transactions</div>
+              <div className="text-sm text-gray-500 dark:text-gray-400">No recurring rules yet</div>
               <p className="text-xs text-gray-400 dark:text-gray-500">
-                Add rent, salary or subscriptions to project your balance forward
+                Add rent, salary or subscriptions to set budget goals and project
+                your balance forward
               </p>
             </div>
           ) : (

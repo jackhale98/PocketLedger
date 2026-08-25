@@ -456,7 +456,7 @@ function BudgetView({ dateFrom, dateTo, currency }: { dateFrom: string; dateTo: 
         ) : (
           <p className="text-xs text-gray-400 dark:text-gray-500 text-center">
             {rules.length === 0
-              ? "Add periodic transactions (~ monthly) to your journal, or use Settings > Manage Budget"
+              ? "Add periodic transactions (~ monthly) to your journal, or use Settings > Recurring Rules"
               : "Your rules parsed fine but produced no goals in this date range — try widening it."}
           </p>
         )}
@@ -690,7 +690,7 @@ function ForecastView({ accountList, dateFrom, dateTo, currency }: { accountList
         <div className="text-center py-8 space-y-2">
           <div className="text-sm text-gray-500 dark:text-gray-400">No recurring transactions yet</div>
           <p className="text-xs text-gray-400 dark:text-gray-500">
-            Add rent, salary or subscriptions in Settings &gt; Manage Recurring to project your balance forward
+            Add rent, salary or subscriptions in Settings &gt; Recurring Rules to project your balance forward
           </p>
         </div>
       </div>

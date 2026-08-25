@@ -197,23 +197,6 @@ export interface BudgetSummaryPoint {
   actual: string;
 }
 
-/** Budget entry for creating/editing */
-export interface BudgetEntry {
-  account: string;
-  amount: string;
-  commodity: string;
-}
-
-/** Budget info from journal */
-export interface BudgetInfo {
-  /** Full period expression, e.g. "monthly" or "every 2 weeks from 2026-01" */
-  period: string;
-  description: string;
-  /** Source line of the periodic transaction; use for replace/delete */
-  line: number;
-  entries: BudgetEntry[];
-}
-
 /** Platform + storage info (mobile journals live in the app's documents dir) */
 export interface PlatformInfo {
   isMobile: boolean;
