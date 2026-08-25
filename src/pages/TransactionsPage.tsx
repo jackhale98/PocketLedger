@@ -18,6 +18,8 @@ export function TransactionsPage() {
   const { transactions, addTransaction, refresh } = useJournalStore();
   const { defaultCurrency } = useSettingsStore();
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
+  // Prefill for a new transaction copied from an existing one.
+  const [duplicateOf, setDuplicateOf] = useState<number | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [editIndex, setEditIndex] = useState<number | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
@@ -124,14 +126,20 @@ export function TransactionsPage() {
       ? transactions.find((t) => t.index === editIndex) ?? null
       : null;
 
-  if (showForm || editTransaction) {
-    const prefill = editTransaction
+  const duplicateSource =
+    duplicateOf !== null
+      ? transactions.find((t) => t.index === duplicateOf) ?? null
+      : null;
+
+  if (showForm || editTransaction || duplicateSource) {
+    const source = editTransaction ?? duplicateSource;
+    const prefill = source
       ? {
-          date: editTransaction.date,
-          status: editTransaction.status,
-          description: editTransaction.description,
-          comment: editTransaction.comment ?? "",
-          postings: editTransaction.postings.map((p) => ({
+          date: source.date,
+          status: source.status,
+          description: source.description,
+          comment: source.comment ?? "",
+          postings: source.postings.map((p) => ({
             account: p.account,
             amount: p.amount ?? "",
             commodity: p.commodity ?? defaultCurrency,
@@ -144,7 +152,13 @@ export function TransactionsPage() {
       <TransactionForm
         defaultCurrency={defaultCurrency}
         prefill={prefill}
-        title={editTransaction ? "Edit Transaction" : "New Transaction"}
+        title={
+          editTransaction
+            ? "Edit Transaction"
+            : duplicateSource
+              ? "Duplicate Transaction"
+              : "New Transaction"
+        }
         // Editing rewrites the transaction in whichever file owns it, so the
         // destination only needs choosing when creating one.
         chooseFile={editIndex === null}
@@ -156,9 +170,10 @@ export function TransactionsPage() {
           } else {
             await addTransaction(txn, fileIndex);
             setShowForm(false);
+            setDuplicateOf(null);
           }
         }}
-        onCancel={() => { setShowForm(false); setEditIndex(null); }}
+        onCancel={() => { setShowForm(false); setEditIndex(null); setDuplicateOf(null); }}
       />
     );
   }
@@ -169,6 +184,7 @@ export function TransactionsPage() {
         transaction={selectedTransaction}
         onBack={() => setSelectedIndex(null)}
         onEdit={() => { setEditIndex(selectedIndex); setSelectedIndex(null); }}
+        onDuplicate={() => { setDuplicateOf(selectedIndex); setSelectedIndex(null); }}
         onDelete={async () => {
           await api.deleteTransaction(selectedIndex!);
           await refresh();

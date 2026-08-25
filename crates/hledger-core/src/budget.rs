@@ -325,11 +325,6 @@ pub fn budget_summary_series(
     let first_date = date_from.unwrap_or_else(|| transactions.first().unwrap().date);
     let last_date = date_to.unwrap_or_else(|| transactions.last().unwrap().date);
 
-    let budget_accounts: Vec<&str> = budgets
-        .iter()
-        .flat_map(|b| b.entries.iter().map(|e| e.account.as_str()))
-        .collect();
-
     let mut points = Vec::new();
     let mut current = NaiveDate::from_ymd_opt(first_date.year(), first_date.month(), 1).unwrap();
 
@@ -338,14 +333,24 @@ pub fn budget_summary_series(
         let bucket_from = current.max(first_date);
         let bucket_to = month_end.min(last_date);
 
-        // Goal: occurrences of each budget starting in this month.
+        // Only budgets that actually occur this month, and only expense-style
+        // goals. An income-style goal (a negative amount, e.g. salary into
+        // checking) would otherwise drag every posting on that asset account
+        // into the "actual" line, which reads as the chart plotting the whole
+        // journal rather than the budgeted categories. The summary cards above
+        // already exclude those, so this keeps the two consistent.
         let mut total_budget = Decimal::ZERO;
+        let mut active_accounts: Vec<&str> = Vec::new();
         for budget in budgets {
             let occurrences = count_occurrences(&budget.period, current, month_end);
             if occurrences == 0 {
                 continue;
             }
             for entry in &budget.entries {
+                if entry.amount < Decimal::ZERO {
+                    continue;
+                }
+                active_accounts.push(entry.account.as_str());
                 let goal = entry.amount * Decimal::from(occurrences);
                 let commodity = if entry.commodity.is_empty() {
                     target_commodity
@@ -362,14 +367,14 @@ pub fn budget_summary_series(
             }
         }
 
-        // Actual spending on budgeted accounts within the clamped bucket.
+        // Actual spending on those accounts within the clamped bucket.
         let mut actual_mixed = MixedAmount::zero();
         for txn in transactions {
             for posting in &txn.postings {
                 if posting.date < bucket_from || posting.date > bucket_to {
                     continue;
                 }
-                for ba in &budget_accounts {
+                for ba in &active_accounts {
                     if posting.account.full == *ba
                         || posting.account.full.starts_with(&format!("{}:", ba))
                     {
@@ -607,6 +612,38 @@ mod tests {
         assert_eq!(row.actual, "130.00");
         assert_eq!(row.period_from, "2024-01-15");
         assert_eq!(row.period_to, "2024-02-15");
+    }
+
+    #[test]
+    fn summary_chart_ignores_income_goals_and_their_accounts() {
+        // A salary goal paying into checking would otherwise pull every
+        // checking posting into the "actual" line, so the chart looked like it
+        // plotted the whole journal instead of the budgeted categories.
+        let input = concat!(
+            "~ monthly from 2024-01-01  Salary\n",
+            "    assets:checking  $-3000.00\n",
+            "    income:salary\n\n",
+            "~ monthly from 2024-01-01  Food\n",
+            "    expenses:food  $400.00\n",
+            "    assets\n\n",
+            "2024-01-05 Paycheck\n",
+            "    assets:checking  $3000.00\n",
+            "    income:salary\n\n",
+            "2024-01-10 Groceries\n",
+            "    expenses:food  $120.00\n",
+            "    assets:checking\n",
+        );
+        let journal = parse(input).unwrap();
+        let budgets = extract_budgets(&journal);
+        let txns = resolve_transactions(&journal).unwrap();
+
+        let points =
+            budget_summary_series(&txns, &budgets, &PriceDb::default(), "$", None, None);
+        assert_eq!(points.len(), 1);
+        // Only the food goal counts, and only food spending — not the $3000
+        // that landed in checking.
+        assert_eq!(points[0].budgeted, "400.00");
+        assert_eq!(points[0].actual, "120.00");
     }
 
     #[test]

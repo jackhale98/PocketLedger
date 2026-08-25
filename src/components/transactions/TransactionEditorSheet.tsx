@@ -21,6 +21,9 @@ export function TransactionEditorSheet({
 }) {
   const [txn, setTxn] = useState<TransactionSummary | null>(null);
   const [editing, setEditing] = useState(false);
+  // Duplicating reuses the edit form but saves as a new entry, so the same
+  // prefill serves both.
+  const [duplicating, setDuplicating] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -62,11 +65,12 @@ export function TransactionEditorSheet({
     return <div className="text-sm text-gray-500 text-center py-8">Loading...</div>;
   }
 
-  if (editing) {
+  if (editing || duplicating) {
     return (
       <TransactionForm
         defaultCurrency={defaultCurrency}
-        title="Edit Transaction"
+        title={duplicating ? "Duplicate Transaction" : "Edit Transaction"}
+        chooseFile={duplicating}
         prefill={{
           date: txn.date,
           status: txn.status,
@@ -79,12 +83,19 @@ export function TransactionEditorSheet({
             comment: p.comment ?? "",
           })),
         }}
-        onSave={async (updated) => {
-          await api.updateTransaction(index, updated);
+        onSave={async (updated, fileIndex) => {
+          if (duplicating) {
+            await api.addTransaction(updated, fileIndex);
+          } else {
+            await api.updateTransaction(index, updated);
+          }
           onChanged();
           onClose();
         }}
-        onCancel={() => setEditing(false)}
+        onCancel={() => {
+          setEditing(false);
+          setDuplicating(false);
+        }}
       />
     );
   }
@@ -94,6 +105,7 @@ export function TransactionEditorSheet({
       transaction={txn}
       onBack={onClose}
       onEdit={() => setEditing(true)}
+      onDuplicate={() => setDuplicating(true)}
       onDelete={async () => {
         await api.deleteTransaction(index);
         onChanged();

@@ -8,6 +8,8 @@ interface TransactionDetailProps {
   onBack: () => void;
   onEdit: () => void;
   onDelete: () => void | Promise<void>;
+  /** Start a new transaction prefilled from this one. */
+  onDuplicate?: () => void;
 }
 
 export function TransactionDetail({
@@ -15,6 +17,7 @@ export function TransactionDetail({
   onBack,
   onEdit,
   onDelete,
+  onDuplicate,
 }: TransactionDetailProps) {
   const [showConfirmDelete, setShowConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -47,6 +50,14 @@ export function TransactionDetail({
         <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100 truncate flex-1">
           {transaction.description}
         </h2>
+        {onDuplicate && (
+          <button
+            onClick={onDuplicate}
+            className="text-blue-600 text-sm font-medium px-2"
+          >
+            Duplicate
+          </button>
+        )}
         <button
           onClick={onEdit}
           className="text-blue-600 text-sm font-medium px-2"

@@ -51,7 +51,7 @@ export function RecurringEditor({ onDone }: { onDone: () => void }) {
     loadRules().finally(() => setLoading(false));
   }, [loadRules]);
 
-  const loadFromExisting = (rule: ForecastRule) => {
+  const loadFromExisting = (rule: ForecastRule, asCopy = false) => {
     setPeriod(rule.period);
     setDescription(rule.description);
     setLines(
@@ -62,7 +62,8 @@ export function RecurringEditor({ onDone }: { onDone: () => void }) {
       }))
     );
     setError(null);
-    setEditingLine(rule.line);
+    // editingLine null means "save as new", which is what duplicating wants.
+    setEditingLine(asCopy ? null : rule.line);
     setEditing(true);
   };
 
@@ -242,6 +243,12 @@ export function RecurringEditor({ onDone }: { onDone: () => void }) {
                         Edit
                       </button>
                       <button
+                        onClick={() => loadFromExisting(rule, true)}
+                        className="text-xs text-blue-600 dark:text-blue-400 font-medium"
+                      >
+                        Copy
+                      </button>
+                      <button
                         onClick={() => handleDelete(rule)}
                         disabled={deletingLine === rule.line}
                         className="text-xs text-red-600 dark:text-red-400 font-medium disabled:opacity-50"
@@ -291,7 +298,7 @@ export function RecurringEditor({ onDone }: { onDone: () => void }) {
           &larr;
         </button>
         <h2 className="text-base font-semibold text-gray-900 dark:text-gray-100">
-          {editingLine !== null ? "Edit Recurring" : "New Recurring"}
+          {editingLine !== null ? "Edit Rule" : "New Rule"}
         </h2>
       </div>
 

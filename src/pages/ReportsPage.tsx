@@ -1000,11 +1000,21 @@ export function ReportsPage() {
     );
   }
 
-  const nwData = netWorth.map((p) => ({ date: p.date.slice(0, 7), value: parseFloat(p.value) }));
+  // Series step with the range, so truncating to YYYY-MM would collapse
+  // several daily points onto one label.
+  const axisLabel = (points: { date: string }[]) => {
+    const months = new Set(points.map((p) => p.date.slice(0, 7)));
+    return months.size === points.length
+      ? (d: string) => d.slice(0, 7)
+      : (d: string) => d.slice(5);
+  };
+  const nwLabel = axisLabel(netWorth);
+  const nwData = netWorth.map((p) => ({ date: nwLabel(p.date), value: parseFloat(p.value) }));
   const ieData = incomeExpense.map((p) => ({ period: p.period, income: parseFloat(p.income), expenses: parseFloat(p.expenses) }));
   const pieData = expenseBreakdown.map((s) => ({ name: s.name, value: parseFloat(s.value) }));
   const pieTotal = pieData.reduce((sum, d) => sum + d.value, 0);
-  const acctData = accountSeries.map((p) => ({ date: p.date.slice(0, 7), value: parseFloat(p.value) }));
+  const acctLabel = axisLabel(accountSeries);
+  const acctData = accountSeries.map((p) => ({ date: acctLabel(p.date), value: parseFloat(p.value) }));
 
   return (
     <div className="flex flex-col h-full">

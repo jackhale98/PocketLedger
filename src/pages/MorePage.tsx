@@ -103,7 +103,9 @@ export function MorePage() {
             Journals
           </h2>
         </div>
-        <div className="flex-1 overflow-y-auto overflow-x-hidden p-4 flex justify-center">
+        {/* items-start matters: a stretched flex item is capped at the
+            container's height, so its content overflows without scrolling. */}
+        <div className="flex-1 overflow-y-auto overflow-x-hidden p-4 flex justify-center items-start">
           <MobileJournalPicker
             mode="switch"
             showCreate
