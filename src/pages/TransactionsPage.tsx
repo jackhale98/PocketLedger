@@ -145,13 +145,16 @@ export function TransactionsPage() {
         defaultCurrency={defaultCurrency}
         prefill={prefill}
         title={editTransaction ? "Edit Transaction" : "New Transaction"}
-        onSave={async (txn) => {
+        // Editing rewrites the transaction in whichever file owns it, so the
+        // destination only needs choosing when creating one.
+        chooseFile={editIndex === null}
+        onSave={async (txn, fileIndex) => {
           if (editIndex !== null) {
             await api.updateTransaction(editIndex, txn);
             await refresh();
             setEditIndex(null);
           } else {
-            await addTransaction(txn);
+            await addTransaction(txn, fileIndex);
             setShowForm(false);
           }
         }}

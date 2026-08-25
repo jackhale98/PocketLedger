@@ -34,6 +34,7 @@ pub fn run() {
             commands::journal::save_journal,
             commands::journal::create_journal,
             commands::journal::add_transaction,
+            commands::journal::list_journal_files,
             commands::journal::update_transaction,
             commands::journal::delete_transaction,
             commands::journal::suggest_accounts,

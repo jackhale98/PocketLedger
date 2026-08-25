@@ -30,6 +30,15 @@ export interface PostingSummary {
   comment: string | null;
 }
 
+/** A file participating in the loaded journal */
+export interface JournalFileInfo {
+  index: number;
+  name: string;
+  path: string;
+  /** The file that was opened; the rest arrived via `include` */
+  isMain: boolean;
+}
+
 /** Input for creating a new transaction */
 export interface NewTransaction {
   date: string;

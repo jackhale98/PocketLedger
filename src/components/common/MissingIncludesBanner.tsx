@@ -6,7 +6,13 @@ import { useJournalStore } from "../../store/journalStore";
 /** Shown when a journal's `include` lines point at files the app can't see.
  *  On iOS the picker hands over one file at a time, so importing a main
  *  journal alone leaves every include dangling — offer to fetch them. */
-export function MissingIncludesBanner({ missing }: { missing: string[] }) {
+export function MissingIncludesBanner({
+  missing,
+  onDismiss,
+}: {
+  missing: string[];
+  onDismiss: () => void;
+}) {
   const { currentPath, openJournal } = useJournalStore();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -33,9 +39,14 @@ export function MissingIncludesBanner({ missing }: { missing: string[] }) {
 
   return (
     <div className="bg-amber-50 dark:bg-amber-900/20 px-4 py-2 space-y-1.5">
-      <div className="text-xs text-amber-800 dark:text-amber-300 break-words">
-        {missing.length} included {missing.length === 1 ? "file is" : "files are"} missing:{" "}
-        <span className="font-mono">{missing.join(", ")}</span>
+      <div className="flex items-start justify-between gap-2">
+        <div className="text-xs text-amber-800 dark:text-amber-300 break-words min-w-0 max-h-20 overflow-y-auto">
+          {missing.length} included {missing.length === 1 ? "file is" : "files are"} missing:{" "}
+          <span className="font-mono">{missing.join(", ")}</span>
+        </div>
+        <button onClick={onDismiss} className="text-xs text-amber-700 dark:text-amber-400 shrink-0 px-2 py-1">
+          Dismiss
+        </button>
       </div>
       <div className="text-xs text-amber-700/80 dark:text-amber-400/80 break-words">
         They need to sit next to your main journal in this app. Import them, or

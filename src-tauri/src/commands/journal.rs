@@ -404,14 +404,30 @@ pub fn apply_append_to_main(
     app_state: &mut crate::AppState,
     addition: &str,
 ) -> Result<JournalSummary, String> {
+    apply_append_to_file(app_state, 0, addition)
+}
+
+/// Append to one of the journal's files. Which file matters: a journal split
+/// by year keeps each year's entries in its own file, and writing everything
+/// into the main file would both misplace the entry and put the diff in the
+/// wrong place for version control.
+pub fn apply_append_to_file(
+    app_state: &mut crate::AppState,
+    file_idx: usize,
+    addition: &str,
+) -> Result<JournalSummary, String> {
     let loaded = app_state.journal.as_ref().ok_or("No journal loaded")?;
-    let mut new_text = loaded.main_text().to_string();
-    if !new_text.ends_with('\n') {
+    let file = loaded
+        .files
+        .get(file_idx)
+        .ok_or("That journal file is no longer loaded")?;
+    let mut new_text = file.text.clone();
+    if !new_text.is_empty() && !new_text.ends_with('\n') {
         new_text.push('\n');
     }
     new_text.push('\n');
     new_text.push_str(addition);
-    apply_file_edit(app_state, 0, new_text)
+    apply_file_edit(app_state, file_idx, new_text)
 }
 
 // ─── Building transactions from UI input ───
@@ -725,9 +741,45 @@ pub async fn save_journal(
     atomic_write(loaded.source_path(), loaded.main_text())
 }
 
+/// A file participating in the loaded journal, for choosing where new
+/// transactions go.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JournalFileInfo {
+    pub index: usize,
+    pub name: String,
+    pub path: String,
+    /// files[0] is the file that was opened; the rest arrived via `include`.
+    pub is_main: bool,
+}
+
+#[tauri::command]
+pub async fn list_journal_files(
+    state: State<'_, Mutex<crate::AppState>>,
+) -> Result<Vec<JournalFileInfo>, String> {
+    let app_state = state.lock().map_err(|e| e.to_string())?;
+    let loaded = app_state.journal.as_ref().ok_or("No journal loaded")?;
+    Ok(loaded
+        .files
+        .iter()
+        .enumerate()
+        .map(|(index, f)| JournalFileInfo {
+            index,
+            name: f
+                .path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| f.path.display().to_string()),
+            path: f.path.to_string_lossy().into_owned(),
+            is_main: index == 0,
+        })
+        .collect())
+}
+
 #[tauri::command]
 pub async fn add_transaction(
     txn: NewTransaction,
+    file_index: Option<usize>,
     state: State<'_, Mutex<crate::AppState>>,
 ) -> Result<JournalSummary, String> {
     let mut app_state = state.lock().map_err(|e| e.to_string())?;
@@ -741,7 +793,7 @@ pub async fn add_transaction(
         .clone();
     let txn_text = writer::write_transaction(&ast_txn, &config);
 
-    apply_append_to_main(&mut app_state, &txn_text)
+    apply_append_to_file(&mut app_state, file_index.unwrap_or(0), &txn_text)
 }
 
 #[tauri::command]
@@ -1215,6 +1267,39 @@ mod tests {
         // External edit still on disk.
         let after = std::fs::read_to_string(&main).unwrap();
         assert!(after.contains("External"));
+    }
+
+    #[test]
+    fn missing_includes_are_reported_by_name() {
+        // The names must survive as written, so the UI can say exactly which
+        // files to import rather than only logging a warning line.
+        let dir = temp_dir("missing-includes");
+        let main = dir.join("main.journal");
+        std::fs::write(
+            &main,
+            "include 2024.journal\ninclude prices.journal\n\n2024-01-01 T\n    a  $1.00\n    b\n",
+        )
+        .unwrap();
+
+        let loaded = load_journal(&main.to_string_lossy()).unwrap();
+        assert_eq!(
+            loaded.missing_includes,
+            vec!["2024.journal".to_string(), "prices.journal".to_string()]
+        );
+        // The main file's own transactions still load.
+        assert_eq!(loaded.ledger.transaction_count(), 1);
+    }
+
+    #[test]
+    fn resolved_includes_are_not_reported_missing() {
+        let dir = temp_dir("present-includes");
+        let main = dir.join("main.journal");
+        std::fs::write(dir.join("sub.journal"), "2024-01-01 S\n    a  $1.00\n    b\n").unwrap();
+        std::fs::write(&main, "include sub.journal\n").unwrap();
+
+        let loaded = load_journal(&main.to_string_lossy()).unwrap();
+        assert!(loaded.missing_includes.is_empty());
+        assert_eq!(loaded.ledger.transaction_count(), 1);
     }
 
     #[test]

@@ -1,9 +1,9 @@
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useRef, useEffect } from "react";
 import { format } from "date-fns";
 import { Autocomplete } from "../common/Autocomplete";
 import * as api from "../../api/commands";
 import { normalizeAmountInput, exactDecimalSum, isDecimalZero } from "../../utils/amount";
-import type { NewPosting } from "../../api/types";
+import type { NewPosting, JournalFileInfo } from "../../api/types";
 
 interface PrefillData {
   date: string;
@@ -17,14 +17,20 @@ interface TransactionFormProps {
   defaultCurrency?: string;
   prefill?: PrefillData;
   title?: string;
-  onSave: (txn: {
-    date: string;
-    status: string;
-    description: string;
-    comment: string | null;
-    postings: NewPosting[];
-  }) => Promise<void>;
+  onSave: (
+    txn: {
+      date: string;
+      status: string;
+      description: string;
+      comment: string | null;
+      postings: NewPosting[];
+    },
+    /** Index into listJournalFiles(); undefined means the main file. */
+    fileIndex?: number
+  ) => Promise<void>;
   onCancel: () => void;
+  /** Offer a destination file. Only meaningful when creating. */
+  chooseFile?: boolean;
 }
 
 interface PostingRow {
@@ -49,8 +55,27 @@ export function TransactionForm({
   title = "New Transaction",
   onSave,
   onCancel,
+  chooseFile = false,
 }: TransactionFormProps) {
   const [date, setDate] = useState(prefill?.date ?? format(new Date(), "yyyy-MM-dd"));
+  const [files, setFiles] = useState<JournalFileInfo[]>([]);
+  const [fileIndex, setFileIndex] = useState(0);
+
+  useEffect(() => {
+    if (!chooseFile) return;
+    api
+      .listJournalFiles()
+      .then((list) => {
+        setFiles(list);
+        // Split journals are almost always organized by year, so default to
+        // the file whose name carries the entry's year.
+        const byYear = list.find((f) => f.name.includes(date.slice(0, 4)));
+        setFileIndex(byYear ? byYear.index : 0);
+      })
+      .catch(() => setFiles([]));
+    // Mount only: re-picking as the user edits the date would fight them.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chooseFile]);
   const [status, setStatus] = useState(prefill?.status ?? "Unmarked");
   const [description, setDescription] = useState(prefill?.description ?? "");
   const [comment, setComment] = useState(prefill?.comment ?? "");
@@ -211,13 +236,16 @@ export function TransactionForm({
     submittingRef.current = true;
     setSaving(true);
     try {
-      await onSave({
-        date,
-        status,
-        description: description.trim(),
-        comment: comment.trim() || null,
-        postings: apiPostings,
-      });
+      await onSave(
+        {
+          date,
+          status,
+          description: description.trim(),
+          comment: comment.trim() || null,
+          postings: apiPostings,
+        },
+        chooseFile ? fileIndex : undefined
+      );
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
       setSaving(false);
@@ -268,6 +296,25 @@ export function TransactionForm({
             className="w-full min-w-0 max-w-full box-border px-3 py-2 border border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
           />
         </div>
+
+        {chooseFile && files.length > 1 && (
+          <div className="min-w-0">
+            <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-1">
+              Add to file
+            </label>
+            <select
+              value={fileIndex}
+              onChange={(e) => setFileIndex(Number(e.target.value))}
+              className="w-full min-w-0 truncate px-3 py-2 border border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 rounded-lg text-sm"
+            >
+              {files.map((f) => (
+                <option key={f.index} value={f.index}>
+                  {f.name}{f.isMain ? " (main)" : ""}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
 
         {/* Status */}
         <div>

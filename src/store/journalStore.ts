@@ -20,7 +20,7 @@ interface JournalState {
   openJournal: (path: string) => Promise<boolean>;
   /** Returns true on success, false on failure (error state is set). */
   switchJournal: (path: string) => Promise<boolean>;
-  addTransaction: (txn: NewTransaction) => Promise<void>;
+  addTransaction: (txn: NewTransaction, fileIndex?: number) => Promise<void>;
   refresh: () => Promise<void>;
   /** Re-read the current journal from disk. Used when the app returns to the
    *  foreground, since a git client (e.g. Working Copy pulling into the app's
@@ -81,9 +81,9 @@ export const useJournalStore = create<JournalState>((set, get) => ({
     }
   },
 
-  addTransaction: async (txn: NewTransaction) => {
+  addTransaction: async (txn: NewTransaction, fileIndex?: number) => {
     try {
-      const summary = await api.addTransaction(txn);
+      const summary = await api.addTransaction(txn, fileIndex);
       const transactions = await api.listTransactions();
       set({ summary, transactions, error: null });
     } catch (err) {

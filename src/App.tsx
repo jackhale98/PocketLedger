@@ -21,6 +21,8 @@ function App() {
     useJournalStore();
   const { defaultCurrency, lastJournalPath, loaded: settingsLoaded, loadSettings, setLastJournalPath } = useSettingsStore();
   const [isMobile, setIsMobile] = useState<boolean | null>(null);
+  const [warningsExpanded, setWarningsExpanded] = useState(false);
+  const [dismissedWarnings, setDismissedWarnings] = useState<string | null>(null);
 
   useEffect(() => {
     loadSettings();
@@ -116,6 +118,10 @@ function App() {
   const otherWarnings = (summary?.warnings ?? []).filter(
     (w) => !w.startsWith("Could not include ")
   );
+  // Warnings are per-load, so re-key dismissal on the journal + count: a
+  // reload that surfaces different problems must show them again.
+  const warningKey = `${summary?.fileName ?? ""}:${summary?.warnings?.length ?? 0}`;
+  const warningsHidden = dismissedWarnings === warningKey;
 
   const renderPage = () => {
     switch (activeTab) {
@@ -193,23 +199,47 @@ function App() {
         </div>
       </div>
 
-      {summary?.missingIncludes && summary.missingIncludes.length > 0 && (
-        <MissingIncludesBanner missing={summary.missingIncludes} />
+      {summary?.missingIncludes && summary.missingIncludes.length > 0 && !warningsHidden && (
+        <MissingIncludesBanner
+          missing={summary.missingIncludes}
+          onDismiss={() => setDismissedWarnings(warningKey)}
+        />
       )}
 
-      {/* Remaining load warnings */}
-      {otherWarnings.length > 0 && (
-        <div className="bg-yellow-50 dark:bg-yellow-900/20 px-4 py-1.5 max-h-24 overflow-y-auto">
-          {otherWarnings.map((w, i) => (
-            <div key={i} className="text-xs text-yellow-700 dark:text-yellow-400 break-words">{w}</div>
-          ))}
+      {/* Remaining load warnings, collapsed so a long list can't take the screen */}
+      {otherWarnings.length > 0 && !warningsHidden && (
+        <div className="bg-yellow-50 dark:bg-yellow-900/20 px-4 py-1.5">
+          <div className="flex items-center justify-between gap-2">
+            <button
+              onClick={() => setWarningsExpanded((v) => !v)}
+              className="flex-1 min-w-0 text-left text-xs text-yellow-800 dark:text-yellow-300 font-medium"
+            >
+              {otherWarnings.length} warning{otherWarnings.length === 1 ? "" : "s"}
+              <span className="ml-1 text-yellow-600 dark:text-yellow-500">
+                {warningsExpanded ? "\u25B4 hide" : "\u25BE show"}
+              </span>
+            </button>
+            <button
+              onClick={() => setDismissedWarnings(warningKey)}
+              className="text-xs text-yellow-700 dark:text-yellow-400 shrink-0 px-2 py-1"
+            >
+              Dismiss
+            </button>
+          </div>
+          {warningsExpanded && (
+            <div className="max-h-40 overflow-y-auto overflow-x-hidden mt-1 space-y-0.5">
+              {otherWarnings.map((w, i) => (
+                <div key={i} className="text-xs text-yellow-700 dark:text-yellow-400 break-words">{w}</div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
       {/* Error banner */}
       {error && (
         <div className="bg-red-50 dark:bg-red-900/30 px-4 py-2 flex items-start justify-between gap-2">
-          <span className="text-sm text-red-600 dark:text-red-400 min-w-0 break-words">{error}</span>
+          <span className="text-sm text-red-600 dark:text-red-400 min-w-0 break-words max-h-32 overflow-y-auto">{error}</span>
           <button
             onClick={clearError}
             className="text-xs text-red-500 ml-2 shrink-0"

@@ -27,6 +27,7 @@ import type {
   ForecastRule,
   SaveForecastPosting,
   ForecastProjection,
+  JournalFileInfo,
 } from "./types";
 
 // ─── Journal ───
@@ -59,10 +60,19 @@ export async function createJournal(
   });
 }
 
+/** Files making up the loaded journal, for choosing where entries go. */
+export async function listJournalFiles(): Promise<JournalFileInfo[]> {
+  return invoke<JournalFileInfo[]>("list_journal_files");
+}
+
 export async function addTransaction(
-  txn: NewTransaction
+  txn: NewTransaction,
+  fileIndex?: number
 ): Promise<JournalSummary> {
-  return invoke<JournalSummary>("add_transaction", { txn });
+  return invoke<JournalSummary>("add_transaction", {
+    txn,
+    fileIndex: fileIndex ?? null,
+  });
 }
 
 export async function updateTransaction(
