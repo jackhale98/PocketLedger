@@ -81,18 +81,26 @@ jobs:
             echo "Warning: Icon directories not found"
           fi
 
-      - name: Enable iOS document picker support
+      - name: Expose the app's Documents folder in Files
         run: |
+          # This pair is what makes Documents visible and editable in place
+          # under "On My iPhone > PocketHLedger", which is what lets a git
+          # client track the journals.
+          #
+          # UISupportsDocumentBrowser is deliberately NOT set: it grants the
+          # same Files access, so it adds nothing, but it declares the app a
+          # UIDocumentBrowserViewController app (we are not) and adds a
+          # "Document Storage" row to iOS Settings that cannot actually move
+          # the app's Documents directory — it only steers a document browser
+          # we don't use, so it misleads more than it helps.
           PLIST="src-tauri/gen/apple/PocketHLedger_iOS/Info.plist"
           if [ -f "$PLIST" ]; then
             sed -i '' '/<\/dict>/i\
             <key>UIFileSharingEnabled</key>\
             <true/>\
             <key>LSSupportsOpeningDocumentsInPlace</key>\
-            <true/>\
-            <key>UISupportsDocumentBrowser</key>\
             <true/>' "$PLIST"
-            echo "Patched Info.plist with document picker keys"
+            echo "Patched Info.plist with file sharing keys"
           fi
 
       - name: Declare export compliance

@@ -31,6 +31,7 @@ pub fn storage_dir(app: &AppHandle) -> Result<PathBuf, String> {
     if cfg!(target_os = "ios") {
         if let Ok(dir) = app.path().document_dir() {
             if fs::create_dir_all(&dir).is_ok() {
+                ensure_visible_in_files(&dir);
                 return Ok(dir);
             }
         }
@@ -44,6 +45,22 @@ pub fn storage_dir(app: &AppHandle) -> Result<PathBuf, String> {
         .join("journals");
     fs::create_dir_all(&dir).map_err(|e| format!("Cannot create {}: {e}", dir.display()))?;
     Ok(dir)
+}
+
+/// iOS only lists an app's Documents folder in the Files app once it holds at
+/// least one file — an empty folder simply doesn't appear, which looks like
+/// the file-sharing keys are broken. Drop a README so it's always there.
+fn ensure_visible_in_files(dir: &std::path::Path) {
+    let Ok(mut entries) = fs::read_dir(dir) else {
+        return;
+    };
+    if entries.next().is_some() {
+        return;
+    }
+    let _ = fs::write(
+        dir.join("README.txt"),
+        "PocketHLedger keeps your journals in this folder.\n\n         Files you add here appear in the app. Journals that use `include`\n         need the included files here too, alongside the main journal.\n\n         To version these files with git, use an iOS git client that can work\n         on a folder in place and point it at this folder.\n",
+    );
 }
 
 #[derive(Debug, Serialize)]

@@ -533,10 +533,15 @@ function BudgetView({ dateFrom, dateTo, currency }: { dateFrom: string; dateTo: 
             return (
               <div key={i} className="px-3 py-2.5">
                 <div className="flex justify-between items-center mb-1">
-                  <span className="text-sm text-gray-800 dark:text-gray-200 truncate" title={row.account}>
+                  <span className="text-sm text-gray-800 dark:text-gray-200 truncate min-w-0" title={row.account}>
                     {row.account.split(":").pop()}
+                    {range && (row.periodFrom !== range.from || row.periodTo !== range.to) && (
+                      <span className="ml-1 text-[10px] text-gray-400">
+                        {row.periodFrom} to {row.periodTo}
+                      </span>
+                    )}
                   </span>
-                  <span className={`text-xs font-mono ${row.overBudget ? "text-red-500" : "text-green-500"}`}>
+                  <span className={`shrink-0 ml-2 text-xs font-mono ${row.overBudget ? "text-red-500" : "text-green-500"}`}>
                     {fmtBudgetAmt(row.actual, row.commodity)} / {fmtBudgetAmt(row.budget, row.commodity)}
                   </span>
                 </div>

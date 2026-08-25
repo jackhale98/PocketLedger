@@ -164,6 +164,10 @@ export interface BudgetRow {
   overBudget: boolean;
   /** Income-style goal (negative budget): overBudget means the goal was missed */
   isIncome: boolean;
+  /** Window this row's actual was summed over — the report range clipped to
+   *  the budget's own period */
+  periodFrom: string;
+  periodTo: string;
 }
 
 /** A budget whose period yields no goal in the reported range */

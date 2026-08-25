@@ -49,6 +49,10 @@ pub struct BudgetRow {
     /// True for income-style goals (negative budget amounts): "over budget"
     /// then means the goal was missed, not exceeded.
     pub is_income: bool,
+    /// The window this row's actual was summed over — the report range
+    /// clipped to the budget's own period.
+    pub period_from: String,
+    pub period_to: String,
 }
 
 /// A data point for budget vs actual chart series.
@@ -187,37 +191,24 @@ pub fn budget_comparison(
             .unwrap_or_else(|| chrono::Local::now().date_naive())
     });
 
-    // Actual amounts per account (inclusive of children), kept as MixedAmount
-    // so valuation is commodity-correct.
-    let mut actuals: BTreeMap<String, MixedAmount> = BTreeMap::new();
-    for txn in transactions {
-        for posting in &txn.postings {
-            if posting.date < from || posting.date > to {
-                continue;
-            }
-            actuals
-                .entry(posting.account.full.clone())
-                .or_insert_with(MixedAmount::zero)
-                .add_mixed(&posting.amount);
-        }
+    // Goals per (account, commodity), together with the window each goal
+    // actually covers.
+    //
+    // Clipping the window matters: a budget bounded to 2026-05..2026-11 sitting
+    // in a journal that starts in 2020 would otherwise have four months of goal
+    // compared against six years of spending. hledger's single-column budget
+    // report has that same trap, which is why its docs steer you to `-M`; here
+    // there are no columns to fall back on, so each row is compared over its
+    // own period. A rule with no `from`/`to` covers the whole range, which is
+    // the common case and behaves exactly as before.
+    struct Goal {
+        amount: Decimal,
+        from: NaiveDate,
+        to: NaiveDate,
     }
-    // Roll leaf actuals up into parents.
-    let leaves: Vec<(String, MixedAmount)> =
-        actuals.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-    for (account, amt) in &leaves {
-        let parts: Vec<&str> = account.split(':').collect();
-        for depth in 1..parts.len() {
-            let parent = parts[..depth].join(":");
-            actuals
-                .entry(parent)
-                .or_insert_with(MixedAmount::zero)
-                .add_mixed(amt);
-        }
-    }
-
-    // Merge goals per (account, commodity).
-    let mut goals: BTreeMap<(String, String), Decimal> = BTreeMap::new();
+    let mut goals: BTreeMap<(String, String), Goal> = BTreeMap::new();
     let mut inactive = Vec::new();
+
     for budget in budgets {
         let occurrences = count_occurrences(&budget.period, from, to);
         if occurrences == 0 {
@@ -230,23 +221,54 @@ pub fn budget_comparison(
             });
             continue;
         }
+
+        let goal_from = budget.period.start.map_or(from, |s| s.max(from));
+        // `to` in a period expression is exclusive.
+        let goal_to = budget
+            .period
+            .end
+            .and_then(|e| e.pred_opt())
+            .map_or(to, |e| e.min(to));
+
         for entry in &budget.entries {
             let commodity = if entry.commodity.is_empty() {
                 target_commodity.to_string()
             } else {
                 entry.commodity.clone()
             };
-            *goals
+            let goal = goals
                 .entry((entry.account.clone(), commodity))
-                .or_insert(Decimal::ZERO) += entry.amount * Decimal::from(occurrences);
+                .or_insert(Goal {
+                    amount: Decimal::ZERO,
+                    from: goal_from,
+                    to: goal_to,
+                });
+            goal.amount += entry.amount * Decimal::from(occurrences);
+            // Several budgets can target one account; cover them all.
+            goal.from = goal.from.min(goal_from);
+            goal.to = goal.to.max(goal_to);
         }
     }
 
     let mut rows = Vec::new();
-    for ((account, commodity), budget_amount) in goals {
-        let actual_mixed = actuals.get(&account).cloned().unwrap_or_default();
+    for ((account, commodity), goal) in goals {
+        // Sum the account and its subaccounts over the goal's own window.
+        let mut actual_mixed = MixedAmount::zero();
+        for txn in transactions {
+            for posting in &txn.postings {
+                if posting.date < goal.from || posting.date > goal.to {
+                    continue;
+                }
+                let full = &posting.account.full;
+                if full == &account || full.starts_with(&format!("{account}:")) {
+                    actual_mixed.add_mixed(&posting.amount);
+                }
+            }
+        }
+
         let (actual_amount, _skipped) =
-            valued_quantity(&actual_mixed, &commodity, price_db, to);
+            valued_quantity(&actual_mixed, &commodity, price_db, goal.to);
+        let budget_amount = goal.amount;
 
         let difference = budget_amount - actual_amount;
         let percentage = if budget_amount.is_zero() {
@@ -270,10 +292,10 @@ pub fn budget_comparison(
             commodity,
             // "Worse than goal" in both directions: spent more than an
             // expense goal, or earned less than an income goal.
-            over_budget: actual_amount > budget_amount
-                && !is_income
-                || (is_income && actual_amount > budget_amount),
+            over_budget: actual_amount > budget_amount,
             is_income,
+            period_from: goal.from.to_string(),
+            period_to: goal.to.to_string(),
         });
     }
 
@@ -520,6 +542,71 @@ mod tests {
         // The reported range is the journal's own span, which is why the goal
         // falls outside it.
         assert_eq!(report.to, "2024-01-15");
+    }
+
+    #[test]
+    fn bounded_budget_compares_against_its_own_period_not_the_whole_journal() {
+        // An "all time" filter over a journal spanning years, with a budget
+        // bounded to a few months: comparing years of spending against a few
+        // months of goal produced meaningless percentages.
+        let input = concat!(
+            "~ monthly from 2024-05-01 to 2024-08-01  Gas\n",
+            "    expenses:gas  $85.00\n",
+            "    assets\n\n",
+            "2020-01-15 Old gas\n",
+            "    expenses:gas  $5000.00\n",
+            "    assets:checking\n\n",
+            "2024-05-10 Gas\n",
+            "    expenses:gas  $80.00\n",
+            "    assets:checking\n\n",
+            "2024-06-10 Gas\n",
+            "    expenses:gas  $90.00\n",
+            "    assets:checking\n\n",
+            "2024-12-01 Later gas\n",
+            "    expenses:gas  $500.00\n",
+            "    assets:checking\n",
+        );
+        let journal = parse(input).unwrap();
+        let budgets = extract_budgets(&journal);
+        let txns = resolve_transactions(&journal).unwrap();
+
+        // No date filter: the report spans 2020..2024-12 but the goal spans
+        // May-July 2024 only.
+        let report = budget_comparison(&txns, &budgets, &PriceDb::default(), "$", None, None);
+        let row = report.rows.iter().find(|r| r.account == "expenses:gas").unwrap();
+
+        // Three occurrences (May, June, July) at $85.
+        assert_eq!(row.budget, "255.00");
+        // Only the spending inside that window counts — not the 2020 entry.
+        assert_eq!(row.actual, "170.00");
+        assert_eq!(row.period_from, "2024-05-01");
+        assert_eq!(row.period_to, "2024-07-31");
+        assert!(!row.over_budget);
+    }
+
+    #[test]
+    fn unbounded_budget_still_covers_the_whole_range() {
+        let input = concat!(
+            "~ monthly  Food\n",
+            "    expenses:food  $100.00\n",
+            "    assets\n\n",
+            "2024-01-15 A\n",
+            "    expenses:food  $60.00\n",
+            "    assets:checking\n\n",
+            "2024-02-15 B\n",
+            "    expenses:food  $70.00\n",
+            "    assets:checking\n",
+        );
+        let journal = parse(input).unwrap();
+        let budgets = extract_budgets(&journal);
+        let txns = resolve_transactions(&journal).unwrap();
+
+        let report = budget_comparison(&txns, &budgets, &PriceDb::default(), "$", None, None);
+        let row = report.rows.iter().find(|r| r.account == "expenses:food").unwrap();
+        // Whole range, exactly as before the clipping change.
+        assert_eq!(row.actual, "130.00");
+        assert_eq!(row.period_from, "2024-01-15");
+        assert_eq!(row.period_to, "2024-02-15");
     }
 
     #[test]

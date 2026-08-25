@@ -366,13 +366,23 @@ export function MorePage() {
               <div className="text-xs text-gray-600 dark:text-gray-400 space-y-2">
                 <p>
                   Your journals live in this app&rsquo;s folder, which a git
-                  client can track in place. In Working Copy, open a repository,
-                  choose <span className="font-medium">Link Repository to Folder</span>,
-                  and pick On My iPhone &rsaquo; PocketHLedger.
+                  client can track in place. In Working Copy (this needs its
+                  Pro unlock), open the repository, go to{" "}
+                  <span className="font-medium">Status and Configuration</span>,
+                  tap the title menu next to the repository name, and choose{" "}
+                  <span className="font-medium">Link Repository to Folder</span>.
+                  Pick On My iPhone &rsaquo; PocketHLedger. Adding a repository
+                  with <span className="font-medium">Link external directory</span>{" "}
+                  does the same thing.
                 </p>
                 <p>
                   Commit and push from Working Copy. After you pull, return to
                   this app and it reloads the journal automatically.
+                </p>
+                <p className="text-gray-500 dark:text-gray-500">
+                  Ignore Document Storage under iOS Settings for this app. It
+                  only picks a default folder for a file browser this app
+                  doesn&rsquo;t use, and cannot move your journals.
                 </p>
               </div>
             </div>
