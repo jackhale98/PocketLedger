@@ -8,6 +8,7 @@ import * as api from "../api/commands";
 import { useSettingsStore } from "../store/settingsStore";
 import { useJournalStore } from "../store/journalStore";
 import { useNavStore, type ReportTab } from "../store/navStore";
+import { hasChildren, isHiddenUnder, toggleCollapsed, collapsibleAccounts } from "../utils/tree";
 import { DateFilter } from "../components/common/DateFilter";
 import { TransactionEditorSheet } from "../components/transactions/TransactionEditorSheet";
 import type {
@@ -40,14 +41,28 @@ function fmtBudgetAmt(value: string, commodity: string): string {
 }
 
 function StatementView({ statement, subtitle, onBack }: { statement: FinancialStatement; subtitle?: string | null; onBack: () => void }) {
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+
+  const allRows = statement.sections.flatMap((s) => s.rows);
+  const allParents = collapsibleAccounts(allRows);
+  const allCollapsed = allParents.size > 0 && allParents.size === collapsed.size;
+
   return (
     <div className="flex flex-col h-full">
       <div className="flex items-center gap-2 px-4 py-3 border-b border-gray-200 dark:border-gray-700">
         <button onClick={onBack} className="p-2 -ml-2 text-gray-600 dark:text-gray-300">&larr;</button>
-        <div className="min-w-0">
+        <div className="min-w-0 flex-1">
           <h2 className="text-base font-semibold text-gray-900 dark:text-gray-100 truncate">{statement.title}</h2>
           {subtitle && <div className="text-xs text-gray-500 dark:text-gray-400">{subtitle}</div>}
         </div>
+        {allParents.size > 0 && (
+          <button
+            onClick={() => setCollapsed(allCollapsed ? new Set() : allParents)}
+            className="text-xs text-blue-600 dark:text-blue-400 shrink-0 px-2 py-1"
+          >
+            {allCollapsed ? "Expand all" : "Collapse all"}
+          </button>
+        )}
       </div>
       <div className="flex-1 overflow-y-auto overflow-x-hidden p-4 space-y-4">
         {statement.sections.map((section, si) => (
@@ -55,12 +70,47 @@ function StatementView({ statement, subtitle, onBack }: { statement: FinancialSt
             <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 uppercase tracking-wide mb-2">{section.title}</h3>
             {section.rows.length > 0 ? (
               <div className="bg-gray-50 dark:bg-gray-800 rounded-lg divide-y divide-gray-200 dark:divide-gray-700">
-                {section.rows.map((row, ri) => (
-                  <div key={ri} className="px-3 py-2 flex justify-between" style={{ paddingLeft: `${12 + row.depth * 16}px` }}>
-                    <span className="text-sm text-gray-800 dark:text-gray-200 truncate" title={row.account}>{row.account.split(":").pop()}</span>
-                    <span className={`text-sm font-mono shrink-0 ml-2 ${parseFloat(row.amounts[0]?.quantity ?? "0") < 0 ? "text-red-500" : "text-green-500"}`}>{fmtAmt(row.amounts)}</span>
-                  </div>
-                ))}
+                {section.rows
+                  .filter((row) => !isHiddenUnder(collapsed, row.account))
+                  .map((row, ri) => {
+                    const parent = hasChildren(section.rows, row.account);
+                    const isCollapsed = collapsed.has(row.account);
+                    const amount = (
+                      <span className={`text-sm font-mono shrink-0 ml-2 ${parseFloat(row.amounts[0]?.quantity ?? "0") < 0 ? "text-red-500" : "text-green-500"}`}>{fmtAmt(row.amounts)}</span>
+                    );
+                    const label = (
+                      <span className="text-sm text-gray-800 dark:text-gray-200 truncate min-w-0" title={row.account}>
+                        {parent && (
+                          <span className="inline-block w-3 text-gray-400">{isCollapsed ? "\u25B8" : "\u25BE"}</span>
+                        )}
+                        {row.account.split(":").pop()}
+                        {/* A collapsed parent's total already includes the
+                            hidden children, so say what is folded away. */}
+                        {isCollapsed && (
+                          <span className="ml-1 text-[10px] text-gray-400">
+                            +{section.rows.filter((r) => r.account.startsWith(`${row.account}:`)).length}
+                          </span>
+                        )}
+                      </span>
+                    );
+                    const style = { paddingLeft: `${12 + row.depth * 16}px` };
+                    return parent ? (
+                      <button
+                        key={ri}
+                        onClick={() => setCollapsed(toggleCollapsed(collapsed, row.account))}
+                        className="w-full px-3 py-2 flex justify-between items-center text-left active:bg-gray-100 dark:active:bg-gray-700"
+                        style={style}
+                      >
+                        {label}
+                        {amount}
+                      </button>
+                    ) : (
+                      <div key={ri} className="px-3 py-2 flex justify-between items-center" style={style}>
+                        {label}
+                        {amount}
+                      </div>
+                    );
+                  })}
               </div>
             ) : <div className="text-sm text-gray-400 italic">No data</div>}
             <div className="flex justify-between px-3 py-2 font-semibold text-sm text-gray-900 dark:text-gray-100">
