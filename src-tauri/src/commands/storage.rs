@@ -260,6 +260,7 @@ pub fn relocate_if_transient(path: &str, app: &AppHandle) -> Result<String, Stri
 /// existing copy is reused, a conflicting one causes a numbered rename.
 #[tauri::command]
 pub async fn import_journal_file(path: String, app: AppHandle) -> Result<ImportedJournal, String> {
+    super::journal::reject_unsupported_uri(&path)?;
     import_into_storage(&normalize_path(&path), &app)
 }
 

@@ -31,6 +31,23 @@ pub(crate) fn normalize_path(path: &str) -> PathBuf {
     PathBuf::from(path)
 }
 
+/// Android's document picker returns `content://` URIs, which are opaque
+/// handles rather than paths — `std::fs` can't open them, and neither the
+/// containing folder nor a journal's `include` siblings are reachable through
+/// one. Reject them with an explanation instead of failing later with a
+/// confusing "no such file".
+pub(crate) fn reject_unsupported_uri(path: &str) -> Result<(), String> {
+    if path.starts_with("content://") {
+        return Err(
+            "This file was opened through Android's document picker, which only grants \
+             access to that single file — not to the folder, so `include` lines can't be \
+             followed. Copy your journal into the app's own folder and open it from there."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 /// One physical file participating in the journal (main file or an include).
 pub struct SourceFile {
     pub path: PathBuf,
@@ -305,7 +322,10 @@ fn atomic_write(path: &Path, content: &str) -> Result<(), String> {
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "journal".to_string());
-    let tmp = dir.join(format!(".{}.tmp-pockethledger", file_name));
+    // "~$" prefix: both Dropbox and OneDrive document that they never sync
+    // names starting with it, so a save inside a synced folder doesn't upload
+    // a temp file on every write. OneDrive also skips ".tmp".
+    let tmp = dir.join(format!("~${}.tmp", file_name));
 
     {
         let mut f = std::fs::File::create(&tmp)
@@ -329,12 +349,54 @@ fn atomic_write(path: &Path, content: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn write_backup(path: &Path, old_content: &str) {
-    let mut bak = path.as_os_str().to_owned();
-    bak.push(".bak");
+/// Save the pre-edit content into `backup_dir`, which lives outside the
+/// journal's own folder — see AppState::backup_dir. The name carries a hash of
+/// the source path so two journals called `main.journal` in different folders
+/// don't overwrite each other's backup.
+fn write_backup(backup_dir: Option<&Path>, path: &Path, old_content: &str) {
+    let Some(dir) = backup_dir else {
+        return;
+    };
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "journal".to_string());
+    let bak = dir.join(format!("{}.{:08x}.bak", name, path_hash(path)));
     // Best-effort: a failed backup must not block the save, but the backup
     // itself is written atomically so it's never half a file.
-    let _ = atomic_write(Path::new(&bak), old_content);
+    let _ = atomic_write(&bak, old_content);
+}
+
+fn path_hash(path: &Path) -> u32 {
+    // FNV-1a; only needs to separate paths, not resist collisions adversarially.
+    let mut hash: u32 = 0x811c9dc5;
+    for byte in path.to_string_lossy().as_bytes() {
+        hash ^= *byte as u32;
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    hash
+}
+
+/// Turn a read failure into something a user can act on. A journal kept in a
+/// cloud folder can be an "online only" placeholder, or momentarily locked
+/// while the sync client uploads it — neither means the file is gone, and
+/// telling the user to reload doesn't help.
+fn describe_read_failure(path: &Path, e: &std::io::Error) -> String {
+    let display = path.display();
+    match e.raw_os_error() {
+        // EDEADLK (Apple, materialising a dataless file from a context that
+        // can't) and ETIMEDOUT (download didn't finish).
+        Some(35) | Some(60) | Some(110) | Some(145) => format!(
+            "'{display}' couldn't be downloaded from your cloud storage in time. \
+             Open the folder in your sync app and mark it available offline, then try again."
+        ),
+        // Windows ERROR_SHARING_VIOLATION / ERROR_LOCK_VIOLATION.
+        Some(32) | Some(33) => format!(
+            "'{display}' is in use by another program, most likely your sync client. \
+             Wait a moment and try again."
+        ),
+        _ => format!("'{display}' can no longer be read ({e}). Reload the journal."),
+    }
 }
 
 /// Verify no file changed on disk behind our back (external editor, sync
@@ -343,6 +405,18 @@ fn check_stale(loaded: &LoadedJournal) -> Result<(), String> {
     for file in &loaded.files {
         match std::fs::read_to_string(&file.path) {
             Ok(disk) => {
+                // A file that had content and now reads empty is almost never
+                // a real edit: it's an unmaterialised cloud placeholder or a
+                // sync client mid-write. Refusing here keeps us from treating
+                // it as an external change and, worse, writing that emptiness
+                // back over the real journal.
+                if disk.is_empty() && !file.text.trim().is_empty() {
+                    return Err(format!(
+                        "'{}' read back empty, which usually means it isn't downloaded yet \
+                         or your sync client is still writing it. Nothing was changed.",
+                        file.path.display()
+                    ));
+                }
                 if disk != file.text {
                     return Err(format!(
                         "'{}' was modified outside this app since it was loaded. Reload the journal, then repeat your change.",
@@ -351,11 +425,7 @@ fn check_stale(loaded: &LoadedJournal) -> Result<(), String> {
                 }
             }
             Err(e) => {
-                return Err(format!(
-                    "'{}' can no longer be read ({}). Reload the journal.",
-                    file.path.display(),
-                    e
-                ));
+                return Err(describe_read_failure(&file.path, &e));
             }
         }
     }
@@ -389,7 +459,7 @@ pub fn apply_file_edit(
         format!("Change rejected (journal would become invalid): {}", e)
     })?;
 
-    write_backup(&target_path, &old_text);
+    write_backup(app_state.backup_dir.as_deref(), &target_path, &old_text);
     atomic_write(&target_path, &new_text)?;
 
     app_state.journal = Some(candidate);
@@ -692,6 +762,7 @@ pub async fn open_journal(
     app: tauri::AppHandle,
     state: State<'_, Mutex<crate::AppState>>,
 ) -> Result<JournalSummary, String> {
+    reject_unsupported_uri(&path)?;
     // A path in the iOS picker's Inbox (or any temp dir) is a copy the OS
     // deletes without warning — loading it directly means later writes fail
     // with "can no longer be read". Relocate into app storage first.
@@ -985,8 +1056,11 @@ mod tests {
     }
 
     fn state_with(path: &Path) -> crate::AppState {
+        // Backups land beside the journal in tests so the existing
+        // backup assertions keep working without an AppHandle.
         crate::AppState {
             journal: Some(load_journal(&path.to_string_lossy()).unwrap()),
+            backup_dir: path.parent().map(|p| p.to_path_buf()),
             generation: 0,
         }
     }
@@ -1370,9 +1444,78 @@ mod tests {
         txn.postings[1].account = "b".to_string();
         add(&mut state, &txn).unwrap();
 
-        let bak = dir.join("main.journal.bak");
-        assert!(bak.exists(), "backup file must exist");
-        assert_eq!(std::fs::read_to_string(&bak).unwrap(), original);
+        // The name carries a hash of the source path so journals of the same
+        // name in different folders don't clobber each other's backup.
+        let bak: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e == "bak"))
+            .collect();
+        assert_eq!(bak.len(), 1, "exactly one backup expected: {bak:?}");
+        assert_eq!(std::fs::read_to_string(&bak[0]).unwrap(), original);
+    }
+
+    #[test]
+    fn android_content_uris_are_refused_with_an_explanation() {
+        let err = reject_unsupported_uri("content://com.android.providers/document/1234")
+            .unwrap_err();
+        assert!(err.contains("include"), "should explain why: {err}");
+        // Ordinary paths and iOS file:// URLs still pass.
+        assert!(reject_unsupported_uri("/home/me/main.journal").is_ok());
+        assert!(reject_unsupported_uri("file:///var/mobile/main.journal").is_ok());
+    }
+
+    #[test]
+    fn a_file_that_reads_back_empty_is_refused_not_treated_as_an_edit() {
+        // The cloud-placeholder / mid-sync case. Reporting it as an external
+        // edit would be wrong, and writing over it would destroy the journal.
+        let dir = temp_dir("empty-read");
+        let main = dir.join("main.journal");
+        std::fs::write(&main, "2024-01-01 Seed\n    a  $1.00\n    b\n").unwrap();
+
+        let mut state = state_with(&main);
+        std::fs::write(&main, "").unwrap();
+
+        let mut txn = simple_txn("Added", "3.00");
+        txn.postings[0].account = "a".to_string();
+        txn.postings[1].account = "b".to_string();
+        let err = add(&mut state, &txn).unwrap_err();
+        assert!(err.contains("read back empty"), "unhelpful error: {err}");
+
+        // And the truncated file was left exactly as found, not overwritten.
+        assert_eq!(std::fs::read_to_string(&main).unwrap(), "");
+    }
+
+    #[test]
+    fn backups_go_to_the_configured_directory_not_beside_the_journal() {
+        // A journal kept in a synced folder must not get a .bak sibling on
+        // every save — that doubles upload traffic and conflict surface.
+        let dir = temp_dir("backup-elsewhere");
+        let backups = temp_dir("backup-elsewhere-store");
+        let main = dir.join("main.journal");
+        std::fs::write(&main, "2024-01-01 Seed\n    a  $1.00\n    b\n").unwrap();
+
+        let mut state = crate::AppState {
+            journal: Some(load_journal(&main.to_string_lossy()).unwrap()),
+            backup_dir: Some(backups.clone()),
+            generation: 0,
+        };
+        let mut txn = simple_txn("Added", "3.00");
+        txn.postings[0].account = "a".to_string();
+        txn.postings[1].account = "b".to_string();
+        add(&mut state, &txn).unwrap();
+
+        let siblings: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".bak"))
+            .collect();
+        assert!(siblings.is_empty(), "no .bak beside the journal: {siblings:?}");
+
+        let stored = std::fs::read_dir(&backups).unwrap().flatten().count();
+        assert_eq!(stored, 1, "backup written to the configured directory");
     }
 
     #[test]

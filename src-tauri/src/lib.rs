@@ -1,9 +1,15 @@
 mod commands;
 
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 pub struct AppState {
     pub journal: Option<commands::journal::LoadedJournal>,
+    /// Where pre-edit backups go. Deliberately outside the journal's own
+    /// folder: writing `<name>.bak` next to a journal kept in Dropbox or
+    /// OneDrive doubles the sync traffic and the conflict surface on every
+    /// save. None until setup resolves it, in which case backups are skipped.
+    pub backup_dir: Option<PathBuf>,
     /// Bumped on every journal mutation or (re)load. Long-running flows like
     /// reconciliation hold indices into the resolved transaction list; a
     /// generation mismatch means those indices are stale and must not be
@@ -15,6 +21,7 @@ impl Default for AppState {
     fn default() -> Self {
         Self {
             journal: None,
+            backup_dir: None,
             generation: 0,
         }
     }
@@ -27,6 +34,17 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .manage(Mutex::new(AppState::default()))
+        .setup(|app| {
+            use tauri::Manager;
+            let dir = app.path().app_data_dir().ok().map(|d| d.join("backups"));
+            if let Some(dir) = &dir {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            if let Ok(mut state) = app.state::<Mutex<AppState>>().lock() {
+                state.backup_dir = dir;
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             commands::journal::open_journal,
             commands::journal::get_journal_info,
