@@ -371,6 +371,28 @@ pub async fn list_accounts_with_balances(
     Ok(reports::balance_report(&txns, None, None, None))
 }
 
+/// Price history per commodity pair, for a chart of what each is worth over
+/// time.
+#[tauri::command]
+pub async fn commodity_prices(
+    state: State<'_, Mutex<crate::AppState>>,
+) -> Result<Vec<hledger_core::price_db::PriceSeries>, String> {
+    let app_state = state.lock().map_err(|e| e.to_string())?;
+    let loaded = app_state.journal.as_ref().ok_or("No journal loaded")?;
+    Ok(loaded.ledger.price_db().series())
+}
+
+#[tauri::command]
+pub async fn journal_statistics(
+    params: ReportParams,
+    state: State<'_, Mutex<crate::AppState>>,
+) -> Result<reports::JournalStatistics, String> {
+    let app_state = state.lock().map_err(|e| e.to_string())?;
+    let loaded = app_state.journal.as_ref().ok_or("No journal loaded")?;
+    let txns = transactions_for(loaded, &params)?;
+    Ok(reports::journal_statistics(&txns))
+}
+
 #[tauri::command]
 pub async fn list_commodities(
     state: State<'_, Mutex<crate::AppState>>,

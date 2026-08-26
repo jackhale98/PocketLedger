@@ -26,6 +26,8 @@ import type {
   SaveForecastPosting,
   ForecastProjection,
   JournalFileInfo,
+  PriceSeries,
+  JournalStatistics,
 } from "./types";
 
 // ─── Journal ───
@@ -192,6 +194,17 @@ export async function listAccountsWithBalances(
   return invoke<BalanceRow[]>("list_accounts_with_balances", {
     params: params ?? null,
   });
+}
+
+/** Price history per commodity pair. */
+export async function commodityPrices(): Promise<PriceSeries[]> {
+  return invoke<PriceSeries[]>("commodity_prices");
+}
+
+export async function journalStatistics(
+  params: ReportParams = {}
+): Promise<JournalStatistics> {
+  return invoke<JournalStatistics>("journal_statistics", { params });
 }
 
 export async function listCommodities(): Promise<string[]> {

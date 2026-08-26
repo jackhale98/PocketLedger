@@ -15,11 +15,12 @@ import type {
   TimeSeriesPoint, IncomeExpensePoint, PieSlice,
   FinancialStatement, BalanceRow, RegisterRow, ReportParams,
   BudgetRow, BudgetSummaryPoint, ForecastRule, InactiveBudget,
+  PriceSeries, JournalStatistics,
   AmountEntry, BalanceInterval, BalanceAccumulationMode, PeriodicBalanceReport,
   ForecastProjection, TransactionSummary,
 } from "../api/types";
 
-type DrillView = "balance-sheet" | "income-statement" | "cash-flow" | null;
+type DrillView = "balance-sheet" | "income-statement" | "cash-flow" | "commodities" | "statistics" | null;
 
 const COLORS = ["#3b82f6","#ef4444","#22c55e","#f59e0b","#8b5cf6","#ec4899","#06b6d4","#84cc16","#f97316","#6366f1"];
 
@@ -649,6 +650,161 @@ function monthRange(period: string): { from: string; to: string } {
   return { from: `${period}-01`, to: `${period}-${String(last).padStart(2, "0")}` };
 }
 
+function CommoditiesView({ onBack }: { onBack: () => void }) {
+  const [series, setSeries] = useState<PriceSeries[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    api.commodityPrices().then(setSeries).catch((e) =>
+      setError(e instanceof Error ? e.message : String(e))
+    );
+  }, []);
+
+  return (
+    <div className="flex flex-col h-full">
+      <div className="flex items-center gap-2 px-4 py-3 border-b border-gray-200 dark:border-gray-700">
+        <button onClick={onBack} className="p-2 -ml-2 text-gray-600 dark:text-gray-300">&larr;</button>
+        <h2 className="text-base font-semibold text-gray-900 dark:text-gray-100">Commodities</h2>
+      </div>
+      <div className="flex-1 overflow-y-auto overflow-x-hidden p-4 space-y-5">
+        {error && (
+          <div className="text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/30 px-3 py-2 rounded-lg break-words">{error}</div>
+        )}
+        {series === null && !error && <div className="text-sm text-gray-500 text-center py-8">Loading...</div>}
+        {series?.length === 0 && (
+          <div className="text-center py-8 space-y-2">
+            <div className="text-sm text-gray-500 dark:text-gray-400">No prices recorded</div>
+            <p className="text-xs text-gray-400 dark:text-gray-500">
+              Add P directives, or buy commodities at a cost, and their value over time appears here
+            </p>
+          </div>
+        )}
+        {series?.map((s) => {
+          const data = s.points.map((p) => ({ date: p.date.slice(2), rate: parseFloat(p.rate) }));
+          const latest = s.points[s.points.length - 1];
+          return (
+            <div key={`${s.base}/${s.quote}`}>
+              <div className="flex justify-between items-baseline mb-2 min-w-0">
+                <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 truncate">
+                  {s.base} / {s.quote}
+                </h3>
+                <span className="text-xs font-mono text-gray-500 dark:text-gray-400 shrink-0 ml-2">
+                  {latest && `${fmtAmt([{ commodity: s.quote, quantity: latest.rate }])} on ${latest.date}`}
+                </span>
+              </div>
+              {data.length > 1 ? (
+                <div className="bg-gray-50 dark:bg-gray-800 rounded-lg p-2">
+                  <ResponsiveContainer width="100%" height={140}>
+                    <LineChart data={data}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#4b5563" />
+                      <XAxis dataKey="date" tick={{ fontSize: 10, fill: "#9ca3af" }} />
+                      <YAxis tick={{ fontSize: 10, fill: "#9ca3af" }} width={56} domain={["auto", "auto"]} />
+                      <Tooltip contentStyle={{ backgroundColor: "#1f2937", border: "none", borderRadius: 8, color: "#f3f4f6" }} />
+                      <Line type="monotone" dataKey="rate" stroke="#3b82f6" strokeWidth={2} dot={false} />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+              ) : (
+                <p className="text-xs text-gray-400 dark:text-gray-500">
+                  Only one price known, so there is nothing to plot yet
+                </p>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function StatisticsView({ params, onBack }: { params: ReportParams; onBack: () => void }) {
+  const [stats, setStats] = useState<JournalStatistics | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    api.journalStatistics(params).then(setStats).catch((e) =>
+      setError(e instanceof Error ? e.message : String(e))
+    );
+    // params is rebuilt each render; the filter values inside it are the input.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [params.dateFrom, params.dateTo, params.query]);
+
+  const stat = (label: string, value: string) => (
+    <div className="bg-gray-50 dark:bg-gray-800 rounded-lg p-3">
+      <div className="text-xs text-gray-500 dark:text-gray-400">{label}</div>
+      <div className="text-sm font-semibold text-gray-900 dark:text-gray-100 font-mono">{value}</div>
+    </div>
+  );
+
+  return (
+    <div className="flex flex-col h-full">
+      <div className="flex items-center gap-2 px-4 py-3 border-b border-gray-200 dark:border-gray-700">
+        <button onClick={onBack} className="p-2 -ml-2 text-gray-600 dark:text-gray-300">&larr;</button>
+        <h2 className="text-base font-semibold text-gray-900 dark:text-gray-100">Statistics</h2>
+      </div>
+      <div className="flex-1 overflow-y-auto overflow-x-hidden p-4 space-y-4">
+        {error && (
+          <div className="text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/30 px-3 py-2 rounded-lg break-words">{error}</div>
+        )}
+        {!stats && !error && <div className="text-sm text-gray-500 text-center py-8">Loading...</div>}
+        {stats && (
+          <>
+            <div className="grid grid-cols-2 gap-2">
+              {stat("Transactions", stats.transactionCount.toLocaleString())}
+              {stat("Postings", stats.postingCount.toLocaleString())}
+              {stat("Accounts", stats.accountCount.toLocaleString())}
+              {stat("Commodities", stats.commodities.length.toLocaleString())}
+              {stat("Span", stats.daysCovered > 0 ? `${stats.daysCovered.toLocaleString()} days` : "—")}
+              {stat("Per month", stats.perMonth)}
+            </div>
+
+            {stats.firstDate && (
+              <p className="text-xs text-gray-500 dark:text-gray-400">
+                {stats.firstDate} to {stats.lastDate}
+                {stats.commodities.length > 0 && <> &middot; {stats.commodities.join(", ")}</>}
+              </p>
+            )}
+
+            {stats.activity.length > 1 && (
+              <div>
+                <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-2">Activity</h3>
+                <div className="bg-gray-50 dark:bg-gray-800 rounded-lg p-2">
+                  <ResponsiveContainer width="100%" height={140}>
+                    <BarChart data={stats.activity.map((a) => ({ period: a.period, postings: a.postings }))}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#4b5563" />
+                      <XAxis dataKey="period" tick={{ fontSize: 10, fill: "#9ca3af" }} />
+                      <YAxis tick={{ fontSize: 10, fill: "#9ca3af" }} width={40} />
+                      <Tooltip contentStyle={{ backgroundColor: "#1f2937", border: "none", borderRadius: 8, color: "#f3f4f6" }} />
+                      <Bar dataKey="postings" fill="#3b82f6" radius={[2, 2, 0, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              </div>
+            )}
+
+            {stats.busiestAccounts.length > 0 && (
+              <div>
+                <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-2">Busiest accounts</h3>
+                <div className="bg-gray-50 dark:bg-gray-800 rounded-lg divide-y divide-gray-200 dark:divide-gray-700">
+                  {stats.busiestAccounts.map((a) => (
+                    <div key={a.account} className="px-3 py-2 flex justify-between items-center gap-2 min-w-0">
+                      <span className="text-sm text-gray-800 dark:text-gray-200 truncate min-w-0" title={a.account}>{a.account}</span>
+                      <span className="shrink-0 text-right">
+                        <span className="text-sm font-mono text-gray-800 dark:text-gray-200">{a.postings}</span>
+                        <span className="block text-[10px] text-gray-400">{a.lastSeen}</span>
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 const HORIZON_OPTIONS: [number, string][] = [[3, "3m"], [6, "6m"], [12, "1y"], [24, "2y"]];
 
 /** N months from today as YYYY-MM-DD, in local time (toISOString would shift). */
@@ -1043,6 +1199,10 @@ export function ReportsPage() {
 
   const openStatement = async (type: DrillView, range?: { from: string; to: string }) => {
     if (!type) return;
+    if (type === "commodities" || type === "statistics") {
+      setDrillView(type);
+      return;
+    }
     const params = range
       ? { ...makeParams(), dateFrom: range.from, dateTo: range.to }
       : makeParams();
@@ -1057,6 +1217,13 @@ export function ReportsPage() {
       setPageError(err instanceof Error ? err.message : String(err));
     }
   };
+
+  if (drillView === "commodities") {
+    return <CommoditiesView onBack={() => setDrillView(null)} />;
+  }
+  if (drillView === "statistics") {
+    return <StatisticsView params={makeParams()} onBack={() => setDrillView(null)} />;
+  }
 
   if (drillView && statement) {
     return (
@@ -1166,7 +1333,7 @@ export function ReportsPage() {
           <div className="p-4 space-y-6">
             {/* Statement links */}
             <div className="grid grid-cols-3 gap-2">
-              {([["balance-sheet","Balance Sheet"],["income-statement","Income Stmt"],["cash-flow","Cash Flow"]] as [DrillView,string][]).map(([type,label]) => (
+              {([["balance-sheet","Balance Sheet"],["income-statement","Income Stmt"],["cash-flow","Cash Flow"],["commodities","Commodities"],["statistics","Statistics"]] as [DrillView,string][]).map(([type,label]) => (
                 <button key={type} onClick={() => openStatement(type)}
                   className="py-3 bg-gray-50 dark:bg-gray-800 rounded-lg text-sm font-medium text-gray-700 dark:text-gray-300 active:bg-gray-100 dark:active:bg-gray-700">{label}</button>
               ))}

@@ -1026,6 +1026,41 @@ mod tests {
     }
 
     #[test]
+    fn statistics_summarise_the_journal() {
+        let txns = resolve(concat!(
+            "2024-01-15 Pay\n    assets:checking  $3000\n    income:salary\n\n",
+            "2024-01-20 Grocery\n    expenses:food  $50\n    assets:checking\n\n",
+            "2024-03-15 Grocery\n    expenses:food  $60\n    assets:checking\n",
+        ));
+        let st = journal_statistics(&txns);
+
+        assert_eq!(st.transaction_count, 3);
+        assert_eq!(st.posting_count, 6);
+        // Accounts actually posted to: checking, salary, food.
+        assert_eq!(st.account_count, 3);
+        assert_eq!(st.first_date.as_deref(), Some("2024-01-15"));
+        assert_eq!(st.last_date.as_deref(), Some("2024-03-15"));
+        // checking appears in all three transactions.
+        assert_eq!(st.busiest_accounts[0].account, "assets:checking");
+        assert_eq!(st.busiest_accounts[0].postings, 3);
+        assert_eq!(st.busiest_accounts[0].last_seen, "2024-03-15");
+        // February had no activity, so it isn't a bucket.
+        assert_eq!(
+            st.activity.iter().map(|a| a.period.as_str()).collect::<Vec<_>>(),
+            vec!["2024-01", "2024-03"]
+        );
+    }
+
+    #[test]
+    fn statistics_of_an_empty_journal_do_not_divide_by_zero() {
+        let st = journal_statistics(&[]);
+        assert_eq!(st.transaction_count, 0);
+        assert_eq!(st.days_covered, 0);
+        assert_eq!(st.per_month, "0.0");
+        assert!(st.first_date.is_none());
+    }
+
+    #[test]
     fn balance_sheet_values_holdings_and_keeps_unpriceable_ones() {
         // A brokerage account holding tickers and cash rendered as several
         // separate amounts on one row, which is unreadable on a phone. With a
@@ -1453,5 +1488,108 @@ mod tests {
             assert!((val - 3089.64).abs() < 0.01,
                 "IS net USD: expected 3089.64, got {}", val);
         }
+    }
+}
+
+/// Summary facts about a journal — the shape of `hledger stats`, plus the
+/// account activity Fava's Statistics report shows.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JournalStatistics {
+    pub transaction_count: usize,
+    pub posting_count: usize,
+    /// Accounts actually posted to, not the full tree including parents.
+    pub account_count: usize,
+    pub commodities: Vec<String>,
+    pub first_date: Option<String>,
+    pub last_date: Option<String>,
+    pub days_covered: i64,
+    /// Mean transactions per month over the covered span.
+    pub per_month: String,
+    /// Busiest accounts by posting count, most first.
+    pub busiest_accounts: Vec<AccountActivity>,
+    /// Postings per month across the whole journal, oldest first.
+    pub activity: Vec<ActivityPoint>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountActivity {
+    pub account: String,
+    pub postings: usize,
+    /// Date of the most recent posting to this account.
+    pub last_seen: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActivityPoint {
+    pub period: String,
+    pub postings: usize,
+}
+
+pub fn journal_statistics(transactions: &[ResolvedTransaction]) -> JournalStatistics {
+    let mut posting_count = 0usize;
+    let mut accounts: BTreeMap<String, (usize, NaiveDate)> = BTreeMap::new();
+    let mut commodities: BTreeSet<String> = BTreeSet::new();
+    let mut per_period: BTreeMap<String, usize> = BTreeMap::new();
+    let mut first: Option<NaiveDate> = None;
+    let mut last: Option<NaiveDate> = None;
+
+    for txn in transactions {
+        first = Some(first.map_or(txn.date, |d: NaiveDate| d.min(txn.date)));
+        last = Some(last.map_or(txn.date, |d: NaiveDate| d.max(txn.date)));
+        for posting in &txn.postings {
+            posting_count += 1;
+            let entry = accounts
+                .entry(posting.account.full.clone())
+                .or_insert((0, posting.date));
+            entry.0 += 1;
+            entry.1 = entry.1.max(posting.date);
+            for commodity in posting.amount.amounts.keys() {
+                if !commodity.is_empty() {
+                    commodities.insert(commodity.clone());
+                }
+            }
+            *per_period
+                .entry(posting.date.format("%Y-%m").to_string())
+                .or_insert(0) += 1;
+        }
+    }
+
+    let days_covered = match (first, last) {
+        (Some(f), Some(l)) => (l - f).num_days() + 1,
+        _ => 0,
+    };
+    // Months rather than days: a per-day rate reads as zero for most journals.
+    let months = (days_covered as f64 / 30.44).max(1.0);
+    let per_month = format!("{:.1}", transactions.len() as f64 / months);
+
+    let mut busiest: Vec<AccountActivity> = accounts
+        .into_iter()
+        .map(|(account, (postings, last_seen))| AccountActivity {
+            account,
+            postings,
+            last_seen: last_seen.format("%Y-%m-%d").to_string(),
+        })
+        .collect();
+    busiest.sort_by(|a, b| b.postings.cmp(&a.postings).then(a.account.cmp(&b.account)));
+    let account_count = busiest.len();
+    busiest.truncate(15);
+
+    JournalStatistics {
+        transaction_count: transactions.len(),
+        posting_count,
+        account_count,
+        commodities: commodities.into_iter().collect(),
+        first_date: first.map(|d| d.format("%Y-%m-%d").to_string()),
+        last_date: last.map(|d| d.format("%Y-%m-%d").to_string()),
+        days_covered,
+        per_month,
+        busiest_accounts: busiest,
+        activity: per_period
+            .into_iter()
+            .map(|(period, postings)| ActivityPoint { period, postings })
+            .collect(),
     }
 }

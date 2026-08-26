@@ -6,6 +6,23 @@ use rust_decimal::Decimal;
 use hledger_parser::ast::{Cost, Journal, JournalItem};
 
 
+/// One point in a commodity's price history.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PricePoint {
+    pub date: String,
+    pub rate: String,
+}
+
+/// A commodity pair and everything known about its price over time.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PriceSeries {
+    pub base: String,
+    pub quote: String,
+    pub points: Vec<PricePoint>,
+}
+
 /// Price database for currency/commodity conversions.
 /// Stores historical prices and supports lookups by date.
 #[derive(Debug, Clone)]
@@ -148,6 +165,38 @@ impl PriceDb {
     }
 
     /// All commodities that have at least one price relationship.
+    /// Every priced pair with its full history, oldest first. Reverse pairs
+    /// (the inverse rates stored alongside each price) are omitted so a pair
+    /// is reported once, in the direction it was written.
+    pub fn series(&self) -> Vec<PriceSeries> {
+        let mut out: Vec<PriceSeries> = Vec::new();
+        for ((from, to), points) in &self.prices {
+            // A pair whose inverse is also stored appears twice; keep the one
+            // that was declared, which is the one with more points, falling
+            // back to a stable ordering when they match.
+            if let Some(reverse) = self.prices.get(&(to.clone(), from.clone())) {
+                if reverse.len() > points.len() || (reverse.len() == points.len() && to < from) {
+                    continue;
+                }
+            }
+            let mut points: Vec<(NaiveDate, Decimal)> = points.clone();
+            points.sort_by_key(|(d, _)| *d);
+            out.push(PriceSeries {
+                base: from.clone(),
+                quote: to.clone(),
+                points: points
+                    .into_iter()
+                    .map(|(date, rate)| PricePoint {
+                        date: date.format("%Y-%m-%d").to_string(),
+                        rate: rate.normalize().to_string(),
+                    })
+                    .collect(),
+            });
+        }
+        out.sort_by(|a, b| b.points.len().cmp(&a.points.len()).then(a.base.cmp(&b.base)));
+        out
+    }
+
     pub fn known_commodities(&self) -> Vec<String> {
         let mut set = std::collections::BTreeSet::new();
         for (f, t) in self.prices.keys() {

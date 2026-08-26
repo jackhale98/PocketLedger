@@ -106,6 +106,48 @@ export interface PeriodicBalanceReport {
   totals: AmountEntry[][];
 }
 
+/** One point in a commodity's price history */
+export interface PricePoint {
+  date: string;
+  rate: string;
+}
+
+/** A commodity pair and its price over time */
+export interface PriceSeries {
+  base: string;
+  quote: string;
+  points: PricePoint[];
+}
+
+/** How often an account is posted to */
+export interface AccountActivity {
+  account: string;
+  postings: number;
+  lastSeen: string;
+}
+
+/** Postings in one month */
+export interface ActivityPoint {
+  period: string;
+  postings: number;
+}
+
+/** Summary facts about the journal */
+export interface JournalStatistics {
+  transactionCount: number;
+  postingCount: number;
+  /** Accounts actually posted to, not the full tree including parents */
+  accountCount: number;
+  commodities: string[];
+  firstDate: string | null;
+  lastDate: string | null;
+  daysCovered: number;
+  /** Mean transactions per month over the covered span */
+  perMonth: string;
+  busiestAccounts: AccountActivity[];
+  activity: ActivityPoint[];
+}
+
 /** A row in a register report */
 export interface RegisterRow {
   date: string;

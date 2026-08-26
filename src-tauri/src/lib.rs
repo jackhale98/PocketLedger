@@ -73,6 +73,8 @@ pub fn run() {
             commands::reports::expense_breakdown_chart,
             commands::reports::list_accounts_with_balances,
             commands::reports::list_commodities,
+            commands::reports::commodity_prices,
+            commands::reports::journal_statistics,
             commands::reconciliation::start_reconciliation,
             commands::reconciliation::toggle_reconciliation_posting,
             commands::reconciliation::get_reconciliation_state,
