@@ -28,7 +28,7 @@ const THEME_OPTIONS: { value: Theme; label: string }[] = [
 ];
 
 export function MorePage() {
-  const { defaultCurrency, setDefaultCurrency, theme, setTheme, setLastJournalPath } = useSettingsStore();
+  const { defaultCurrency, setDefaultCurrency, theme, setTheme, setLastJournalPath, incognito, setIncognito } = useSettingsStore();
   const { refresh, summary, switchJournal, openJournal, currentPath } = useJournalStore();
   const [customCurrency, setCustomCurrency] = useState("");
   const [showCustom, setShowCustom] = useState(false);
@@ -238,6 +238,37 @@ export function MorePage() {
               </button>
             ))}
           </div>
+        </div>
+
+        <div className="h-2 bg-gray-100 dark:bg-gray-800" />
+
+        {/* Privacy */}
+        <div className="px-4 py-4">
+          <h2 className="text-sm font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wide mb-3">
+            Privacy
+          </h2>
+          <button
+            onClick={() => setIncognito(!incognito)}
+            className="w-full px-4 py-3 bg-gray-50 dark:bg-gray-800 rounded-lg text-sm text-left text-gray-900 dark:text-gray-100 active:bg-gray-100 dark:active:bg-gray-700 min-h-[48px] flex items-center justify-between gap-2"
+          >
+            <div className="min-w-0">
+              <div className="font-medium">Hide amounts</div>
+              <div className="text-xs text-gray-500 dark:text-gray-400">
+                Mask every figure, for use in public
+              </div>
+            </div>
+            <span
+              className={`shrink-0 w-11 h-6 rounded-full transition-colors ${
+                incognito ? "bg-blue-600" : "bg-gray-300 dark:bg-gray-600"
+              }`}
+            >
+              <span
+                className={`block w-5 h-5 mt-0.5 rounded-full bg-white transition-transform ${
+                  incognito ? "translate-x-[22px]" : "translate-x-0.5"
+                }`}
+              />
+            </span>
+          </button>
         </div>
 
         <div className="h-2 bg-gray-100 dark:bg-gray-800" />

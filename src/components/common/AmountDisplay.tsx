@@ -1,3 +1,4 @@
+import { formatAmount } from "../../utils/format";
 
 
 interface AmountDisplayProps {
@@ -19,9 +20,9 @@ export function AmountDisplay({
   const isNegative = numericValue < 0;
   const colorClass = isNegative ? "text-negative" : "text-positive";
 
-  const displayAmount = commodity
-    ? `${commodity}${amount}`
-    : amount;
+  // Through the shared formatter so this honours commodity precision and the
+  // hide-amounts setting, like every other amount in the app.
+  const displayAmount = formatAmount(amount, commodity ?? "");
 
   return (
     <span className={`font-mono tabular-nums ${colorClass} ${className}`}>

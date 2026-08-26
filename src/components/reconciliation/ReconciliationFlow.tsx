@@ -4,6 +4,7 @@ import * as api from "../../api/commands";
 import { normalizeAmountInput } from "../../utils/amount";
 import type { ReconciliationState } from "../../api/types";
 import { useSettingsStore } from "../../store/settingsStore";
+import { formatAmount } from "../../utils/format";
 
 interface ReconciliationFlowProps {
   onDone: () => void;
@@ -188,15 +189,15 @@ export function ReconciliationFlow({ onDone, onEditTransaction }: Reconciliation
         <div className="bg-gray-50 dark:bg-gray-800 rounded-lg p-3 space-y-1">
           <div className="flex justify-between text-xs text-gray-500 dark:text-gray-400">
             <span>Statement</span>
-            <span className="font-mono">{reconcState.statementCommodity}{reconcState.statementBalance}</span>
+            <span className="font-mono">{formatAmount(reconcState.statementBalance, reconcState.statementCommodity)}</span>
           </div>
           <div className="flex justify-between text-xs text-gray-500 dark:text-gray-400">
             <span>Cleared</span>
-            <span className="font-mono">{reconcState.statementCommodity}{reconcState.clearedBalance}</span>
+            <span className="font-mono">{formatAmount(reconcState.clearedBalance, reconcState.statementCommodity)}</span>
           </div>
           <div className={`flex justify-between text-sm font-semibold ${diffColor}`}>
             <span>Difference</span>
-            <span className="font-mono">{reconcState.statementCommodity}{reconcState.difference}</span>
+            <span className="font-mono">{formatAmount(reconcState.difference, reconcState.statementCommodity)}</span>
           </div>
           {reconcState.isReconciled && (
             <div className="text-center text-green-500 text-xs font-medium mt-1">Balanced! Tap Finish to save.</div>

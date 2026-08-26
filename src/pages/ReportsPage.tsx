@@ -374,9 +374,7 @@ function AccountView({ accountList, account, onAccountChange, dateFrom, dateTo, 
 }
 
 function fmtCompactEntry(a: AmountEntry): string {
-  const q = parseFloat(a.quantity);
-  const qs = q.toLocaleString(undefined, { maximumFractionDigits: 2 });
-  return a.commodity && a.commodity.length === 1 ? `${a.commodity}${qs}` : a.commodity ? `${qs} ${a.commodity}` : qs;
+  return formatAmount(a.quantity, a.commodity);
 }
 
 function BalanceCell({ amounts, bold }: { amounts: AmountEntry[]; bold?: boolean }) {

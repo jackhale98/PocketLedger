@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import * as api from "../../api/commands";
+import { formatAmount } from "../../utils/format";
 import type { CsvPreviewTransaction } from "../../api/types";
 
 type Step = "pick-files" | "preview" | "importing" | "done";
@@ -94,12 +95,7 @@ export function CsvImportFlow({ onDone }: { onDone: () => void }) {
     }
   };
 
-  const fmtAmt = (amount: string, commodity: string) => {
-    const q = parseFloat(amount);
-    const isSymbol = commodity.length === 1 && "$\u20AC\u00A3\u00A5\u20B9\u20BD\u20BF".includes(commodity);
-    const qs = q.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-    return isSymbol ? `${commodity}${qs}` : commodity ? `${qs} ${commodity}` : qs;
-  };
+  const fmtAmt = formatAmount;
 
   // Stashed copies are prefixed with a numeric nonce; show the original name.
   const fileName = (path: string) => {

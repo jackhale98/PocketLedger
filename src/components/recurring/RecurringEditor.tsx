@@ -3,6 +3,7 @@ import { Autocomplete } from "../common/Autocomplete";
 import { useSettingsStore } from "../../store/settingsStore";
 import * as api from "../../api/commands";
 import { normalizeAmountInput } from "../../utils/amount";
+import { formatAmount } from "../../utils/format";
 import type { JournalFileInfo, ForecastRule, SaveForecastPosting } from "../../api/types";
 
 const PERIOD_PRESETS = [
@@ -188,10 +189,7 @@ export function RecurringEditor({ onDone }: { onDone: () => void }) {
 
   const fmtAmt = (amount: string | null, commodity: string) => {
     if (amount === null) return "auto";
-    const q = parseFloat(amount);
-    const isSymbol = commodity.length === 1 && "$\u20AC\u00A3\u00A5\u20B9\u20BD\u20BF".includes(commodity);
-    const qs = q.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-    return isSymbol ? `${commodity}${qs}` : commodity ? `${qs} ${commodity}` : qs;
+    return formatAmount(amount, commodity);
   };
 
   // Existing rules list view

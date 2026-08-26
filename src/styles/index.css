@@ -77,3 +77,17 @@ input[type="datetime-local"] {
   min-width: 0;
   flex: 1 1 0%;
 }
+
+/* Incognito: the formatter masks amount text, but chart axis labels, tooltips
+ * and bar heights are drawn by the chart library and would still give the
+ * numbers away — blur those rather than remove the charts, so the shape of the
+ * page is unchanged and the mode is obviously on. */
+.incognito .recharts-cartesian-axis-tick-value,
+.incognito .recharts-tooltip-wrapper,
+.incognito .recharts-legend-item-text {
+  filter: blur(4px);
+}
+
+.incognito .recharts-surface {
+  filter: blur(2px);
+}

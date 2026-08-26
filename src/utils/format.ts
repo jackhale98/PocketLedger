@@ -1,3 +1,23 @@
+/** When on, every formatted amount is masked.
+ *
+ *  A module-level flag rather than a prop: amounts are formatted from dozens
+ *  of call sites, and a display toggle that has to be threaded through all of
+ *  them will be missed somewhere — which for this feature means leaking the
+ *  number it was meant to hide. */
+let incognito = false;
+
+export function setIncognito(on: boolean): void {
+  incognito = on;
+}
+
+export function isIncognito(): boolean {
+  return incognito;
+}
+
+/** Masked stand-in. Fixed width regardless of the value, since a mask that
+ *  preserved the digit count would still give the magnitude away. */
+const MASK = "\u2022\u2022\u2022";
+
 /** Decimal places present in a quantity string as the backend sent it.
  *
  *  The backend already rounds and pads each amount to its commodity's display
@@ -12,6 +32,7 @@ export function decimalsIn(quantity: string): number {
 /** Format a quantity with thousands separators, keeping exactly the decimals
  *  the backend chose. */
 export function formatQuantity(quantity: string): string {
+  if (incognito) return MASK;
   const n = parseFloat(quantity);
   if (Number.isNaN(n)) return quantity;
   const dp = decimalsIn(quantity);
@@ -27,6 +48,7 @@ const SYMBOLS = "$€£¥₹₽₿";
  *  number, codes follow it. */
 export function formatAmount(quantity: string, commodity: string): string {
   const qs = formatQuantity(quantity);
+  // Keep the commodity: which currency an account holds isn't the secret.
   if (!commodity) return qs;
   return commodity.length === 1 && SYMBOLS.includes(commodity)
     ? `${commodity}${qs}`
