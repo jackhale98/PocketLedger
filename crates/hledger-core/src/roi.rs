@@ -15,6 +15,8 @@
 //! query selects — is return, not a cash flow, and counting it as one would
 //! make every gain look like a deposit and report a return of zero.
 
+use std::collections::BTreeMap;
+
 use chrono::NaiveDate;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
@@ -50,6 +52,10 @@ pub struct RoiReport {
     pub twr_period: Option<String>,
     pub twr_annual: Option<String>,
     pub commodity: String,
+    /// Commodities the investment accounts actually hold at the end, in their
+    /// own units. Holding something other than `commodity` is what makes an
+    /// account an investment rather than a place money sits.
+    pub held_commodities: Vec<String>,
     pub flows: Vec<CashFlow>,
 }
 
@@ -72,6 +78,30 @@ fn value_on(
         }
     }
     total
+}
+
+/// Commodities with a non-zero balance in the investment accounts on `date`.
+fn held_commodities(
+    transactions: &[ResolvedTransaction],
+    investment: &Query,
+    date: NaiveDate,
+) -> Vec<String> {
+    let mut totals: BTreeMap<String, Decimal> = BTreeMap::new();
+    for txn in transactions {
+        for posting in &txn.postings {
+            if posting.date > date || !investment.matches_posting(txn, posting) {
+                continue;
+            }
+            for (commodity, qty) in &posting.amount.amounts {
+                *totals.entry(commodity.clone()).or_default() += *qty;
+            }
+        }
+    }
+    totals
+        .into_iter()
+        .filter(|(_, qty)| !qty.is_zero())
+        .map(|(commodity, _)| commodity)
+        .collect()
 }
 
 /// Money crossing into the investment, by date.
@@ -279,6 +309,7 @@ pub fn roi(
         twr_period: twr_period.map(pct),
         twr_annual: twr_annual.map(pct),
         commodity: commodity.to_string(),
+        held_commodities: held_commodities(transactions, investment, to),
         flows: flows
             .iter()
             .map(|(date, amount)| CashFlow {
@@ -286,5 +317,79 @@ pub fn roi(
                 amount: amount.round_dp(2).to_string(),
             })
             .collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::query::parse_query;
+
+    fn report(text: &str, investment: &str, pnl: &str) -> RoiReport {
+        let journal = hledger_parser::parse(text).unwrap();
+        let txns = crate::balance::resolve_transactions(&journal).unwrap();
+        roi(
+            &txns,
+            &parse_query(investment).unwrap(),
+            Some(&parse_query(pnl).unwrap()),
+            NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2024, 12, 31).unwrap(),
+            "$",
+            &crate::price_db::PriceDb::default(),
+        )
+    }
+
+    /// The default profit query the UI sends. Kept here so the two can't drift
+    /// apart silently.
+    const PNL_DEFAULT: &str = "acct:interest|dividend|gain|loss|capital|realized|unrealized|distribution|yield|commission|brokerage";
+
+    /// A salary is not a return on a current account. With the default profit
+    /// query a plain cash account must report no gain, which is what keeps the
+    /// returns panel off accounts that have none.
+    #[test]
+    fn salary_into_checking_is_not_a_return() {
+        let r = report(
+            concat!(
+                "2024-01-05 groceries\n    expenses:food      $50.00\n    assets:checking\n\n",
+                "2024-02-05 paycheck\n    assets:checking  $2000.00\n    income:salary\n",
+            ),
+            "acct:assets:checking",
+            PNL_DEFAULT,
+        );
+        assert_eq!(r.pnl, "0.00");
+        assert_eq!(r.held_commodities, vec!["$".to_string()]);
+        // No gain, so whatever the solver returns must be a flat return.
+        let irr: f64 = r.irr.as_deref().unwrap_or("0").parse().unwrap();
+        assert!(irr.abs() < 0.01, "flat account returned {irr}%");
+    }
+
+    /// Interest on a savings account is a return, and is what makes the panel
+    /// appear for an account holding nothing but the base currency.
+    #[test]
+    fn interest_counts_as_return() {
+        let r = report(
+            concat!(
+                "2024-01-01 open\n    assets:savings   $1000.00\n    assets:checking\n\n",
+                "2024-07-01 interest\n    assets:savings     $20.00\n    income:interest\n",
+            ),
+            "acct:assets:savings",
+            PNL_DEFAULT,
+        );
+        assert_eq!(r.pnl, "20.00");
+        assert!(r.irr.is_some());
+    }
+
+    /// Holding units of something other than the valuation currency is the
+    /// other signal the panel keys off.
+    #[test]
+    fn shares_are_reported_as_held_units() {
+        let r = report(
+            concat!(
+                "2024-01-01 buy\n    assets:broker    10 VTSAX @ $100.00\n    assets:checking\n",
+            ),
+            "acct:assets:broker",
+            PNL_DEFAULT,
+        );
+        assert_eq!(r.held_commodities, vec!["VTSAX".to_string()]);
     }
 }

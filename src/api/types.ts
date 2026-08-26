@@ -415,5 +415,7 @@ export interface RoiReport {
   twrPeriod: string | null;
   twrAnnual: string | null;
   commodity: string;
+  /** What the accounts hold, in their own units. */
+  heldCommodities: string[];
   flows: RoiCashFlow[];
 }

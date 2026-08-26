@@ -180,8 +180,14 @@ function StatementView({ statement, subtitle, onBack }: { statement: FinancialSt
 
 /** Accounts where investment growth is booked. Money arriving from these is
  *  return; money arriving from anywhere else is a contribution the investor
- *  made, which shouldn't be counted as performance. */
-const PNL_DEFAULT = "acct:^(income|revenues?|expenses?)(:|$)";
+ *  made, which shouldn't be counted as performance.
+ *
+ *  Deliberately narrower than "all income": a salary landing in a checking
+ *  account is not a return on that account, and counting it as one would
+ *  report a spectacular gain on an ordinary current account. Users who book
+ *  gains under some other name can widen this in the panel. */
+const PNL_DEFAULT =
+  "acct:interest|dividend|gain|loss|capital|realized|unrealized|distribution|yield|commission|brokerage";
 
 /** Money-weighted (IRR) and time-weighted (TWR) return, mirroring
  *  `hledger roi`.
@@ -227,7 +233,11 @@ function ReturnsSection({ account, dateFrom, dateTo, currency }: {
   }
   if (!report) return null;
   const gained = parseFloat(report.pnl);
-  if (!Number.isFinite(gained) || (gained === 0 && !report.irr)) return null;
+  // Show this only where there is genuinely a return to measure: the account
+  // holds something whose value moves on its own, or gains have been booked
+  // against it. Otherwise every cash account grows a panel reading zero.
+  const holdsUnits = report.heldCommodities.some((c) => c !== report.commodity);
+  if (!Number.isFinite(gained) || (!holdsUnits && gained === 0)) return null;
 
   const amt = (v: string) => formatAmount(v, report.commodity);
   const pct = (v: string | null) => (v === null ? "\u2014" : `${v}%`);
