@@ -52,6 +52,20 @@ pub struct PeriodicBalanceReport {
     pub totals: Vec<Vec<AmountEntry>>,
 }
 
+/// Convert what has a price, keep the rest in its own units — a holding with
+/// no price must not vanish from a column.
+fn value_at(
+    m: &MixedAmount,
+    target: &str,
+    price_db: &crate::price_db::PriceDb,
+    date: NaiveDate,
+) -> MixedAmount {
+    if target.is_empty() {
+        return m.clone();
+    }
+    crate::reports::convert_mixed(m, target, price_db, date)
+}
+
 fn mixed_entries(m: &MixedAmount) -> Vec<AmountEntry> {
     if m.amounts.is_empty() {
         return vec![];
@@ -140,6 +154,9 @@ pub fn periodic_balance_report(
     query: Option<&Query>,
     date_from: Option<NaiveDate>,
     date_to: Option<NaiveDate>,
+    // `target` empty leaves each commodity as it is.
+    target: &str,
+    price_db: &crate::price_db::PriceDb,
 ) -> PeriodicBalanceReport {
     let depth = depth.or_else(|| query.and_then(|q| q.depth()));
 
@@ -203,6 +220,17 @@ pub fn periodic_balance_report(
     let mut changes: BTreeMap<String, Vec<MixedAmount>> = BTreeMap::new();
     let mut opening: BTreeMap<String, MixedAmount> = BTreeMap::new();
     let n = period_starts.len();
+    // Prices are looked up at each column's own end date; the last column is
+    // capped at the report end so a partial period isn't valued in the future.
+    let period_ends: Vec<NaiveDate> = period_starts
+        .iter()
+        .map(|start| {
+            next_period(*start, interval)
+                .pred_opt()
+                .unwrap_or(*start)
+                .min(report_to)
+        })
+        .collect();
 
     for line in &lines {
         if line.date < report_from {
@@ -283,8 +311,12 @@ pub fn periodic_balance_report(
         rows.push(PeriodicBalanceRow {
             account: account.clone(),
             depth: account.matches(':').count() + 1,
-            amounts: cells.iter().map(mixed_entries).collect(),
-            total: mixed_entries(&total),
+            amounts: cells
+                .iter()
+                .enumerate()
+                .map(|(i, c)| mixed_entries(&value_at(c, target, price_db, period_ends[i])))
+                .collect(),
+            total: mixed_entries(&value_at(&total, target, price_db, report_to)),
         });
     }
 
@@ -294,7 +326,11 @@ pub fn periodic_balance_report(
             .map(|p| period_label(*p, interval))
             .collect(),
         rows,
-        totals: column_totals.iter().map(mixed_entries).collect(),
+        totals: column_totals
+            .iter()
+            .enumerate()
+            .map(|(i, c)| mixed_entries(&value_at(c, target, price_db, period_ends[i])))
+            .collect(),
     }
 }
 
@@ -345,6 +381,8 @@ mod tests {
             None,
             None,
             None,
+            "",
+            &crate::price_db::PriceDb::default(),
         );
         assert_eq!(r.periods, vec!["2024-01", "2024-02", "2024-03"]);
 
@@ -366,6 +404,8 @@ mod tests {
             None,
             None,
             None,
+            "",
+            &crate::price_db::PriceDb::default(),
         );
         let food = r.rows.iter().find(|x| x.account == "expenses:food").unwrap();
         assert_eq!(cell(food, 0), "$50");
@@ -384,6 +424,8 @@ mod tests {
             None,
             None,
             None,
+            "",
+            &crate::price_db::PriceDb::default(),
         );
         let exp = r.rows.iter().find(|x| x.account == "expenses").unwrap();
         assert_eq!(cell(exp, 0), "$50");
@@ -403,6 +445,8 @@ mod tests {
             None,
             Some(NaiveDate::from_ymd_opt(2024, 2, 1).unwrap()),
             None,
+            "",
+            &crate::price_db::PriceDb::default(),
         );
         assert_eq!(r.periods, vec!["2024-02", "2024-03"]);
         let exp = r.rows.iter().find(|x| x.account == "expenses").unwrap();
@@ -422,6 +466,8 @@ mod tests {
             None,
             None,
             None,
+            "",
+            &crate::price_db::PriceDb::default(),
         );
         assert_eq!(q.periods, vec!["2024-Q1"]);
         let y = periodic_balance_report(
@@ -432,6 +478,8 @@ mod tests {
             None,
             None,
             None,
+            "",
+            &crate::price_db::PriceDb::default(),
         );
         assert_eq!(y.periods, vec!["2024"]);
     }
@@ -448,6 +496,8 @@ mod tests {
             Some(&query),
             None,
             None,
+            "",
+            &crate::price_db::PriceDb::default(),
         );
         assert!(r.rows.iter().any(|x| x.account == "expenses:food"));
         assert!(!r.rows.iter().any(|x| x.account == "expenses:rent"));
@@ -465,6 +515,8 @@ mod tests {
             None,
             None,
             None,
+            "",
+            &crate::price_db::PriceDb::default(),
         );
         // Balanced journal: every column total is zero (expenses + assets).
         for total in &r.totals {

@@ -224,6 +224,27 @@ fn extract_tag_pairs(text: &str) -> Vec<(String, String)> {
 
 /// Parse a query string. Returns Err with a user-facing message for invalid
 /// regexes or malformed terms — silent misinterpretation would filter wrongly.
+/// Keep only the postings a query matches, dropping transactions left with
+/// none.
+///
+/// Filtering at the posting level rather than the transaction level is what
+/// makes `acct:expenses` mean "expense postings" instead of "every posting of
+/// any transaction that touches an expense account" — the latter would drag
+/// the funding side of each transaction into the totals.
+pub fn retain_matching_postings(
+    transactions: &[crate::balance::ResolvedTransaction],
+    query: &Query,
+) -> Vec<crate::balance::ResolvedTransaction> {
+    transactions
+        .iter()
+        .filter_map(|txn| {
+            let mut kept = txn.clone();
+            kept.postings.retain(|p| query.matches_posting(txn, p));
+            (!kept.postings.is_empty()).then_some(kept)
+        })
+        .collect()
+}
+
 pub fn parse_query(input: &str) -> Result<Query, String> {
     let mut query = Query::default();
 
@@ -531,6 +552,29 @@ mod tests {
         assert_eq!(matching("tag:category", &t), vec!["Coffee Shop"]);
         assert_eq!(matching("tag:category=fun", &t), vec!["Coffee Shop"]);
         assert!(matching("tag:category=boring", &t).is_empty());
+    }
+
+    #[test]
+    fn retaining_postings_keeps_only_the_matching_side() {
+        // Filtering whole transactions would drag the funding posting into an
+        // `acct:expenses` report and double the total.
+        let journal = hledger_parser::parse(concat!(
+            "2024-01-05 Groceries\n",
+            "    expenses:food     $50.00\n",
+            "    assets:checking\n\n",
+            "2024-01-06 Salary\n",
+            "    assets:checking  $500.00\n",
+            "    income:salary\n",
+        ))
+        .unwrap();
+        let txns = crate::balance::resolve_transactions(&journal).unwrap();
+
+        let q = parse_query("acct:expenses").unwrap();
+        let kept = retain_matching_postings(&txns, &q);
+
+        assert_eq!(kept.len(), 1, "the salary transaction has no expense posting");
+        assert_eq!(kept[0].postings.len(), 1, "only the expense posting survives");
+        assert_eq!(kept[0].postings[0].account.full, "expenses:food");
     }
 
     #[test]

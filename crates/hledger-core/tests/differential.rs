@@ -326,6 +326,9 @@ fn monthly_periodic_report_matches_hledger() {
             None,
             None,
             None,
+            // Unvalued: this compares against `hledger bal -M` without -V.
+            "",
+            &hledger_core::price_db::PriceDb::default(),
         );
 
         assert_eq!(

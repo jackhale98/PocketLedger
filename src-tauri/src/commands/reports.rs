@@ -5,7 +5,7 @@ use tauri::State;
 
 use hledger_core::reports;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReportParams {
     pub date_from: Option<String>,
@@ -34,15 +34,23 @@ pub fn parse_query_param(params: &ReportParams) -> Result<Option<hledger_core::q
 /// The transaction set a report should run over: real transactions, plus
 /// forecast transactions up to date_to (or six months past the last real
 /// transaction) when requested.
+/// The transaction list every report should work from: the journal's own
+/// transactions, optionally extended with the forecast, then narrowed by the
+/// query. Reports that build this list by hand silently ignore the filter the
+/// user set, which is the inconsistency this exists to prevent.
 pub fn transactions_for(
     loaded: &super::journal::LoadedJournal,
     params: &ReportParams,
-) -> Vec<hledger_core::balance::ResolvedTransaction> {
+) -> Result<Vec<hledger_core::balance::ResolvedTransaction>, String> {
     let real: Vec<_> = loaded.ledger.transactions().cloned().collect();
-    if params.forecast.unwrap_or(false) {
+    let txns = if params.forecast.unwrap_or(false) {
         hledger_core::forecast::with_forecast(&loaded.journal, &real, parse_date(&params.date_to))
     } else {
         real
+    };
+    match parse_query_param(params)? {
+        Some(q) => Ok(hledger_core::query::retain_matching_postings(&txns, &q)),
+        None => Ok(txns),
     }
 }
 
@@ -81,12 +89,17 @@ pub async fn balance_report(
     let app_state = state.lock().map_err(|e| e.to_string())?;
     let loaded = app_state.journal.as_ref().ok_or("No journal loaded")?;
 
-    let txns: Vec<_> = loaded.ledger.transactions().cloned().collect();
-    Ok(reports::balance_report(
+    let txns = transactions_for(loaded, &params)?;
+    // Valued like every other report, so the currency the user picked applies
+    // here too rather than only in the charts.
+    let commodity = resolve_target_commodity(loaded, params.target_commodity.as_deref());
+    Ok(reports::balance_report_valued(
         &txns,
         params.account_filter.as_deref(),
         parse_date(&params.date_from),
         parse_date(&params.date_to),
+        &commodity,
+        loaded.ledger.price_db(),
     ))
 }
 
@@ -99,20 +112,7 @@ pub async fn register_report(
     let app_state = state.lock().map_err(|e| e.to_string())?;
     let loaded = app_state.journal.as_ref().ok_or("No journal loaded")?;
 
-    let query = parse_query_param(&params)?;
-    let mut txns = transactions_for(loaded, &params);
-    if let Some(q) = &query {
-        // The register shows postings, so the query filters posting-level.
-        txns = txns
-            .iter()
-            .map(|txn| {
-                let mut t = txn.clone();
-                t.postings.retain(|p| q.matches_posting(txn, p));
-                t
-            })
-            .filter(|t| !t.postings.is_empty())
-            .collect();
-    }
+    let txns = transactions_for(loaded, &params)?;
     Ok(reports::register_report(
         &txns,
         &account,
@@ -148,8 +148,11 @@ pub async fn periodic_balance(
         Some(other) => return Err(format!("unknown accumulation mode '{}'", other)),
     };
 
+    // The query is still passed through: transactions_for has already applied
+    // it, but the report also reads `depth:` off it.
     let query = parse_query_param(&params)?;
-    let txns = transactions_for(loaded, &params);
+    let txns = transactions_for(loaded, &params)?;
+    let commodity = resolve_target_commodity(loaded, params.target_commodity.as_deref());
 
     Ok(hledger_core::periodic_report::periodic_balance_report(
         &txns,
@@ -159,6 +162,8 @@ pub async fn periodic_balance(
         query.as_ref(),
         parse_date(&params.date_from),
         parse_date(&params.date_to),
+        &commodity,
+        loaded.ledger.price_db(),
     ))
 }
 
@@ -171,7 +176,7 @@ pub async fn balance_sheet_report(
     let loaded = app_state.journal.as_ref().ok_or("No journal loaded")?;
 
     let commodity = resolve_target_commodity(loaded, params.target_commodity.as_deref());
-    let txns = transactions_for(loaded, &params);
+    let txns = transactions_for(loaded, &params)?;
     Ok(reports::balance_sheet(
         &txns,
         loaded.ledger.classifier(),
@@ -191,7 +196,7 @@ pub async fn income_statement_report(
     let loaded = app_state.journal.as_ref().ok_or("No journal loaded")?;
 
     let commodity = resolve_target_commodity(loaded, params.target_commodity.as_deref());
-    let txns = transactions_for(loaded, &params);
+    let txns = transactions_for(loaded, &params)?;
     Ok(reports::income_statement(
         &txns,
         loaded.ledger.classifier(),
@@ -211,7 +216,7 @@ pub async fn cash_flow_report(
     let loaded = app_state.journal.as_ref().ok_or("No journal loaded")?;
 
     let commodity = resolve_target_commodity(loaded, params.target_commodity.as_deref());
-    let txns = transactions_for(loaded, &params);
+    let txns = transactions_for(loaded, &params)?;
     Ok(reports::cash_flow(
         &txns,
         loaded.ledger.classifier(),
@@ -231,7 +236,7 @@ pub async fn net_worth_series(
     let loaded = app_state.journal.as_ref().ok_or("No journal loaded")?;
 
     let commodity = resolve_target_commodity(loaded, params.target_commodity.as_deref());
-    let txns = transactions_for(loaded, &params);
+    let txns = transactions_for(loaded, &params)?;
     Ok(reports::net_worth_series(
         &txns,
         loaded.ledger.classifier(),
@@ -252,7 +257,7 @@ pub async fn account_balance_series(
     let loaded = app_state.journal.as_ref().ok_or("No journal loaded")?;
 
     let commodity = resolve_target_commodity(loaded, params.target_commodity.as_deref());
-    let txns: Vec<_> = loaded.ledger.transactions().cloned().collect();
+    let txns = transactions_for(loaded, &params)?;
     Ok(reports::account_series(
         &txns,
         loaded.ledger.price_db(),
@@ -272,7 +277,7 @@ pub async fn income_expense_chart(
     let loaded = app_state.journal.as_ref().ok_or("No journal loaded")?;
 
     let commodity = resolve_target_commodity(loaded, params.target_commodity.as_deref());
-    let txns = transactions_for(loaded, &params);
+    let txns = transactions_for(loaded, &params)?;
     Ok(reports::income_expense_series(
         &txns,
         loaded.ledger.classifier(),
@@ -293,7 +298,7 @@ pub async fn expense_breakdown_chart(
     let loaded = app_state.journal.as_ref().ok_or("No journal loaded")?;
 
     let commodity = resolve_target_commodity(loaded, params.target_commodity.as_deref());
-    let txns: Vec<_> = loaded.ledger.transactions().cloned().collect();
+    let txns = transactions_for(loaded, &params)?;
     Ok(reports::expense_breakdown(
         &txns,
         loaded.ledger.price_db(),
@@ -323,7 +328,7 @@ pub async fn valuation_info(
     let loaded = app_state.journal.as_ref().ok_or("No journal loaded")?;
 
     let commodity = resolve_target_commodity(loaded, params.target_commodity.as_deref());
-    let txns: Vec<_> = loaded.ledger.transactions().cloned().collect();
+    let txns = transactions_for(loaded, &params)?;
     let date = parse_date(&params.date_to)
         .or_else(|| txns.last().map(|t| t.date))
         .unwrap_or_else(|| chrono::Local::now().date_naive());
@@ -345,7 +350,8 @@ pub async fn list_accounts_with_balances(
     let app_state = state.lock().map_err(|e| e.to_string())?;
     let loaded = app_state.journal.as_ref().ok_or("No journal loaded")?;
 
-    let txns: Vec<_> = loaded.ledger.transactions().cloned().collect();
+    let effective = params.clone().unwrap_or_default();
+    let txns = transactions_for(loaded, &effective)?;
 
     if let Some(params) = params {
         if let Some(target) = params.target_commodity.as_deref() {
