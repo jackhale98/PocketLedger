@@ -8,6 +8,7 @@ import * as api from "../api/commands";
 import { useSettingsStore } from "../store/settingsStore";
 import { useJournalStore } from "../store/journalStore";
 import { useNavStore, type ReportTab } from "../store/navStore";
+import { formatAmount } from "../utils/format";
 import { hasChildren, isHiddenUnder, toggleCollapsed, collapsibleAccounts } from "../utils/tree";
 import { DateFilter } from "../components/common/DateFilter";
 import { TransactionEditorSheet } from "../components/transactions/TransactionEditorSheet";
@@ -34,20 +35,11 @@ function axisLabel(points: { date: string }[]): (d: string) => string {
 }
 
 function fmtAmt(amounts: { commodity: string; quantity: string }[]): string {
-  return amounts.map((a) => {
-    const q = parseFloat(a.quantity);
-    const qs = q.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-    return a.commodity && a.commodity.length === 1 ? `${a.commodity}${qs}` : a.commodity ? `${qs} ${a.commodity}` : qs;
-  }).join(", ");
+  return amounts.map((a) => formatAmount(a.quantity, a.commodity)).join(", ");
 }
 
 function fmtBudgetAmt(value: string, commodity: string): string {
-  const q = parseFloat(value);
-  const qs = q.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  if (commodity.length === 1 && "$\u20AC\u00A3\u00A5\u20B9\u20BD\u20BF".includes(commodity)) {
-    return `${commodity}${qs}`;
-  }
-  return commodity ? `${qs} ${commodity}` : qs;
+  return formatAmount(value, commodity);
 }
 
 function StatementView({ statement, subtitle, onBack }: { statement: FinancialStatement; subtitle?: string | null; onBack: () => void }) {

@@ -93,14 +93,16 @@ pub async fn balance_report(
     // Valued like every other report, so the currency the user picked applies
     // here too rather than only in the charts.
     let commodity = resolve_target_commodity(loaded, params.target_commodity.as_deref());
-    Ok(reports::balance_report_valued(
+    let mut rows = reports::balance_report_valued(
         &txns,
         params.account_filter.as_deref(),
         parse_date(&params.date_from),
         parse_date(&params.date_to),
         &commodity,
         loaded.ledger.price_db(),
-    ))
+    );
+    hledger_core::styles::apply::balance_rows(&mut rows, loaded.ledger.styles());
+    Ok(rows)
 }
 
 #[tauri::command]
@@ -113,12 +115,14 @@ pub async fn register_report(
     let loaded = app_state.journal.as_ref().ok_or("No journal loaded")?;
 
     let txns = transactions_for(loaded, &params)?;
-    Ok(reports::register_report(
+    let mut rows = reports::register_report(
         &txns,
         &account,
         parse_date(&params.date_from),
         parse_date(&params.date_to),
-    ))
+    );
+    hledger_core::styles::apply::register_rows(&mut rows, loaded.ledger.styles());
+    Ok(rows)
 }
 
 #[tauri::command]
@@ -154,7 +158,7 @@ pub async fn periodic_balance(
     let txns = transactions_for(loaded, &params)?;
     let commodity = resolve_target_commodity(loaded, params.target_commodity.as_deref());
 
-    Ok(hledger_core::periodic_report::periodic_balance_report(
+    let mut report = hledger_core::periodic_report::periodic_balance_report(
         &txns,
         interval,
         mode,
@@ -164,7 +168,9 @@ pub async fn periodic_balance(
         parse_date(&params.date_to),
         &commodity,
         loaded.ledger.price_db(),
-    ))
+    );
+    hledger_core::styles::apply::periodic(&mut report, loaded.ledger.styles());
+    Ok(report)
 }
 
 #[tauri::command]
@@ -177,14 +183,16 @@ pub async fn balance_sheet_report(
 
     let commodity = resolve_target_commodity(loaded, params.target_commodity.as_deref());
     let txns = transactions_for(loaded, &params)?;
-    Ok(reports::balance_sheet(
+    let mut statement = reports::balance_sheet(
         &txns,
         loaded.ledger.classifier(),
         loaded.ledger.price_db(),
         &commodity,
         parse_date(&params.date_from),
         parse_date(&params.date_to),
-    ))
+    );
+    hledger_core::styles::apply::statement(&mut statement, loaded.ledger.styles());
+    Ok(statement)
 }
 
 #[tauri::command]
@@ -197,14 +205,16 @@ pub async fn income_statement_report(
 
     let commodity = resolve_target_commodity(loaded, params.target_commodity.as_deref());
     let txns = transactions_for(loaded, &params)?;
-    Ok(reports::income_statement(
+    let mut statement = reports::income_statement(
         &txns,
         loaded.ledger.classifier(),
         loaded.ledger.price_db(),
         &commodity,
         parse_date(&params.date_from),
         parse_date(&params.date_to),
-    ))
+    );
+    hledger_core::styles::apply::statement(&mut statement, loaded.ledger.styles());
+    Ok(statement)
 }
 
 #[tauri::command]
@@ -217,14 +227,16 @@ pub async fn cash_flow_report(
 
     let commodity = resolve_target_commodity(loaded, params.target_commodity.as_deref());
     let txns = transactions_for(loaded, &params)?;
-    Ok(reports::cash_flow(
+    let mut statement = reports::cash_flow(
         &txns,
         loaded.ledger.classifier(),
         loaded.ledger.price_db(),
         &commodity,
         parse_date(&params.date_from),
         parse_date(&params.date_to),
-    ))
+    );
+    hledger_core::styles::apply::statement(&mut statement, loaded.ledger.styles());
+    Ok(statement)
 }
 
 #[tauri::command]
@@ -353,22 +365,23 @@ pub async fn list_accounts_with_balances(
     let effective = params.clone().unwrap_or_default();
     let txns = transactions_for(loaded, &effective)?;
 
-    if let Some(params) = params {
-        if let Some(target) = params.target_commodity.as_deref() {
-            if !target.is_empty() {
-                return Ok(reports::balance_report_valued(
-                    &txns,
-                    params.account_filter.as_deref(),
-                    parse_date(&params.date_from),
-                    parse_date(&params.date_to),
-                    target,
-                    loaded.ledger.price_db(),
-                ));
-            }
-        }
-    }
-
-    Ok(reports::balance_report(&txns, None, None, None))
+    let mut rows = match params
+        .as_ref()
+        .and_then(|p| p.target_commodity.as_deref())
+        .filter(|t| !t.is_empty())
+    {
+        Some(target) => reports::balance_report_valued(
+            &txns,
+            params.as_ref().and_then(|p| p.account_filter.as_deref()),
+            params.as_ref().and_then(|p| parse_date(&p.date_from)),
+            params.as_ref().and_then(|p| parse_date(&p.date_to)),
+            target,
+            loaded.ledger.price_db(),
+        ),
+        None => reports::balance_report(&txns, None, None, None),
+    };
+    hledger_core::styles::apply::balance_rows(&mut rows, loaded.ledger.styles());
+    Ok(rows)
 }
 
 /// Price history per commodity pair, for a chart of what each is worth over

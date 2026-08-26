@@ -2,7 +2,12 @@ import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import * as api from "../api/commands";
 import { useNavStore } from "../store/navStore";
 import { useAccountsViewStore } from "../store/accountsViewStore";
+import { formatAmount as fmtOne } from "../utils/format";
 import type { BalanceRow } from "../api/types";
+
+function formatAmounts(amounts: { commodity: string; quantity: string }[]): string {
+  return amounts.map((a) => fmtOne(a.quantity, a.commodity)).join(", ");
+}
 
 const ACCOUNT_TYPES = [
   { value: "", label: "All" },
@@ -13,25 +18,6 @@ const ACCOUNT_TYPES = [
   { value: "equity", label: "Equity" },
 ];
 
-function formatAmount(amounts: { commodity: string; quantity: string }[]): string {
-  return amounts
-    .map((a) => {
-      const q = parseFloat(a.quantity);
-      const isSymbol = a.commodity && a.commodity.length === 1
-        && "$\u20AC\u00A3\u00A5\u20B9\u20BD\u20BF".includes(a.commodity);
-      if (isSymbol) {
-        return `${a.commodity}${q.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-      }
-      const rawParts = a.quantity.split(".");
-      const decimals = rawParts.length > 1 ? rawParts[1].replace(/0+$/, "").length : 0;
-      const formatted = q.toLocaleString(undefined, {
-        minimumFractionDigits: decimals,
-        maximumFractionDigits: Math.max(decimals, 2),
-      });
-      return a.commodity ? `${formatted} ${a.commodity}` : formatted;
-    })
-    .join(", ");
-}
 
 
 /** Case-insensitive check if account matches a type filter */
@@ -317,7 +303,7 @@ export function AccountsPage() {
                           : isNegative ? "text-red-500" : "text-green-500"
                       }`}
                     >
-                      {formatAmount(row.amounts)}
+                      {formatAmounts(row.amounts)}
                     </span>
                   )}
                 </div>

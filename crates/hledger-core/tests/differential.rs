@@ -1426,9 +1426,13 @@ fn valued_balances_match_hledger() {
                 continue;
             };
 
-            let rows = hledger_core::reports::balance_report_valued(
+            let mut rows = hledger_core::reports::balance_report_valued(
                 &txns, None, None, None, target, &price_db,
             );
+            // Format the way the app does, so this compares what the user
+            // actually sees against what the CLI prints.
+            let styles = hledger_core::styles::CommodityStyles::from_journal(&journal);
+            hledger_core::styles::apply::balance_rows(&mut rows, &styles);
             let ours: BTreeMap<String, CommodityMap> = rows
                 .iter()
                 .map(|r| {
@@ -1448,25 +1452,18 @@ fn valued_balances_match_hledger() {
                 .filter(|(_, m)| !m.is_empty())
                 .collect();
 
-            // Compare only the accounts hledger reports; our report includes
-            // parent rows that its flat output does not.
-            for (account, amounts) in &expected {
+            // Our rows are inclusive; hledger's --flat is exclusive.
+            for (account, amounts) in &rolled_up(&expected) {
                 let Some(got) = ours.get(account) else {
                     panic!("{}: -X {target} missing account {account}", file.display());
                 };
-                // hledger rounds a valued amount to the commodity's display
-                // precision; we keep full precision so downstream sums don't
-                // accumulate rounding. Compare at the precision it printed.
-                for (commodity, theirs) in amounts {
-                    let ours_q = got.get(commodity).copied().unwrap_or(Decimal::ZERO);
-                    let dp = theirs.scale();
-                    assert_eq!(
-                        ours_q.round_dp(dp),
-                        theirs.round_dp(dp),
-                        "{}: -X {target} {account} {commodity} differs",
-                        file.display()
-                    );
-                }
+                // Exact: both sides now round to the commodity's display
+                // precision, so a difference here is a real one.
+                assert_eq!(
+                    got, amounts,
+                    "{}: -X {target} account {account} differs",
+                    file.display()
+                );
             }
         }
     }
