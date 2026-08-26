@@ -24,6 +24,15 @@ type DrillView = "balance-sheet" | "income-statement" | "cash-flow" | "commoditi
 
 const COLORS = ["#3b82f6","#ef4444","#22c55e","#f59e0b","#8b5cf6","#ec4899","#06b6d4","#84cc16","#f97316","#6366f1"];
 
+/** Series step with the range, so truncating to YYYY-MM would collapse
+ *  several daily points onto one label. */
+function axisLabel(points: { date: string }[]): (d: string) => string {
+  const months = new Set(points.map((p) => p.date.slice(0, 7)));
+  return months.size === points.length
+    ? (d: string) => d.slice(0, 7)
+    : (d: string) => d.slice(5);
+}
+
 function fmtAmt(amounts: { commodity: string; quantity: string }[]): string {
   return amounts.map((a) => {
     const q = parseFloat(a.quantity);
@@ -154,9 +163,16 @@ function StatementView({ statement, subtitle, onBack }: { statement: FinancialSt
   );
 }
 
-function RegisterView({ accountList, account, onAccountChange, dateFrom, dateTo, query, currency, onChanged }: { accountList: string[]; account: string; onAccountChange: (a: string) => void; dateFrom: string; dateTo: string; query: string; currency: string; onChanged: () => void }) {
+/** Everything about one account in one place: how its balance moved, what it
+ *  did per period, and the postings behind that. Previously the balance chart
+ *  lived on Overview with its own account picker and the postings lived here
+ *  with another — two pickers for two halves of the same question. */
+function AccountView({ accountList, account, onAccountChange, dateFrom, dateTo, query, currency, onChanged }: { accountList: string[]; account: string; onAccountChange: (a: string) => void; dateFrom: string; dateTo: string; query: string; currency: string; onChanged: () => void }) {
   const [editIndex, setEditIndex] = useState<number | null>(null);
   const [rows, setRows] = useState<RegisterRow[]>([]);
+  const [series, setSeries] = useState<TimeSeriesPoint[]>([]);
+  const [periods, setPeriods] = useState<PeriodicBalanceReport | null>(null);
+  const [interval, setInterval_] = useState<BalanceInterval>("monthly");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [newestFirst, setNewestFirst] = useState(true);
@@ -164,24 +180,46 @@ function RegisterView({ accountList, account, onAccountChange, dateFrom, dateTo,
 
   const load = useCallback(async () => {
     const seq = ++loadSeq.current;
-    if (!account) { setRows([]); setError(null); setLoading(false); return; }
+    if (!account) {
+      setRows([]); setSeries([]); setPeriods(null);
+      setError(null); setLoading(false);
+      return;
+    }
     setLoading(true);
     setError(null);
+    const params = {
+      dateFrom: dateFrom || null,
+      dateTo: dateTo || null,
+      query: query.trim() || null,
+      targetCommodity: currency,
+    };
     try {
-      const data = await api.registerReport(account, { dateFrom: dateFrom || null, dateTo: dateTo || null, query: query.trim() || null, targetCommodity: currency });
+      const [reg, bal, per] = await Promise.all([
+        api.registerReport(account, params),
+        api.accountBalanceSeries(account, params),
+        api.periodicBalance(interval, "periodic", null, {
+          ...params,
+          // Scope the period table to this subtree.
+          query: [params.query, `acct:${account}`].filter(Boolean).join(" "),
+        }),
+      ]);
       if (seq !== loadSeq.current) return;
-      setRows(data);
+      setRows(reg);
+      setSeries(bal);
+      setPeriods(per);
     } catch (err) {
       if (seq !== loadSeq.current) return;
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       if (seq === loadSeq.current) setLoading(false);
     }
-  }, [account, dateFrom, dateTo, query, currency]);
+  }, [account, dateFrom, dateTo, query, currency, interval]);
 
   useEffect(() => { load(); }, [load]);
 
   const displayRows = newestFirst ? [...rows].reverse() : rows;
+  const chartLabel = axisLabel(series);
+  const chartData = series.map((p) => ({ date: chartLabel(p.date), value: parseFloat(p.value) }));
 
   if (editIndex !== null) {
     return (
@@ -211,8 +249,74 @@ function RegisterView({ accountList, account, onAccountChange, dateFrom, dateTo,
           {newestFirst ? "New \u2193" : "Old \u2191"}
         </button>
       </div>
-      {error && <div className="text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/30 px-3 py-2 rounded-lg">{error}</div>}
+      {error && <div className="text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/30 px-3 py-2 rounded-lg break-words">{error}</div>}
       {loading && <div className="text-sm text-gray-500 text-center py-4">Loading...</div>}
+      {!account && !loading && (
+        <div className="text-sm text-gray-500 dark:text-gray-400 text-center py-8">
+          Choose an account to see its balance, activity and postings
+        </div>
+      )}
+
+      {account && chartData.length > 1 && (
+        <div>
+          <h2 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-2">Balance</h2>
+          <div className="bg-gray-50 dark:bg-gray-800 rounded-lg p-2">
+            <ResponsiveContainer width="100%" height={160}>
+              <LineChart data={chartData}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#4b5563" />
+                <XAxis dataKey="date" tick={{ fontSize: 10, fill: "#9ca3af" }} />
+                <YAxis tick={{ fontSize: 10, fill: "#9ca3af" }} width={60} />
+                <Tooltip contentStyle={{ backgroundColor: "#1f2937", border: "none", borderRadius: 8, color: "#f3f4f6" }} />
+                <ReferenceLine y={0} stroke="#6b7280" />
+                <Line type="monotone" dataKey="value" stroke="#8b5cf6" strokeWidth={2} dot={false} />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+      )}
+
+      {account && periods && periods.periods.length > 0 && (
+        <div>
+          <div className="flex items-center justify-between gap-2 mb-2 min-w-0">
+            <h2 className="text-sm font-semibold text-gray-700 dark:text-gray-300 truncate">Change per period</h2>
+            <div className="flex gap-1 shrink-0">
+              {TABLE_INTERVALS.map(([iv, label]) => (
+                <button key={iv} onClick={() => setInterval_(iv)}
+                  className={`px-2 py-1 text-xs font-medium rounded ${iv === interval ? "bg-blue-600 text-white" : "bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400"}`}>
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="overflow-x-auto rounded-lg border border-gray-200 dark:border-gray-700">
+            <table className="text-xs" style={{ borderCollapse: "collapse" }}>
+              <thead>
+                <tr className="bg-gray-50 dark:bg-gray-800">
+                  <th className="px-2 py-1.5 text-left font-medium text-gray-500 dark:text-gray-400 sticky left-0 bg-gray-50 dark:bg-gray-800">Account</th>
+                  {periods.periods.map((p) => (
+                    <th key={p} className="px-2 py-1.5 text-right font-medium text-gray-500 dark:text-gray-400 whitespace-nowrap">{p}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {periods.rows.map((row, ri) => (
+                  <tr key={ri} className="border-t border-gray-100 dark:border-gray-800">
+                    <td className="px-2 py-1.5 whitespace-nowrap text-gray-800 dark:text-gray-200 sticky left-0 bg-white dark:bg-gray-900"
+                        style={{ paddingLeft: `${8 + row.depth * 12}px` }}>
+                      {row.account.split(":").pop()}
+                    </td>
+                    {row.amounts.map((cell, ci) => <BalanceCell key={ci} amounts={cell} />)}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {account && (
+        <h2 className="text-sm font-semibold text-gray-700 dark:text-gray-300">Postings</h2>
+      )}
       {!loading && !error && account && rows.length === 0 && <div className="text-sm text-gray-500 text-center py-4">No postings</div>}
       {displayRows.length > 0 && (
         <div className="divide-y divide-gray-100 dark:divide-gray-800 min-w-0">
@@ -1073,8 +1177,6 @@ export function ReportsPage() {
   const [debouncedQuery, setDebouncedQuery] = useState("");
   const [showQuery, setShowQuery] = useState(false);
   const [accountList, setAccountList] = useState<string[]>([]);
-  const [selectedAccount, setSelectedAccount] = useState("");
-  const [accountSeries, setAccountSeries] = useState<TimeSeriesPoint[]>([]);
   const [expensePrefix, setExpensePrefix] = useState<string | null>(null);
   const [expensePath, setExpensePath] = useState<string[]>([]);
   const [pageError, setPageError] = useState<string | null>(null);
@@ -1082,7 +1184,6 @@ export function ReportsPage() {
   const [valuation, setValuation] = useState<api.ValuationInfo | null>(null);
   const [forecast, setForecast] = useState(false);
   const dashboardSeq = useRef(0);
-  const seriesSeq = useRef(0);
   const drillSeq = useRef(0);
 
   useEffect(() => {
@@ -1129,17 +1230,6 @@ export function ReportsPage() {
   }, [makeParams, forecast]);
 
   useEffect(() => { loadDashboard(); }, [loadDashboard]);
-
-  useEffect(() => {
-    if (selectedAccount) {
-      const seq = ++seriesSeq.current;
-      api.accountBalanceSeries(selectedAccount, makeParams())
-        .then((data) => { if (seq === seriesSeq.current) setAccountSeries(data); })
-        .catch((err) => {
-          if (seq === seriesSeq.current) setPageError(err instanceof Error ? err.message : String(err));
-        });
-    }
-  }, [selectedAccount, makeParams]);
 
   const drillIntoExpense = async (category: string) => {
     const seq = ++drillSeq.current;
@@ -1248,21 +1338,11 @@ export function ReportsPage() {
     );
   }
 
-  // Series step with the range, so truncating to YYYY-MM would collapse
-  // several daily points onto one label.
-  const axisLabel = (points: { date: string }[]) => {
-    const months = new Set(points.map((p) => p.date.slice(0, 7)));
-    return months.size === points.length
-      ? (d: string) => d.slice(0, 7)
-      : (d: string) => d.slice(5);
-  };
   const nwLabel = axisLabel(netWorth);
   const nwData = netWorth.map((p) => ({ date: nwLabel(p.date), value: parseFloat(p.value) }));
   const ieData = incomeExpense.map((p) => ({ period: p.period, income: parseFloat(p.income), expenses: parseFloat(p.expenses) }));
   const pieData = expenseBreakdown.map((s) => ({ name: s.name, value: parseFloat(s.value) }));
   const pieTotal = pieData.reduce((sum, d) => sum + d.value, 0);
-  const acctLabel = axisLabel(accountSeries);
-  const acctData = accountSeries.map((p) => ({ date: acctLabel(p.date), value: parseFloat(p.value) }));
 
   return (
     <div className="flex flex-col h-full">
@@ -1276,7 +1356,7 @@ export function ReportsPage() {
           <h1 className="text-lg font-semibold text-gray-900 dark:text-gray-100 truncate">Reports</h1>
         </div>
         <div className="flex gap-1">
-          {([["overview", "Overview"], ["table", "Table"], ["register", "Register"], ["budget", "Budget"], ["forecast", "Forecast"]] as [ReportTab, string][]).map(([t, label]) => (
+          {([["overview", "Overview"], ["table", "Table"], ["register", "Account"], ["budget", "Budget"], ["forecast", "Forecast"]] as [ReportTab, string][]).map(([t, label]) => (
             <button key={t} onClick={() => setTab(t)}
               className={`flex-1 min-w-0 truncate py-2 text-sm font-medium rounded-lg ${t === tab ? "bg-blue-600 text-white" : "bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400"}`}>
               {label}
@@ -1343,7 +1423,7 @@ export function ReportsPage() {
         ) : tab === "table" ? (
           <div className="p-4"><TableView dateFrom={dateFrom} dateTo={dateTo} query={debouncedQuery} currency={defaultCurrency} /></div>
         ) : tab === "register" ? (
-          <div className="p-4"><RegisterView accountList={accountList} account={registerAccount} onAccountChange={setRegisterAccount} dateFrom={dateFrom} dateTo={dateTo} query={debouncedQuery} currency={defaultCurrency} onChanged={() => { refreshJournal(); loadDashboard(); }} /></div>
+          <div className="p-4"><AccountView accountList={accountList} account={registerAccount} onAccountChange={setRegisterAccount} dateFrom={dateFrom} dateTo={dateTo} query={debouncedQuery} currency={defaultCurrency} onChanged={() => { refreshJournal(); loadDashboard(); }} /></div>
         ) : loading ? (
           <div className="flex items-center justify-center h-32 text-gray-500 text-sm">Loading...</div>
         ) : (
@@ -1473,30 +1553,6 @@ export function ReportsPage() {
             )}
 
             {/* Account Growth */}
-            {accountList.length > 0 && (
-              <div>
-                <h2 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-2">Account Balance Over Time</h2>
-                <select value={selectedAccount} onChange={(e) => setSelectedAccount(e.target.value)}
-                  className="w-full mb-2 px-3 py-2 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg text-sm text-gray-900 dark:text-gray-100">
-                  <option value="">Select an account...</option>
-                  {accountList.map((n) => <option key={n} value={n}>{n}</option>)}
-                </select>
-                {selectedAccount && acctData.length > 0 && (
-                  <div className="bg-gray-50 dark:bg-gray-800 rounded-lg p-2">
-                    <ResponsiveContainer width="100%" height={180}>
-                      <LineChart data={acctData}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#4b5563" />
-                        <XAxis dataKey="date" tick={{ fontSize: 10, fill: "#9ca3af" }} />
-                        <YAxis tick={{ fontSize: 10, fill: "#9ca3af" }} width={60} />
-                        <Tooltip contentStyle={{ backgroundColor: "#1f2937", border: "none", borderRadius: 8, color: "#f3f4f6" }} />
-                        <Line type="monotone" dataKey="value" stroke="#8b5cf6" strokeWidth={2} dot={false} />
-                      </LineChart>
-                    </ResponsiveContainer>
-                  </div>
-                )}
-              </div>
-            )}
-
             {nwData.length === 0 && ieData.length === 0 && pieData.length === 0 && (
               <div className="text-center text-gray-500 text-sm py-8">Add transactions to see reports</div>
             )}
