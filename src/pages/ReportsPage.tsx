@@ -75,8 +75,21 @@ function StatementView({ statement, subtitle, onBack }: { statement: FinancialSt
                   .map((row, ri) => {
                     const parent = hasChildren(section.rows, row.account);
                     const isCollapsed = collapsed.has(row.account);
+                    // One line per commodity. Joining them squeezed the
+                    // account name out of the row entirely on a holding with
+                    // several commodities.
                     const amount = (
-                      <span className={`text-sm font-mono shrink-0 ml-2 ${parseFloat(row.amounts[0]?.quantity ?? "0") < 0 ? "text-red-500" : "text-green-500"}`}>{fmtAmt(row.amounts)}</span>
+                      <span className="text-sm font-mono shrink-0 ml-2 text-right" style={{ fontVariantNumeric: "tabular-nums" }}>
+                        {row.amounts.length === 0 ? (
+                          <span className="text-gray-400 dark:text-gray-500">&middot;</span>
+                        ) : (
+                          row.amounts.map((a, ai) => (
+                            <div key={ai} className={parseFloat(a.quantity) < 0 ? "text-red-500" : "text-green-500"}>
+                              {fmtAmt([a])}
+                            </div>
+                          ))
+                        )}
+                      </span>
                     );
                     const label = (
                       <span className="text-sm text-gray-800 dark:text-gray-200 truncate min-w-0" title={row.account}>
@@ -113,13 +126,19 @@ function StatementView({ statement, subtitle, onBack }: { statement: FinancialSt
                   })}
               </div>
             ) : <div className="text-sm text-gray-400 italic">No data</div>}
-            <div className="flex justify-between px-3 py-2 font-semibold text-sm text-gray-900 dark:text-gray-100">
-              <span>Total</span><span className="font-mono">{fmtAmt(section.total)}</span>
+            <div className="flex justify-between items-start gap-2 px-3 py-2 font-semibold text-sm text-gray-900 dark:text-gray-100">
+              <span className="shrink-0">Total</span>
+              <span className="font-mono text-right" style={{ fontVariantNumeric: "tabular-nums" }}>
+                {section.total.map((a, i) => <div key={i}>{fmtAmt([a])}</div>)}
+              </span>
             </div>
           </div>
         ))}
-        <div className="border-t-2 border-gray-300 dark:border-gray-600 pt-2 flex justify-between font-bold text-sm text-gray-900 dark:text-gray-100">
-          <span>Net</span><span className="font-mono">{fmtAmt(statement.net)}</span>
+        <div className="border-t-2 border-gray-300 dark:border-gray-600 pt-2 flex justify-between items-start gap-2 font-bold text-sm text-gray-900 dark:text-gray-100">
+          <span className="shrink-0">Net</span>
+          <span className="font-mono text-right" style={{ fontVariantNumeric: "tabular-nums" }}>
+            {statement.net.map((a, i) => <div key={i}>{fmtAmt([a])}</div>)}
+          </span>
         </div>
       </div>
     </div>

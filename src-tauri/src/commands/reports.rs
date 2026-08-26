@@ -170,10 +170,13 @@ pub async fn balance_sheet_report(
     let app_state = state.lock().map_err(|e| e.to_string())?;
     let loaded = app_state.journal.as_ref().ok_or("No journal loaded")?;
 
-    let txns: Vec<_> = loaded.ledger.transactions().cloned().collect();
+    let commodity = resolve_target_commodity(loaded, params.target_commodity.as_deref());
+    let txns = transactions_for(loaded, &params);
     Ok(reports::balance_sheet(
         &txns,
         loaded.ledger.classifier(),
+        loaded.ledger.price_db(),
+        &commodity,
         parse_date(&params.date_from),
         parse_date(&params.date_to),
     ))
@@ -187,10 +190,13 @@ pub async fn income_statement_report(
     let app_state = state.lock().map_err(|e| e.to_string())?;
     let loaded = app_state.journal.as_ref().ok_or("No journal loaded")?;
 
-    let txns: Vec<_> = loaded.ledger.transactions().cloned().collect();
+    let commodity = resolve_target_commodity(loaded, params.target_commodity.as_deref());
+    let txns = transactions_for(loaded, &params);
     Ok(reports::income_statement(
         &txns,
         loaded.ledger.classifier(),
+        loaded.ledger.price_db(),
+        &commodity,
         parse_date(&params.date_from),
         parse_date(&params.date_to),
     ))
@@ -204,10 +210,13 @@ pub async fn cash_flow_report(
     let app_state = state.lock().map_err(|e| e.to_string())?;
     let loaded = app_state.journal.as_ref().ok_or("No journal loaded")?;
 
-    let txns: Vec<_> = loaded.ledger.transactions().cloned().collect();
+    let commodity = resolve_target_commodity(loaded, params.target_commodity.as_deref());
+    let txns = transactions_for(loaded, &params);
     Ok(reports::cash_flow(
         &txns,
         loaded.ledger.classifier(),
+        loaded.ledger.price_db(),
+        &commodity,
         parse_date(&params.date_from),
         parse_date(&params.date_to),
     ))

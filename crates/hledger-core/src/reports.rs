@@ -364,12 +364,16 @@ pub fn register_report(
 pub fn balance_sheet(
     transactions: &[ResolvedTransaction],
     classifier: &AccountClassifier,
+    price_db: &PriceDb,
+    target: &str,
     _date_from: Option<NaiveDate>,
     date_to: Option<NaiveDate>,
 ) -> FinancialStatement {
-    let assets = section_by_type(transactions, classifier, &[AccountType::Asset, AccountType::Cash], None, date_to);
-    let liabilities = section_by_type(transactions, classifier, &[AccountType::Liability], None, date_to);
-    let equity = section_by_type(transactions, classifier, &[AccountType::Equity], None, date_to);
+    let on = valuation_date(transactions, date_to);
+    let value = |d| value_section(d, target, price_db, on);
+    let assets = value(section_by_type(transactions, classifier, &[AccountType::Asset, AccountType::Cash], None, date_to));
+    let liabilities = value(section_by_type(transactions, classifier, &[AccountType::Liability], None, date_to));
+    let equity = value(section_by_type(transactions, classifier, &[AccountType::Equity], None, date_to));
 
     // Net worth = assets + liabilities (liabilities are negative).
     let mut net = assets.total.clone();
@@ -390,11 +394,15 @@ pub fn balance_sheet(
 pub fn income_statement(
     transactions: &[ResolvedTransaction],
     classifier: &AccountClassifier,
+    price_db: &PriceDb,
+    target: &str,
     date_from: Option<NaiveDate>,
     date_to: Option<NaiveDate>,
 ) -> FinancialStatement {
-    let income = section_by_type(transactions, classifier, &[AccountType::Revenue], date_from, date_to);
-    let expenses = section_by_type(transactions, classifier, &[AccountType::Expense], date_from, date_to);
+    let on = valuation_date(transactions, date_to);
+    let value = |d| value_section(d, target, price_db, on);
+    let income = value(section_by_type(transactions, classifier, &[AccountType::Revenue], date_from, date_to));
+    let expenses = value(section_by_type(transactions, classifier, &[AccountType::Expense], date_from, date_to));
 
     let income_negated = income.total.negate(); // income is negative in double-entry
     let mut net = income_negated.clone();
@@ -418,6 +426,8 @@ pub fn income_statement(
 pub fn cash_flow(
     transactions: &[ResolvedTransaction],
     classifier: &AccountClassifier,
+    price_db: &PriceDb,
+    target: &str,
     date_from: Option<NaiveDate>,
     date_to: Option<NaiveDate>,
 ) -> FinancialStatement {
@@ -440,16 +450,21 @@ pub fn cash_flow(
         }
     }
 
-    let rows = rows_with_parents(balances);
+    let valued = value_section(
+        SectionData { rows: rows_with_parents(balances), total },
+        target,
+        price_db,
+        valuation_date(transactions, date_to),
+    );
 
     FinancialStatement {
         title: "Cash Flow".to_string(),
         sections: vec![StatementSection {
             title: "Cash Changes".to_string(),
-            rows,
-            total: mixed_to_entries(&total),
+            rows: valued.rows,
+            total: mixed_to_entries(&valued.total),
         }],
-        net: mixed_to_entries(&total),
+        net: mixed_to_entries(&valued.total),
     }
 }
 
@@ -700,6 +715,41 @@ struct SectionData {
     total: MixedAmount,
 }
 
+/// Value a section's rows and total, keeping commodities that have no
+/// conversion path in their own units rather than dropping them.
+/// Prices are looked up as of the report's end date, falling back to the last
+/// transaction so a report with no explicit end still uses current prices.
+fn valuation_date(transactions: &[ResolvedTransaction], date_to: Option<NaiveDate>) -> NaiveDate {
+    date_to
+        .or_else(|| transactions.iter().map(|t| t.date).max())
+        .unwrap_or_else(|| chrono::Local::now().date_naive())
+}
+
+fn value_section(data: SectionData, target: &str, price_db: &PriceDb, date: NaiveDate) -> SectionData {
+    if target.is_empty() {
+        return data;
+    }
+    SectionData {
+        rows: data
+            .rows
+            .into_iter()
+            .map(|row| {
+                let mut m = MixedAmount::zero();
+                for entry in &row.amounts {
+                    if let Ok(q) = Decimal::from_str_exact(&entry.quantity) {
+                        m.add(&entry.commodity, q);
+                    }
+                }
+                BalanceRow {
+                    amounts: mixed_to_entries(&convert_mixed(&m, target, price_db, date)),
+                    ..row
+                }
+            })
+            .collect(),
+        total: convert_mixed(&data.total, target, price_db, date),
+    }
+}
+
 fn section_by_type(
     transactions: &[ResolvedTransaction],
     classifier: &AccountClassifier,
@@ -934,7 +984,7 @@ mod tests {
             "2024-01-01 Opening\n    assets:checking  $10000\n    equity:opening\n\n\
              2024-01-05 Loan\n    assets:checking  $4000\n    liabilities:loan\n",
         );
-        let bs = balance_sheet(&txns, &classifier(), None, None);
+        let bs = balance_sheet(&txns, &classifier(), &no_prices(), "", None, None);
 
         assert_eq!(bs.sections.len(), 3);
         // Net = 14000 (assets) + -4000 (liabilities) = 10000
@@ -952,6 +1002,8 @@ mod tests {
         let bs = balance_sheet(
             &txns,
             &classifier(),
+            &no_prices(),
+            "",
             Some(NaiveDate::from_ymd_opt(2024, 3, 1).unwrap()),
             None,
         );
@@ -968,9 +1020,74 @@ mod tests {
         .unwrap();
         let txns = resolve_transactions(&journal).unwrap();
         let c = AccountClassifier::from_journal(&journal);
-        let bs = balance_sheet(&txns, &c, None, None);
+        let bs = balance_sheet(&txns, &c, &no_prices(), "", None, None);
         let assets = &bs.sections[0];
         assert!(assets.rows.iter().any(|r| r.account == "aktiva:bank"));
+    }
+
+    #[test]
+    fn balance_sheet_values_holdings_and_keeps_unpriceable_ones() {
+        // A brokerage account holding tickers and cash rendered as several
+        // separate amounts on one row, which is unreadable on a phone. With a
+        // target currency the priced holdings fold into it; a commodity with
+        // no price and no cost stays in its own units rather than vanishing.
+        let input = concat!(
+            "P 2024-02-01 GME $25.00\n\n",
+            "2024-01-10 Buy GME\n",
+            "    assets:brokerage  4 GME @ $20.00\n",
+            "    assets:checking\n\n",
+            "2024-01-11 Grant\n",
+            "    assets:brokerage  3 XYZ\n",
+            "    equity:opening   -3 XYZ\n\n",
+            "2024-01-01 Seed\n",
+            "    assets:checking  $1000.00\n",
+            "    equity:opening\n",
+        );
+        let journal = parse(input).unwrap();
+        let txns = resolve_transactions(&journal).unwrap();
+        let db = PriceDb::from_journal(&journal);
+
+        let bs = balance_sheet(
+            &txns,
+            &classifier(),
+            &db,
+            "$",
+            None,
+            Some(NaiveDate::from_ymd_opt(2024, 2, 1).unwrap()),
+        );
+        let brokerage = bs.sections[0]
+            .rows
+            .iter()
+            .find(|r| r.account == "assets:brokerage")
+            .unwrap();
+
+        // GME at the 2024-02-01 price: 4 x $25 = $100.
+        let usd = brokerage.amounts.iter().find(|a| a.commodity == "$").unwrap();
+        assert_eq!(usd.quantity, "100");
+        // XYZ was acquired without a cost and has no price directive.
+        let xyz = brokerage.amounts.iter().find(|a| a.commodity == "XYZ").unwrap();
+        assert_eq!(xyz.quantity, "3");
+    }
+
+    #[test]
+    fn balance_sheet_without_a_target_currency_is_unchanged() {
+        let input = concat!(
+            "2024-01-10 Buy\n",
+            "    assets:brokerage  4 GME @ $20.00\n",
+            "    assets:checking\n",
+        );
+        let journal = parse(input).unwrap();
+        let txns = resolve_transactions(&journal).unwrap();
+        let db = PriceDb::from_journal(&journal);
+
+        let bs = balance_sheet(&txns, &classifier(), &db, "", None, None);
+        let brokerage = bs.sections[0]
+            .rows
+            .iter()
+            .find(|r| r.account == "assets:brokerage")
+            .unwrap();
+        assert_eq!(brokerage.amounts.len(), 1);
+        assert_eq!(brokerage.amounts[0].commodity, "GME");
     }
 
     #[test]
@@ -979,7 +1096,7 @@ mod tests {
             "2024-01-15 Paycheck\n    assets:checking  $3000\n    income:salary\n\n\
              2024-01-20 Grocery\n    expenses:food  $50\n    assets:checking\n",
         );
-        let is = income_statement(&txns, &classifier(), None, None);
+        let is = income_statement(&txns, &classifier(), &no_prices(), "", None, None);
 
         assert_eq!(is.title, "Income Statement");
         assert_eq!(is.sections.len(), 2);
@@ -993,7 +1110,7 @@ mod tests {
             "2024-01-15 Pay\n    assets:bank:checking  $3000\n    income:salary\n\n\
              2024-01-20 Invest\n    assets:investments:etf  10 VTI @ $200\n    assets:bank:checking  $-2000\n",
         );
-        let cf = cash_flow(&txns, &classifier(), None, None);
+        let cf = cash_flow(&txns, &classifier(), &no_prices(), "", None, None);
         // Only the checking account changes count: 3000 - 2000 = 1000.
         let net = cf.net.iter().find(|e| e.commodity == "$").unwrap();
         assert_eq!(net.quantity, "1000");
@@ -1328,7 +1445,7 @@ mod tests {
 
         let from = NaiveDate::from_ymd_opt(2025, 2, 1).unwrap();
         let to = NaiveDate::from_ymd_opt(2025, 2, 28).unwrap();
-        let is = income_statement(&txns, &c, Some(from), Some(to));
+        let is = income_statement(&txns, &c, &no_prices(), "", Some(from), Some(to));
 
         let net_usd = is.net.iter().find(|a| a.commodity == "USD");
         if let Some(n) = net_usd {
