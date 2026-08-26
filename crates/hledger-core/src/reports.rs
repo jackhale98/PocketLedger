@@ -479,6 +479,8 @@ pub fn net_worth_series(
     target_commodity: &str,
     date_from: Option<NaiveDate>,
     date_to: Option<NaiveDate>,
+    // Pin the bucket size; None picks one from the range.
+    step: Option<SeriesStep>,
 ) -> Vec<TimeSeriesPoint> {
     if transactions.is_empty() {
         return vec![];
@@ -491,7 +493,7 @@ pub fn net_worth_series(
     let mut balance = MixedAmount::zero();
     let mut txn_idx = 0;
 
-    let step = series_step(first_date, last_date);
+    let step = step.unwrap_or_else(|| series_step(first_date, last_date));
     let mut current = period_end(first_date, step);
     while current <= period_end(last_date, step) {
         while txn_idx < transactions.len() && transactions[txn_idx].date <= current {
@@ -526,6 +528,8 @@ pub fn account_series(
     target_commodity: &str,
     date_from: Option<NaiveDate>,
     date_to: Option<NaiveDate>,
+    // Pin the bucket size; None picks one from the range.
+    step: Option<SeriesStep>,
 ) -> Vec<TimeSeriesPoint> {
     if transactions.is_empty() {
         return vec![];
@@ -538,7 +542,7 @@ pub fn account_series(
     let mut balance = MixedAmount::zero();
     let mut txn_idx = 0;
 
-    let step = series_step(first_date, last_date);
+    let step = step.unwrap_or_else(|| series_step(first_date, last_date));
     let mut current = period_end(first_date, step);
     while current <= period_end(last_date, step) {
         while txn_idx < transactions.len() && transactions[txn_idx].date <= current {
@@ -574,6 +578,8 @@ pub fn income_expense_series(
     target_commodity: &str,
     date_from: Option<NaiveDate>,
     date_to: Option<NaiveDate>,
+    // Pin the bucket size; None picks one from the range.
+    step: Option<SeriesStep>,
 ) -> Vec<IncomeExpensePoint> {
     if transactions.is_empty() {
         return vec![];
@@ -584,7 +590,7 @@ pub fn income_expense_series(
 
     let mut points = Vec::new();
 
-    let step = series_step(first_date, last_date);
+    let step = step.unwrap_or_else(|| series_step(first_date, last_date));
     let mut current_start = period_start(first_date, step);
     while current_start <= last_date {
         let current_end = period_end(current_start, step);
@@ -842,6 +848,15 @@ pub enum SeriesStep {
 
 /// Pick a step giving a readable number of points for the range: roughly a
 /// month or less daily, up to six months weekly, longer spans monthly.
+pub fn parse_series_step(name: &str) -> Option<SeriesStep> {
+    match name {
+        "daily" | "D" => Some(SeriesStep::Day),
+        "weekly" | "W" => Some(SeriesStep::Week),
+        "monthly" | "M" => Some(SeriesStep::Month),
+        _ => None,
+    }
+}
+
 pub fn series_step(from: NaiveDate, to: NaiveDate) -> SeriesStep {
     match (to - from).num_days() {
         d if d <= 45 => SeriesStep::Day,
@@ -1250,6 +1265,7 @@ mod tests {
             "$",
             Some(NaiveDate::from_ymd_opt(2024, 1, 1).unwrap()),
             Some(NaiveDate::from_ymd_opt(2024, 12, 31).unwrap()),
+            None,
         );
 
         assert!(series.len() >= 2);
@@ -1273,6 +1289,7 @@ mod tests {
             "$",
             Some(NaiveDate::from_ymd_opt(2024, 1, 1).unwrap()),
             Some(NaiveDate::from_ymd_opt(2024, 1, 31).unwrap()),
+            None,
         );
 
         assert_eq!(series.len(), 31, "expected one point per day");
@@ -1302,6 +1319,7 @@ mod tests {
             "$",
             Some(NaiveDate::from_ymd_opt(2024, 1, 15).unwrap()),
             None,
+            None,
         );
         // Only the Jan 20 transaction is in range, whatever the bucket size.
         let total: rust_decimal::Decimal = series
@@ -1316,7 +1334,7 @@ mod tests {
         let txns = resolve(
             "2024-01-15 Refund\n    expenses:food  $-80\n    assets:checking\n",
         );
-        let series = income_expense_series(&txns, &classifier(), &no_prices(), "$", None, None);
+        let series = income_expense_series(&txns, &classifier(), &no_prices(), "$", None, None, None);
         // Net-refund month: expenses show positive 80, not -80.
         assert_eq!(series[0].expenses, "80");
     }
@@ -1328,7 +1346,7 @@ mod tests {
              2024-02-01 Spend\n    expenses:food  $50\n    assets:checking\n",
         );
         let series =
-            net_worth_series(&txns, &classifier(), &no_prices(), "$", None, None);
+            net_worth_series(&txns, &classifier(), &no_prices(), "$", None, None, None);
 
         // First and last rather than adjacent points, so the assertion holds
         // whatever bucket size the range selects.
@@ -1352,6 +1370,7 @@ mod tests {
             "$",
             Some(NaiveDate::from_ymd_opt(2024, 1, 1).unwrap()),
             Some(NaiveDate::from_ymd_opt(2024, 12, 31).unwrap()),
+            None,
         );
 
         // End of Jan: cash 600 + 10 AAPL @150 = 2100 (not 610 raw-summed).
@@ -1366,7 +1385,7 @@ mod tests {
              2024-01-11 T2\n    assets:stock  10 XYZ\n    equity:conversion  -10 XYZ\n",
         );
         let series =
-            net_worth_series(&txns, &classifier(), &no_prices(), "$", None, None);
+            net_worth_series(&txns, &classifier(), &no_prices(), "$", None, None, None);
         assert_eq!(series[0].value, "600");
     }
 

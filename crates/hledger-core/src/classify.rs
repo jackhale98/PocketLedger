@@ -38,6 +38,28 @@ impl AccountType {
     }
 }
 
+/// Keep only postings to accounts of the given types, dropping transactions
+/// left with none.
+///
+/// Filtering postings rather than rows matters for a periodic report: its
+/// column totals are computed from what it was given, so removing rows
+/// afterwards would leave totals describing accounts no longer shown.
+pub fn retain_postings_of_types(
+    transactions: &[crate::balance::ResolvedTransaction],
+    classifier: &AccountClassifier,
+    types: &[AccountType],
+) -> Vec<crate::balance::ResolvedTransaction> {
+    transactions
+        .iter()
+        .filter_map(|txn| {
+            let mut kept = txn.clone();
+            kept.postings
+                .retain(|p| types.contains(&classifier.classify(&p.account.full)));
+            (!kept.postings.is_empty()).then_some(kept)
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct AccountClassifier {
     /// Explicitly declared types by account name.
@@ -116,6 +138,39 @@ impl AccountClassifier {
     /// warnings about unclassifiable accounts are worth emitting).
     pub fn has_declarations(&self) -> bool {
         !self.declared.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod type_filter_tests {
+    use super::*;
+    use crate::balance::resolve_transactions;
+    use hledger_parser::parse;
+
+    #[test]
+    fn keeps_only_postings_of_the_wanted_types() {
+        let journal = parse(concat!(
+            "2024-01-05 Pay\n    assets:checking  $3000\n    income:salary\n\n",
+            "2024-01-10 Shop\n    expenses:food  $50\n    assets:checking\n",
+        ))
+        .unwrap();
+        let txns = resolve_transactions(&journal).unwrap();
+        let classifier = AccountClassifier::from_journal(&journal);
+
+        let ie = retain_postings_of_types(
+            &txns,
+            &classifier,
+            &[AccountType::Revenue, AccountType::Expense],
+        );
+        let accounts: Vec<&str> = ie
+            .iter()
+            .flat_map(|t| t.postings.iter().map(|p| p.account.full.as_str()))
+            .collect();
+        assert_eq!(accounts, vec!["income:salary", "expenses:food"]);
+
+        // A transaction with nothing of the wanted type drops out entirely.
+        let equity = retain_postings_of_types(&txns, &classifier, &[AccountType::Equity]);
+        assert!(equity.is_empty());
     }
 }
 

@@ -400,7 +400,14 @@ const TABLE_INTERVALS: [BalanceInterval, string][] = [
 ];
 const TABLE_DEPTHS: (number | null)[] = [null, 1, 2, 3, 4];
 
+const ACCOUNT_GROUPS: [string, string][] = [
+  ["", "All"],
+  ["income-expense", "Income & Expenses"],
+  ["assets-liabilities", "Assets & Liabilities"],
+];
+
 function TableView({ dateFrom, dateTo, query, currency }: { dateFrom: string; dateTo: string; query: string; currency: string }) {
+  const [group, setGroup] = useState("");
   const [interval, setInterval_] = useState<BalanceInterval>("monthly");
   const [mode, setMode] = useState<BalanceAccumulationMode>("periodic");
   const [depth, setDepth] = useState<number | null>(null);
@@ -414,13 +421,19 @@ function TableView({ dateFrom, dateTo, query, currency }: { dateFrom: string; da
     const seq = ++loadSeq.current;
     setLoading(true);
     try {
-      const data = await api.periodicBalance(interval, mode, depth, {
-        targetCommodity: currency,
-        dateFrom: dateFrom || null,
-        dateTo: dateTo || null,
-        query: query.trim() || null,
-        forecast: forecast || null,
-      });
+      const data = await api.periodicBalance(
+        interval,
+        mode,
+        depth,
+        {
+          targetCommodity: currency,
+          dateFrom: dateFrom || null,
+          dateTo: dateTo || null,
+          query: query.trim() || null,
+          forecast: forecast || null,
+        },
+        group || undefined
+      );
       if (seq !== loadSeq.current) return;
       setReport(data);
       setError(null);
@@ -430,7 +443,7 @@ function TableView({ dateFrom, dateTo, query, currency }: { dateFrom: string; da
     } finally {
       if (seq === loadSeq.current) setLoading(false);
     }
-  }, [interval, mode, depth, query, forecast, dateFrom, dateTo, currency]);
+  }, [interval, mode, depth, query, forecast, dateFrom, dateTo, currency, group]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -469,6 +482,15 @@ function TableView({ dateFrom, dateTo, query, currency }: { dateFrom: string; da
           <option value="historical">Historical</option>
         </select>
       </div>
+
+      {/* Account group: an income-statement or balance-sheet shaped view of
+          the same table, rather than a separate report. */}
+      <select value={group} onChange={(e) => setGroup(e.target.value)}
+        className="w-full min-w-0 truncate px-3 py-2 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg text-sm text-gray-900 dark:text-gray-100">
+        {ACCOUNT_GROUPS.map(([val, label]) => (
+          <option key={val} value={val}>{label}</option>
+        ))}
+      </select>
 
       {/* Depth + forecast */}
       <div className="flex items-center justify-between gap-2">
@@ -1193,6 +1215,8 @@ export function ReportsPage() {
   const [drillHint, setDrillHint] = useState<string | null>(null);
   const [valuation, setValuation] = useState<api.ValuationInfo | null>(null);
   const [forecast, setForecast] = useState(false);
+  // "" lets each chart size its buckets from the range; the rest pin it.
+  const [chartInterval, setChartInterval] = useState("");
   const dashboardSeq = useRef(0);
   const drillSeq = useRef(0);
 
@@ -1216,8 +1240,8 @@ export function ReportsPage() {
     const chartParams: ReportParams = forecast ? { ...params, forecast: true } : params;
     try {
       const [nw, ie, eb, accounts, vi] = await Promise.all([
-        api.netWorthSeries(chartParams),
-        api.incomeExpenseChart(chartParams),
+        api.netWorthSeries(chartParams, chartInterval || undefined),
+        api.incomeExpenseChart(chartParams, chartInterval || undefined),
         api.expenseBreakdownChart(params, null),
         api.listAccountsWithBalances(),
         api.valuationInfo(params),
@@ -1237,7 +1261,7 @@ export function ReportsPage() {
     } finally {
       if (seq === dashboardSeq.current) setLoading(false);
     }
-  }, [makeParams, forecast]);
+  }, [makeParams, forecast, chartInterval]);
 
   useEffect(() => { loadDashboard(); }, [loadDashboard]);
 
@@ -1407,10 +1431,20 @@ export function ReportsPage() {
           </button>
         )}
         {tab === "overview" && (
-          <label className="flex items-center gap-1.5 text-xs text-gray-600 dark:text-gray-400">
-            <input type="checkbox" checked={forecast} onChange={(e) => setForecast(e.target.checked)} className="accent-blue-600" />
-            Forecast
-          </label>
+          <div className="flex items-center justify-between gap-2 min-w-0">
+            <label className="flex items-center gap-1.5 text-xs text-gray-600 dark:text-gray-400 shrink-0">
+              <input type="checkbox" checked={forecast} onChange={(e) => setForecast(e.target.checked)} className="accent-blue-600" />
+              Forecast
+            </label>
+            <div className="flex gap-1 shrink-0">
+              {([["", "Auto"], ["daily", "D"], ["weekly", "W"], ["monthly", "M"]] as [string, string][]).map(([val, label]) => (
+                <button key={val || "auto"} onClick={() => setChartInterval(val)}
+                  className={`px-2 py-1 text-xs font-medium rounded ${val === chartInterval ? "bg-blue-600 text-white" : "bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400"}`}>
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
         )}
       </div>
 

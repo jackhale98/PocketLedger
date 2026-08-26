@@ -233,7 +233,7 @@ fn net_worth_matches_hledger_valued_balance() {
     let price_db = hledger_core::price_db::PriceDb::from_journal(&journal);
 
     let series = hledger_core::reports::net_worth_series(
-        &txns, &classifier, &price_db, "USD", None, None,
+        &txns, &classifier, &price_db, "USD", None, None, None,
     );
     let ours: f64 = series.last().unwrap().value.parse().unwrap();
 
@@ -1738,6 +1738,62 @@ fn auto_postings_match_hledger() {
         let ours = engine_balances_filtered(&txns);
 
         assert_eq!(ours, expected, "{name}: auto postings differ");
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Virtual postings must behave as hledger's do.
+///
+/// Three separate rules meet here: an unbalanced `(account)` posting is
+/// excluded from balancing but included in balances; balanced `[account]`
+/// postings must sum to zero among themselves; and `real:1` drops both kinds.
+/// Nothing checked any of it against the CLI.
+#[test]
+fn virtual_postings_match_hledger() {
+    if !hledger_available() {
+        eprintln!("skipping: hledger not installed");
+        return;
+    }
+
+    let text = concat!(
+        "2024-01-05 unbalanced virtual\n",
+        "    expenses:food      $50.00\n",
+        "    assets:checking\n",
+        "    (budget:food)      $50.00\n\n",
+        "2024-01-06 balanced virtual\n",
+        "    expenses:rent    $1000.00\n",
+        "    assets:checking\n",
+        "    [envelope:rent]  $-1000.00\n",
+        "    [envelope:free]   $1000.00\n",
+    );
+
+    let dir = std::env::temp_dir().join(format!("hledger-virtual-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("virtual.journal");
+    std::fs::write(&path, text).unwrap();
+
+    let journal = hledger_parser::parse(text).expect("virtual postings must parse");
+    let txns = hledger_core::balance::resolve_transactions(&journal)
+        .expect("virtual postings must resolve");
+
+    // Default: both kinds counted.
+    let expected = hledger_balances_with(&path, &[]).expect("hledger accepts the journal");
+    assert_eq!(
+        engine_balances_filtered(&txns),
+        expected,
+        "virtual postings differ from hledger's default report"
+    );
+
+    // real:1 drops every virtual posting.
+    if let Some(expected_real) = hledger_balances_with(&path, &["real:1"]) {
+        let query = hledger_core::query::parse_query("real:1").unwrap();
+        let filtered = hledger_core::query::retain_matching_postings(&txns, &query);
+        assert_eq!(
+            engine_balances_filtered(&filtered),
+            expected_real,
+            "real:1 differs from hledger"
+        );
     }
 
     let _ = std::fs::remove_dir_all(&dir);

@@ -164,25 +164,36 @@ export async function cashFlowReport(
 }
 
 export async function netWorthSeries(
-  params: ReportParams = {}
+  params: ReportParams = {},
+  /** "daily" | "weekly" | "monthly"; omit to size buckets from the range. */
+  interval?: string
 ): Promise<TimeSeriesPoint[]> {
-  return invoke<TimeSeriesPoint[]>("net_worth_series", { params });
+  return invoke<TimeSeriesPoint[]>("net_worth_series", {
+    params,
+    interval: interval ?? null,
+  });
 }
 
 export async function accountBalanceSeries(
   account: string,
-  params: ReportParams = {}
+  params: ReportParams = {},
+  interval?: string
 ): Promise<TimeSeriesPoint[]> {
   return invoke<TimeSeriesPoint[]>("account_balance_series", {
     account,
     params,
+    interval: interval ?? null,
   });
 }
 
 export async function incomeExpenseChart(
-  params: ReportParams = {}
+  params: ReportParams = {},
+  interval?: string
 ): Promise<IncomeExpensePoint[]> {
-  return invoke<IncomeExpensePoint[]>("income_expense_chart", { params });
+  return invoke<IncomeExpensePoint[]>("income_expense_chart", {
+    params,
+    interval: interval ?? null,
+  });
 }
 
 export async function expenseBreakdownChart(
@@ -222,12 +233,15 @@ export async function periodicBalance(
   interval: BalanceInterval,
   mode: BalanceAccumulationMode | null,
   depth: number | null,
-  params: ReportParams = {}
+  params: ReportParams = {},
+  /** "income-expense" | "assets-liabilities"; omit for every account. */
+  accountTypes?: string
 ): Promise<PeriodicBalanceReport> {
   return invoke<PeriodicBalanceReport>("periodic_balance", {
     interval,
     mode,
     depth,
+    accountTypes: accountTypes ?? null,
     params,
   });
 }

@@ -54,6 +54,17 @@ pub fn transactions_for(
     }
 }
 
+/// Turn a requested chart interval into a bucket size. None leaves the report
+/// to pick one from the range.
+fn parse_step(interval: &Option<String>) -> Result<Option<reports::SeriesStep>, String> {
+    match interval.as_deref().filter(|s| !s.is_empty() && *s != "auto") {
+        None => Ok(None),
+        Some(name) => reports::parse_series_step(name)
+            .map(Some)
+            .ok_or_else(|| format!("unknown interval '{name}'")),
+    }
+}
+
 pub fn parse_date(s: &Option<String>) -> Option<chrono::NaiveDate> {
     s.as_ref()
         .and_then(|d| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok())
@@ -130,6 +141,9 @@ pub async fn periodic_balance(
     interval: String,
     mode: Option<String>,
     depth: Option<usize>,
+    // Narrow to a group of account types: "income-expense" for a period view
+    // of what came in and went out, "assets-liabilities" for what is held.
+    account_types: Option<String>,
     params: ReportParams,
     state: State<'_, Mutex<crate::AppState>>,
 ) -> Result<hledger_core::periodic_report::PeriodicBalanceReport, String> {
@@ -241,6 +255,7 @@ pub async fn cash_flow_report(
 
 #[tauri::command]
 pub async fn net_worth_series(
+    interval: Option<String>,
     params: ReportParams,
     state: State<'_, Mutex<crate::AppState>>,
 ) -> Result<Vec<reports::TimeSeriesPoint>, String> {
@@ -249,6 +264,7 @@ pub async fn net_worth_series(
 
     let commodity = resolve_target_commodity(loaded, params.target_commodity.as_deref());
     let txns = transactions_for(loaded, &params)?;
+    let step = parse_step(&interval)?;
     Ok(reports::net_worth_series(
         &txns,
         loaded.ledger.classifier(),
@@ -256,12 +272,14 @@ pub async fn net_worth_series(
         &commodity,
         parse_date(&params.date_from),
         parse_date(&params.date_to),
+        step,
     ))
 }
 
 #[tauri::command]
 pub async fn account_balance_series(
     account: String,
+    interval: Option<String>,
     params: ReportParams,
     state: State<'_, Mutex<crate::AppState>>,
 ) -> Result<Vec<reports::TimeSeriesPoint>, String> {
@@ -270,6 +288,7 @@ pub async fn account_balance_series(
 
     let commodity = resolve_target_commodity(loaded, params.target_commodity.as_deref());
     let txns = transactions_for(loaded, &params)?;
+    let step = parse_step(&interval)?;
     Ok(reports::account_series(
         &txns,
         loaded.ledger.price_db(),
@@ -277,11 +296,13 @@ pub async fn account_balance_series(
         &commodity,
         parse_date(&params.date_from),
         parse_date(&params.date_to),
+        step,
     ))
 }
 
 #[tauri::command]
 pub async fn income_expense_chart(
+    interval: Option<String>,
     params: ReportParams,
     state: State<'_, Mutex<crate::AppState>>,
 ) -> Result<Vec<reports::IncomeExpensePoint>, String> {
@@ -290,6 +311,7 @@ pub async fn income_expense_chart(
 
     let commodity = resolve_target_commodity(loaded, params.target_commodity.as_deref());
     let txns = transactions_for(loaded, &params)?;
+    let step = parse_step(&interval)?;
     Ok(reports::income_expense_series(
         &txns,
         loaded.ledger.classifier(),
@@ -297,6 +319,7 @@ pub async fn income_expense_chart(
         &commodity,
         parse_date(&params.date_from),
         parse_date(&params.date_to),
+        step,
     ))
 }
 
