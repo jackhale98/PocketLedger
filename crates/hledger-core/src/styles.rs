@@ -114,6 +114,58 @@ mod tests {
         // And a non-terminating conversion is cut to the commodity's places.
         assert_eq!(styles.format(dec!(170.526315789), "$"), "170.53");
     }
+
+    /// Every report that carries money must be restyled, not just the ones
+    /// that happen to use `AmountEntry`.
+    ///
+    /// A valued projection divides by a price, and a price that does not
+    /// divide evenly leaves a Decimal with a scale in the twenties. That
+    /// reached the Forecast screen as a projected balance reading
+    /// "290,284.7283600000000000000000000 USD".
+    #[test]
+    fn reports_carrying_bare_quantities_are_restyled_too() {
+        let journal = parse(concat!(
+            "commodity 1,000.00 USD\n\n",
+            "2024-01-01 a\n    assets:x   1000.00 USD\n    equity:o\n",
+        ))
+        .unwrap();
+        let styles = CommodityStyles::from_journal(&journal);
+        let long = "264980.60504000000000000000000".to_string();
+
+        let mut points = vec![crate::forecast::ProjectionPoint {
+            period: "2026-08".into(),
+            inflow: long.clone(),
+            outflow: long.clone(),
+            closing: long.clone(),
+            projected: true,
+        }];
+        let mut alert = crate::forecast::ShortfallAlert {
+            date: "2026-09-01".into(),
+            balance: long.clone(),
+            description: "rent".into(),
+        };
+        apply::projection(&mut points, Some(&mut alert), "USD", &styles);
+        assert_eq!(points[0].closing, "264980.61");
+        assert_eq!(points[0].inflow, "264980.61");
+        assert_eq!(points[0].outflow, "264980.61");
+        assert_eq!(alert.balance, "264980.61");
+
+        let mut series = vec![crate::reports::TimeSeriesPoint {
+            date: "2026-08".into(),
+            value: long.clone(),
+        }];
+        apply::series(&mut series, "USD", &styles);
+        assert_eq!(series[0].value, "264980.61");
+
+        let mut summary = vec![crate::budget::BudgetSummaryPoint {
+            period: "2026-08".into(),
+            budgeted: long.clone(),
+            actual: long.clone(),
+        }];
+        apply::budget_summary(&mut summary, "USD", &styles);
+        assert_eq!(summary[0].budgeted, "264980.61");
+        assert_eq!(summary[0].actual, "264980.61");
+    }
 }
 
 /// Restyling finished reports.
@@ -170,4 +222,102 @@ pub mod apply {
             entries(cell, styles);
         }
     }
+
+    /// Restyle a bare quantity string whose commodity is carried separately.
+    ///
+    /// Reports that store one commodity for the whole report, rather than a
+    /// commodity per amount, need this rather than [`entries`].
+    pub fn quantity(value: &mut String, commodity: &str, styles: &CommodityStyles) {
+        if let Ok(q) = value.parse::<Decimal>() {
+            *value = styles.format(q, commodity);
+        }
+    }
+
+    pub fn series(
+        points: &mut [crate::reports::TimeSeriesPoint],
+        commodity: &str,
+        styles: &CommodityStyles,
+    ) {
+        for point in points {
+            quantity(&mut point.value, commodity, styles);
+        }
+    }
+
+    pub fn income_expense(
+        points: &mut [crate::reports::IncomeExpensePoint],
+        commodity: &str,
+        styles: &CommodityStyles,
+    ) {
+        for point in points {
+            quantity(&mut point.income, commodity, styles);
+            quantity(&mut point.expenses, commodity, styles);
+        }
+    }
+
+    pub fn pie(
+        slices: &mut [crate::reports::PieSlice],
+        commodity: &str,
+        styles: &CommodityStyles,
+    ) {
+        for slice in slices {
+            quantity(&mut slice.value, commodity, styles);
+        }
+    }
+
+    pub fn projection(
+        points: &mut [crate::forecast::ProjectionPoint],
+        shortfall: Option<&mut crate::forecast::ShortfallAlert>,
+        commodity: &str,
+        styles: &CommodityStyles,
+    ) {
+        for point in points {
+            quantity(&mut point.inflow, commodity, styles);
+            quantity(&mut point.outflow, commodity, styles);
+            quantity(&mut point.closing, commodity, styles);
+        }
+        if let Some(alert) = shortfall {
+            quantity(&mut alert.balance, commodity, styles);
+        }
+    }
+
+    /// Budget amounts carry their own commodity per row. The percentage is a
+    /// ratio, not money, so it keeps its own formatting.
+    pub fn budget(comparison: &mut crate::budget::BudgetComparison, styles: &CommodityStyles) {
+        for row in &mut comparison.rows {
+            let commodity = row.commodity.clone();
+            quantity(&mut row.budget, &commodity, styles);
+            quantity(&mut row.actual, &commodity, styles);
+            quantity(&mut row.difference, &commodity, styles);
+        }
+        for total in &mut comparison.totals {
+            let commodity = total.commodity.clone();
+            quantity(&mut total.budget, &commodity, styles);
+            quantity(&mut total.actual, &commodity, styles);
+        }
+    }
+
+    pub fn budget_summary(
+        points: &mut [crate::budget::BudgetSummaryPoint],
+        commodity: &str,
+        styles: &CommodityStyles,
+    ) {
+        for point in points {
+            quantity(&mut point.budgeted, commodity, styles);
+            quantity(&mut point.actual, commodity, styles);
+        }
+    }
+
+    /// Returns are money except for the rates, which are percentages already
+    /// rounded to two places and independent of any commodity's precision.
+    pub fn roi(report: &mut crate::roi::RoiReport, styles: &CommodityStyles) {
+        let commodity = report.commodity.clone();
+        quantity(&mut report.value_begin, &commodity, styles);
+        quantity(&mut report.value_end, &commodity, styles);
+        quantity(&mut report.cashflow, &commodity, styles);
+        quantity(&mut report.pnl, &commodity, styles);
+        for flow in &mut report.flows {
+            quantity(&mut flow.amount, &commodity, styles);
+        }
+    }
+
 }

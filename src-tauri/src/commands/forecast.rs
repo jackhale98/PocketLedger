@@ -240,7 +240,7 @@ pub async fn forecast_projection(
     let chart_from = parse_date(&params.date_from)
         .or_else(|| today.checked_sub_months(chrono::Months::new(CONTEXT_MONTHS)));
 
-    let points = forecast::cash_flow_projection(
+    let mut points = forecast::cash_flow_projection(
         &all,
         last_actual,
         &selector,
@@ -252,13 +252,23 @@ pub async fn forecast_projection(
 
     // Only projected shortfalls are interesting; a past overdraft is history
     // the user already lived through.
-    let shortfall = forecast::first_shortfall(
+    let mut shortfall = forecast::first_shortfall(
         &all,
         &selector,
         &commodity,
         loaded.ledger.price_db(),
         rust_decimal::Decimal::ZERO,
         last_actual,
+    );
+
+    // Both carry raw Decimal quantities: a valued projection divides by a
+    // price and keeps every digit of a non-terminating result, which reached
+    // the screen as a balance with 25 decimal places.
+    hledger_core::styles::apply::projection(
+        &mut points,
+        shortfall.as_mut(),
+        &commodity,
+        loaded.ledger.styles(),
     );
 
     let effective_horizon =

@@ -22,6 +22,7 @@ use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 
 use crate::balance::ResolvedTransaction;
+use crate::classify::{AccountClassifier, AccountType};
 use crate::price_db::PriceDb;
 use crate::query::Query;
 use crate::reports::valued_quantity;
@@ -80,6 +81,41 @@ fn value_on(
     total
 }
 
+/// How to tell investment profit from money the investor contributed.
+///
+/// hledger's `roi` takes a `--pnl` account regex, because a journal carries no
+/// structural marker for "this is where gains are booked". Matching keywords
+/// inside account names is fragile in both directions: it misses gains booked
+/// under an unusual name, and a word like "brokerage" appears far more often
+/// as a container for holdings than as a profit account, so matching it turns
+/// a whole tree of assets into phantom profit.
+///
+/// Account *types* are the sounder signal. Revenue and expense are declared by
+/// `type:` where a journal bothers, and inferred from the top-level name the
+/// same way hledger infers them otherwise.
+pub enum PnlSelector<'a> {
+    /// Accounts classified as revenue or expense.
+    AccountTypes(&'a AccountClassifier),
+    /// An explicit query, for journals that book gains somewhere unusual.
+    Query(&'a Query),
+    /// Nothing is profit; every movement is a contribution. Matches hledger
+    /// invoked without `--pnl`.
+    None,
+}
+
+impl PnlSelector<'_> {
+    fn matches(&self, txn: &ResolvedTransaction, posting: &crate::balance::ResolvedPosting) -> bool {
+        match self {
+            Self::AccountTypes(classifier) => matches!(
+                classifier.classify(&posting.account.full),
+                AccountType::Revenue | AccountType::Expense
+            ),
+            Self::Query(q) => q.matches_posting(txn, posting),
+            Self::None => false,
+        }
+    }
+}
+
 /// Commodities with a non-zero balance in the investment accounts on `date`.
 fn held_commodities(
     transactions: &[ResolvedTransaction],
@@ -117,7 +153,7 @@ fn held_commodities(
 fn cash_flows(
     transactions: &[ResolvedTransaction],
     investment: &Query,
-    pnl: Option<&Query>,
+    pnl: &PnlSelector,
     from: NaiveDate,
     to: NaiveDate,
     commodity: &str,
@@ -141,7 +177,7 @@ fn cash_flows(
                 date = posting.date;
                 continue;
             }
-            if pnl.is_some_and(|q| q.matches_posting(txn, posting)) {
+            if pnl.matches(txn, posting) {
                 continue;
             }
             let (value, _) = valued_quantity(&posting.amount, commodity, price_db, txn.date);
@@ -263,7 +299,7 @@ fn time_weighted(
 pub fn roi(
     transactions: &[ResolvedTransaction],
     investment: &Query,
-    pnl: Option<&Query>,
+    pnl: &PnlSelector,
     from: NaiveDate,
     to: NaiveDate,
     commodity: &str,
@@ -333,13 +369,15 @@ mod tests {
     use super::*;
     use crate::query::parse_query;
 
-    fn report(text: &str, investment: &str, pnl: &str) -> RoiReport {
+    /// Uses the account-type default, the same as the app with no override.
+    fn report(text: &str, investment: &str) -> RoiReport {
         let journal = hledger_parser::parse(text).unwrap();
         let txns = crate::balance::resolve_transactions(&journal).unwrap();
+        let classifier = crate::classify::AccountClassifier::from_journal(&journal);
         roi(
             &txns,
             &parse_query(investment).unwrap(),
-            Some(&parse_query(pnl).unwrap()),
+            &PnlSelector::AccountTypes(&classifier),
             NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             NaiveDate::from_ymd_opt(2024, 12, 31).unwrap(),
             "$",
@@ -347,32 +385,29 @@ mod tests {
         )
     }
 
-    /// The default profit query the UI sends. Kept here so the two can't drift
-    /// apart silently.
-    const PNL_DEFAULT: &str = "acct:interest|dividend|gain|loss|capital|realized|unrealized|distribution|yield|commission|brokerage";
-
-    /// A salary is not a return on a current account. With the default profit
-    /// query a plain cash account must report no gain, which is what keeps the
-    /// returns panel off accounts that have none.
+    /// A salary is not a return on a current account -- but no classification
+    /// of accounts can tell it apart from interest, since both are revenue
+    /// landing in an asset account. So the returns panel is gated on what the
+    /// account *holds*, not on what it earned: a current account holding only
+    /// the base currency has no security whose price can move, so no return to
+    /// report. This is what keeps the panel off it.
     #[test]
-    fn salary_into_checking_is_not_a_return() {
+    fn a_currency_only_account_holds_nothing_that_can_appreciate() {
         let r = report(
             concat!(
                 "2024-01-05 groceries\n    expenses:food      $50.00\n    assets:checking\n\n",
                 "2024-02-05 paycheck\n    assets:checking  $2000.00\n    income:salary\n",
             ),
             "acct:assets:checking",
-            PNL_DEFAULT,
         );
-        assert_eq!(r.pnl, "0.00");
-        assert_eq!(r.held_commodities, vec!["$".to_string()]);
-        // No gain, so whatever the solver returns must be a flat return.
-        let irr: f64 = r.irr.as_deref().unwrap_or("0").parse().unwrap();
-        assert!(irr.abs() < 0.01, "flat account returned {irr}%");
+        assert_eq!(
+            r.held_commodities,
+            vec!["$".to_string()],
+            "nothing here but currency, so the panel must stay hidden"
+        );
     }
 
-    /// Interest on a savings account is a return, and is what makes the panel
-    /// appear for an account holding nothing but the base currency.
+    /// Revenue posted against an investment account is its return.
     #[test]
     fn interest_counts_as_return() {
         let r = report(
@@ -381,7 +416,6 @@ mod tests {
                 "2024-07-01 interest\n    assets:savings     $20.00\n    income:interest\n",
             ),
             "acct:assets:savings",
-            PNL_DEFAULT,
         );
         assert_eq!(r.pnl, "20.00");
         assert!(r.irr.is_some());
@@ -396,7 +430,6 @@ mod tests {
                 "2024-01-01 buy\n    assets:broker    10 VTSAX @ $100.00\n    assets:checking\n",
             ),
             "acct:assets:broker",
-            PNL_DEFAULT,
         );
         assert_eq!(r.held_commodities, vec!["VTSAX".to_string()]);
     }

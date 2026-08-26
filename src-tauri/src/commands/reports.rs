@@ -292,7 +292,7 @@ pub async fn net_worth_series(
     let commodity = resolve_target_commodity(loaded, params.target_commodity.as_deref());
     let txns = transactions_for(loaded, &params)?;
     let step = parse_step(&interval)?;
-    Ok(reports::net_worth_series(
+    let mut points = reports::net_worth_series(
         &txns,
         loaded.ledger.classifier(),
         loaded.ledger.price_db(),
@@ -300,7 +300,9 @@ pub async fn net_worth_series(
         parse_date(&params.date_from),
         parse_date(&params.date_to),
         step,
-    ))
+    );
+    hledger_core::styles::apply::series(&mut points, &commodity, loaded.ledger.styles());
+    Ok(points)
 }
 
 #[tauri::command]
@@ -316,7 +318,7 @@ pub async fn account_balance_series(
     let commodity = resolve_target_commodity(loaded, params.target_commodity.as_deref());
     let txns = transactions_for(loaded, &params)?;
     let step = parse_step(&interval)?;
-    Ok(reports::account_series(
+    let mut points = reports::account_series(
         &txns,
         loaded.ledger.price_db(),
         &account,
@@ -324,7 +326,9 @@ pub async fn account_balance_series(
         parse_date(&params.date_from),
         parse_date(&params.date_to),
         step,
-    ))
+    );
+    hledger_core::styles::apply::series(&mut points, &commodity, loaded.ledger.styles());
+    Ok(points)
 }
 
 #[tauri::command]
@@ -339,7 +343,7 @@ pub async fn income_expense_chart(
     let commodity = resolve_target_commodity(loaded, params.target_commodity.as_deref());
     let txns = transactions_for(loaded, &params)?;
     let step = parse_step(&interval)?;
-    Ok(reports::income_expense_series(
+    let mut points = reports::income_expense_series(
         &txns,
         loaded.ledger.classifier(),
         loaded.ledger.price_db(),
@@ -347,7 +351,9 @@ pub async fn income_expense_chart(
         parse_date(&params.date_from),
         parse_date(&params.date_to),
         step,
-    ))
+    );
+    hledger_core::styles::apply::income_expense(&mut points, &commodity, loaded.ledger.styles());
+    Ok(points)
 }
 
 #[tauri::command]
@@ -361,14 +367,16 @@ pub async fn expense_breakdown_chart(
 
     let commodity = resolve_target_commodity(loaded, params.target_commodity.as_deref());
     let txns = transactions_for(loaded, &params)?;
-    Ok(reports::expense_breakdown(
+    let mut slices = reports::expense_breakdown(
         &txns,
         loaded.ledger.price_db(),
         &commodity,
         parse_date(&params.date_from),
         parse_date(&params.date_to),
         parent_prefix.as_deref(),
-    ))
+    );
+    hledger_core::styles::apply::pie(&mut slices, &commodity, loaded.ledger.styles());
+    Ok(slices)
 }
 
 /// Info the UI needs to label valued charts honestly: which commodity the
@@ -509,9 +517,15 @@ pub async fn roi_report(
         return Err("Choose at least one investment account".into());
     }
     let investment_q = hledger_core::query::parse_query(&investment)?;
+    // No override means "revenue and expense accounts", which reads the
+    // journal's own type: declarations rather than guessing from names.
     let pnl_q = match pnl.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         Some(p) => Some(hledger_core::query::parse_query(p)?),
         None => None,
+    };
+    let pnl_selector = match &pnl_q {
+        Some(q) => hledger_core::roi::PnlSelector::Query(q),
+        None => hledger_core::roi::PnlSelector::AccountTypes(loaded.ledger.classifier()),
     };
 
     let txns = transactions_for(loaded, &params)?;
@@ -526,13 +540,15 @@ pub async fn roi_report(
         return Err("End date is before the start date".into());
     }
 
-    Ok(hledger_core::roi::roi(
+    let mut report = hledger_core::roi::roi(
         &txns,
         &investment_q,
-        pnl_q.as_ref(),
+        &pnl_selector,
         from,
         to,
         &commodity,
         loaded.ledger.price_db(),
-    ))
+    );
+    hledger_core::styles::apply::roi(&mut report, loaded.ledger.styles());
+    Ok(report)
 }

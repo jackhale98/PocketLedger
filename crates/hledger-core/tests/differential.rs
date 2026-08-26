@@ -1948,10 +1948,11 @@ fn roi_matches_hledger() {
         let txns = hledger_core::balance::resolve_transactions(&journal).unwrap();
         let investment = hledger_core::query::parse_query("acct:assets:investment").unwrap();
         let pnl = hledger_core::query::parse_query("acct:income:gains").unwrap();
+    // hledger is given an explicit --pnl here, so match it exactly.
         let report = hledger_core::roi::roi(
             &txns,
             &investment,
-            Some(&pnl),
+            &hledger_core::roi::PnlSelector::Query(&pnl),
             chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
             chrono::NaiveDate::from_ymd_opt(2024, 12, 31).unwrap(),
             "$",
@@ -2008,7 +2009,7 @@ fn share_denominated_contributions_are_valued() {
     std::fs::write(&path, text).unwrap();
 
     let pnl_pattern =
-        "interest|dividend|gain|loss|capital|realized|unrealized|distribution|yield|commission|brokerage";
+        "interest|dividend|gain|loss|capital|realized|unrealized|distribution|yield|commission";
     let output = Command::new("hledger")
         .args([
             "-f", &path.to_string_lossy(), "roi",
@@ -2043,7 +2044,9 @@ fn share_denominated_contributions_are_valued() {
     let report = hledger_core::roi::roi(
         &txns,
         &hledger_core::query::parse_query("acct:Assets:IRA:VTWAX").unwrap(),
-        Some(&hledger_core::query::parse_query(&format!("acct:{pnl_pattern}")).unwrap()),
+        &hledger_core::roi::PnlSelector::Query(
+            &hledger_core::query::parse_query(&format!("acct:{pnl_pattern}")).unwrap(),
+        ),
         chrono::NaiveDate::from_ymd_opt(2020, 1, 1).unwrap(),
         chrono::NaiveDate::from_ymd_opt(2026, 8, 26).unwrap(),
         "$",

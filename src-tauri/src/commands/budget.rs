@@ -17,14 +17,16 @@ pub async fn budget_vs_actual(
     let budgets = budget::extract_budgets(&loaded.journal);
     let commodity = resolve_target_commodity(loaded, params.target_commodity.as_deref());
     let txns: Vec<_> = loaded.ledger.transactions().cloned().collect();
-    Ok(budget::budget_comparison(
+    let mut comparison = budget::budget_comparison(
         &txns,
         &budgets,
         loaded.ledger.price_db(),
         &commodity,
         parse_date(&params.date_from),
         parse_date(&params.date_to),
-    ))
+    );
+    hledger_core::styles::apply::budget(&mut comparison, loaded.ledger.styles());
+    Ok(comparison)
 }
 
 #[tauri::command]
@@ -39,12 +41,14 @@ pub async fn budget_summary_chart(
     let commodity = resolve_target_commodity(loaded, params.target_commodity.as_deref());
     let txns: Vec<_> = loaded.ledger.transactions().cloned().collect();
     // The date filter the UI shows now actually applies to the chart.
-    Ok(budget::budget_summary_series(
+    let mut points = budget::budget_summary_series(
         &txns,
         &budgets,
         loaded.ledger.price_db(),
         &commodity,
         parse_date(&params.date_from),
         parse_date(&params.date_to),
-    ))
+    );
+    hledger_core::styles::apply::budget_summary(&mut points, &commodity, loaded.ledger.styles());
+    Ok(points)
 }

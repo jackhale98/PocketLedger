@@ -178,16 +178,6 @@ function StatementView({ statement, subtitle, onBack }: { statement: FinancialSt
  *  lived on Overview with its own account picker and the postings lived here
  *  with another — two pickers for two halves of the same question. */
 
-/** Accounts where investment growth is booked. Money arriving from these is
- *  return; money arriving from anywhere else is a contribution the investor
- *  made, which shouldn't be counted as performance.
- *
- *  Deliberately narrower than "all income": a salary landing in a checking
- *  account is not a return on that account, and counting it as one would
- *  report a spectacular gain on an ordinary current account. Users who book
- *  gains under some other name can widen this in the panel. */
-const PNL_DEFAULT =
-  "acct:interest|dividend|gain|loss|capital|realized|unrealized|distribution|yield|commission|brokerage";
 
 /** Money-weighted (IRR) and time-weighted (TWR) return, mirroring
  *  `hledger roi`.
@@ -202,7 +192,9 @@ function ReturnsSection({ account, dateFrom, dateTo, currency }: {
   account: string; dateFrom: string; dateTo: string; currency: string;
 }) {
   const [report, setReport] = useState<RoiReport | null>(null);
-  const [pnlQuery, setPnlQuery] = useState(PNL_DEFAULT);
+  // Empty means "revenue and expense accounts", resolved from the journal's
+  // own type: declarations rather than guessed from account names.
+  const [pnlQuery, setPnlQuery] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [showFlows, setShowFlows] = useState(false);
   const loadSeq = useRef(0);
@@ -211,7 +203,7 @@ function ReturnsSection({ account, dateFrom, dateTo, currency }: {
     const seq = ++loadSeq.current;
     if (!account) { setReport(null); setError(null); return; }
     api
-      .roiReport(`acct:${account}`, pnlQuery, {
+      .roiReport(`acct:${account}`, pnlQuery.trim() || null, {
         dateFrom: dateFrom || null,
         dateTo: dateTo || null,
         targetCommodity: currency,
@@ -233,11 +225,13 @@ function ReturnsSection({ account, dateFrom, dateTo, currency }: {
   }
   if (!report) return null;
   const gained = parseFloat(report.pnl);
-  // Show this only where there is genuinely a return to measure: the account
-  // holds something whose value moves on its own, or gains have been booked
-  // against it. Otherwise every cash account grows a panel reading zero.
+  // Shown only for accounts holding something whose price can move on its own
+  // -- a security, or a foreign currency. A current account holds nothing that
+  // can appreciate, and revenue landing in it is a salary, not a return; no
+  // classification of accounts can tell those apart, so the holding is the
+  // signal rather than the earnings.
   const holdsUnits = report.heldCommodities.some((c) => c !== report.commodity);
-  if (!Number.isFinite(gained) || (!holdsUnits && gained === 0)) return null;
+  if (!holdsUnits || !Number.isFinite(gained)) return null;
 
   const amt = (v: string) => formatAmount(v, report.commodity);
   const pct = (v: string | null) => (v === null ? "\u2014" : `${v}%`);
@@ -264,10 +258,12 @@ function ReturnsSection({ account, dateFrom, dateTo, currency }: {
         <div className="mt-2 space-y-2">
           <label className="block">
             <span className="block text-xs text-gray-500 dark:text-gray-400 mb-1">
-              Accounts counted as gains rather than contributions
+              Gains come from income and expense accounts. Override with a
+              query if yours are booked elsewhere.
             </span>
             <input
               value={pnlQuery}
+              placeholder="acct:income:gains"
               onChange={(e) => setPnlQuery(e.target.value)}
               className="w-full min-w-0 px-3 py-2 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg text-sm font-mono text-gray-900 dark:text-gray-100"
             />
