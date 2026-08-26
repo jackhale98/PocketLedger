@@ -55,6 +55,9 @@ pub async fn save_forecast_rule(
     description: String,
     postings: Vec<SaveForecastPosting>,
     replace_line: Option<usize>,
+    // Which journal file to append a new rule to. Ignored when replacing,
+    // since an existing rule is rewritten wherever it already lives.
+    file_index: Option<usize>,
     state: State<'_, Mutex<crate::AppState>>,
 ) -> Result<super::journal::JournalSummary, String> {
     // hledger ends the period expression at the first double space, so an
@@ -133,7 +136,7 @@ pub async fn save_forecast_rule(
 
     match target {
         Some((file_idx, patched)) => super::journal::apply_file_edit(&mut app_state, file_idx, patched),
-        None => super::journal::apply_append_to_main(&mut app_state, &text),
+        None => super::journal::apply_append_to_file(&mut app_state, file_index.unwrap_or(0), &text),
     }
 }
 

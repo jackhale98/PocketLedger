@@ -14,7 +14,7 @@ import { TransactionEditorSheet } from "../components/transactions/TransactionEd
 import type {
   TimeSeriesPoint, IncomeExpensePoint, PieSlice,
   FinancialStatement, BalanceRow, RegisterRow, ReportParams,
-  BudgetRow, BudgetSummaryPoint, ForecastRule, InactiveBudget,
+  BudgetRow, BudgetSummaryPoint, ForecastRule, InactiveBudget, BudgetTotal,
   PriceSeries, JournalStatistics,
   AmountEntry, BalanceInterval, BalanceAccumulationMode, PeriodicBalanceReport,
   ForecastProjection, TransactionSummary,
@@ -417,6 +417,7 @@ function TableView({ dateFrom, dateTo, query, currency }: { dateFrom: string; da
 function BudgetView({ dateFrom, dateTo, query, currency }: { dateFrom: string; dateTo: string; query: string; currency: string }) {
   const [budgetRows, setBudgetRows] = useState<BudgetRow[]>([]);
   const [inactive, setInactive] = useState<InactiveBudget[]>([]);
+  const [totals, setTotals] = useState<BudgetTotal[]>([]);
   const [range, setRange] = useState<{ from: string; to: string } | null>(null);
   const [budgetChart, setBudgetChart] = useState<BudgetSummaryPoint[]>([]);
   // Rules are fetched alongside so an empty report can say whether there are
@@ -444,6 +445,7 @@ function BudgetView({ dateFrom, dateTo, query, currency }: { dateFrom: string; d
       ]);
       if (seq !== loadSeq.current) return;
       setBudgetRows(rows.rows);
+      setTotals(rows.totals);
       setInactive(rows.inactive);
       setRange({ from: rows.from, to: rows.to });
       setBudgetChart(chart);
@@ -477,15 +479,25 @@ function BudgetView({ dateFrom, dateTo, query, currency }: { dateFrom: string; d
         {inactive.length} budget{inactive.length === 1 ? "" : "s"} outside{" "}
         {range ? `${range.from} to ${range.to}` : "this range"}
       </div>
-      {inactive.map((b, i) => (
-        <div key={i} className="text-xs text-amber-700 dark:text-amber-400 break-words">
-          {b.accounts.join(", ") || b.description || `line ${b.line}`}
-          {b.starts ? ` starts ${b.starts}` : ` (${b.period})`}
-        </div>
-      ))}
+      {inactive.map((b, i) => {
+        const label = b.accounts.join(", ") || b.description || `line ${b.line}`;
+        // A rule misses the window by starting after it or by ending before
+        // it; saying "starts later" for the second case is simply wrong.
+        const when =
+          range && b.ends && b.ends < range.from
+            ? `ended ${b.ends}`
+            : b.starts
+              ? `starts ${b.starts}`
+              : `(${b.period})`;
+        return (
+          <div key={i} className="text-xs text-amber-700 dark:text-amber-400 break-words">
+            {label} {when}
+          </div>
+        );
+      })}
       <div className="text-xs text-amber-700/80 dark:text-amber-400/80">
-        Reports cover the dates your journal spans, so a budget starting later
-        has no goal yet. Widen the date filter to include it.
+        Reports cover the dates your journal spans, so a budget whose own period
+        falls outside that has no goal here. Adjust the date filter to cover it.
       </div>
     </div>
   );
@@ -520,18 +532,13 @@ function BudgetView({ dateFrom, dateTo, query, currency }: { dateFrom: string; d
     );
   }
 
-  // Summary totals: group per commodity and exclude income (negative-budget)
-  // rows so the "Spent"/"Budgeted" cards only cover expense budgets.
-  const expenseRows = budgetRows.filter((r) => parseFloat(r.budget) >= 0);
-  const incomeRowCount = budgetRows.length - expenseRows.length;
-  const totalsByCommodity = new Map<string, { budget: number; actual: number }>();
-  for (const r of expenseRows) {
-    const t = totalsByCommodity.get(r.commodity) ?? { budget: 0, actual: 0 };
-    t.budget += parseFloat(r.budget);
-    t.actual += parseFloat(r.actual);
-    totalsByCommodity.set(r.commodity, t);
-  }
-  const commodityTotals = [...totalsByCommodity.entries()]
+  // Totals come from the engine, which computes them from postings. Adding
+  // the rows up would double-count a budget nested inside another, since each
+  // row already includes its descendants.
+  const incomeRowCount = budgetRows.filter((r) => parseFloat(r.budget) < 0).length;
+  const commodityTotals: [string, { budget: number; actual: number }][] = totals
+    .map((t) => [t.commodity, { budget: parseFloat(t.budget), actual: parseFloat(t.actual) }] as [string, { budget: number; actual: number }])
+    .filter(([, v]) => v.budget >= 0)
     .sort((a, b) => Math.abs(b[1].budget) - Math.abs(a[1].budget));
   const mainTotal = commodityTotals[0];
   const extraCommodities = commodityTotals.length - 1;
@@ -816,7 +823,7 @@ function horizonDate(months: number): string {
   return `${d.getFullYear()}-${mm}-${dd}`;
 }
 
-function ForecastView({ accountList, dateFrom, dateTo, query, currency }: { accountList: string[]; dateFrom: string; dateTo: string; query: string; currency: string }) {
+function ForecastView({ accountList, query, currency }: { accountList: string[]; query: string; currency: string }) {
   // Empty means "let the backend pick every asset account by type".
   const [account, setAccount] = useState("");
   const [months, setMonths] = useState(12);
@@ -833,8 +840,6 @@ function ForecastView({ accountList, dateFrom, dateTo, query, currency }: { acco
     const horizon = horizonDate(months);
     const params: ReportParams = {
       targetCommodity: currency,
-      dateFrom: dateFrom || null,
-      dateTo: dateTo || null,
       query: query.trim() || null,
     };
     try {
@@ -851,7 +856,7 @@ function ForecastView({ accountList, dateFrom, dateTo, query, currency }: { acco
     } finally {
       if (seq === loadSeq.current) setLoading(false);
     }
-  }, [account, months, dateFrom, dateTo, query, currency]);
+  }, [account, months, query, currency]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -1270,7 +1275,11 @@ export function ReportsPage() {
             </button>
           ))}
         </div>
-        <DateFilter dateFrom={dateFrom} dateTo={dateTo} onChange={(f, t) => { setDateFrom(f); setDateTo(t); }} />
+        {/* The Forecast tab has its own horizon control; a second date filter
+            would clip the projection and contradict it. */}
+        {tab !== "forecast" && (
+          <DateFilter dateFrom={dateFrom} dateTo={dateTo} onChange={(f, t) => { setDateFrom(f); setDateTo(t); }} />
+        )}
         {showQuery || query ? (
           <div className="flex gap-2 items-center min-w-0">
             <input
@@ -1322,7 +1331,7 @@ export function ReportsPage() {
         {tab === "budget" ? (
           <div className="p-4"><BudgetView dateFrom={dateFrom} dateTo={dateTo} query={debouncedQuery} currency={defaultCurrency} /></div>
         ) : tab === "forecast" ? (
-          <div className="p-4"><ForecastView accountList={accountList} dateFrom={dateFrom} dateTo={dateTo} query={debouncedQuery} currency={defaultCurrency} /></div>
+          <div className="p-4"><ForecastView accountList={accountList} query={debouncedQuery} currency={defaultCurrency} /></div>
         ) : tab === "table" ? (
           <div className="p-4"><TableView dateFrom={dateFrom} dateTo={dateTo} query={debouncedQuery} currency={defaultCurrency} /></div>
         ) : tab === "register" ? (

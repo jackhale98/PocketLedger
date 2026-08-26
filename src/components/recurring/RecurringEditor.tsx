@@ -3,7 +3,7 @@ import { Autocomplete } from "../common/Autocomplete";
 import { useSettingsStore } from "../../store/settingsStore";
 import * as api from "../../api/commands";
 import { normalizeAmountInput } from "../../utils/amount";
-import type { ForecastRule, SaveForecastPosting } from "../../api/types";
+import type { JournalFileInfo, ForecastRule, SaveForecastPosting } from "../../api/types";
 
 const PERIOD_PRESETS = [
   { value: "monthly", label: "Monthly" },
@@ -35,6 +35,8 @@ export function RecurringEditor({ onDone }: { onDone: () => void }) {
   const [error, setError] = useState<string | null>(null);
   /** Source line of the rule being edited; null = creating a new one. */
   const [editingLine, setEditingLine] = useState<number | null>(null);
+  const [files, setFiles] = useState<JournalFileInfo[]>([]);
+  const [fileIndex, setFileIndex] = useState(0);
   const [deletingLine, setDeletingLine] = useState<number | null>(null);
 
   const loadRules = useCallback(async () => {
@@ -50,6 +52,10 @@ export function RecurringEditor({ onDone }: { onDone: () => void }) {
   useEffect(() => {
     loadRules().finally(() => setLoading(false));
   }, [loadRules]);
+
+  useEffect(() => {
+    api.listJournalFiles().then(setFiles).catch(() => setFiles([]));
+  }, []);
 
   const loadFromExisting = (rule: ForecastRule, asCopy = false) => {
     setPeriod(rule.period);
@@ -163,7 +169,15 @@ export function RecurringEditor({ onDone }: { onDone: () => void }) {
 
     try {
       setSaving(true);
-      await api.saveForecastRule(period.trim(), description.trim(), postings, editingLine);
+      await api.saveForecastRule(
+        period.trim(),
+        description.trim(),
+        postings,
+        editingLine,
+        // Editing rewrites the rule wherever it already lives, so the choice
+        // only applies to a new one.
+        editingLine === null ? fileIndex : undefined
+      );
       onDone();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -303,6 +317,25 @@ export function RecurringEditor({ onDone }: { onDone: () => void }) {
       </div>
 
       <div className="flex-1 overflow-y-auto overflow-x-hidden p-4 space-y-4">
+        {editingLine === null && files.length > 1 && (
+          <div className="min-w-0">
+            <label className="text-sm font-medium text-gray-700 dark:text-gray-300 block mb-2">
+              Add to file
+            </label>
+            <select
+              value={fileIndex}
+              onChange={(e) => setFileIndex(Number(e.target.value))}
+              className="w-full min-w-0 truncate min-h-[48px] px-3 py-2 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg text-sm text-gray-900 dark:text-gray-100"
+            >
+              {files.map((f) => (
+                <option key={f.index} value={f.index}>
+                  {f.name}{f.isMain ? " (main)" : ""}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+
         {/* Description */}
         <div>
           <label className="text-sm font-medium text-gray-700 dark:text-gray-300 block mb-2">

@@ -219,13 +219,24 @@ export interface InactiveBudget {
   period: string;
   description: string;
   accounts: string[];
-  /** First occurrence date, when the rule specifies one */
+  /** The rule's own start, when it has one */
   starts: string | null;
+  /** The rule's own last covered day, when it has one */
+  ends: string | null;
 }
 
 /** Budget goals vs actuals, plus budgets outside the reported range */
+/** Per-commodity totals, computed from postings — summing rows double-counts
+ *  nested budgets. */
+export interface BudgetTotal {
+  commodity: string;
+  budget: string;
+  actual: string;
+}
+
 export interface BudgetComparison {
   rows: BudgetRow[];
+  totals: BudgetTotal[];
   inactive: InactiveBudget[];
   /** The range actually reported on; "all time" means the journal's own span */
   from: string;

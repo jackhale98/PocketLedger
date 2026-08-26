@@ -363,13 +363,15 @@ export async function saveForecastRule(
   period: string,
   description: string,
   postings: SaveForecastPosting[],
-  replaceLine?: number | null
+  replaceLine?: number | null,
+  fileIndex?: number
 ): Promise<JournalSummary> {
   return invoke<JournalSummary>("save_forecast_rule", {
     period,
     description,
     postings,
     replaceLine: replaceLine ?? null,
+    fileIndex: fileIndex ?? null,
   });
 }
 

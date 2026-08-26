@@ -700,3 +700,162 @@ fn projection_matches_hledger_from_today() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Budget rows must match `hledger bal --budget` account for account.
+///
+/// This engine is a from-scratch reimplementation of hledger's budget
+/// semantics, and the nesting rules are subtle: a parent row rolls up its
+/// descendants on both the goal and the actual side. Pinning it against the
+/// real thing is the only way to know the two haven't drifted.
+#[test]
+fn budget_rows_match_hledger() {
+    if !hledger_available() {
+        eprintln!("skipping: hledger not installed");
+        return;
+    }
+
+    let cases: [(&str, &str, &str, &str); 3] = [
+        (
+            "nested",
+            // A budget nested inside another: the case where every row can be
+            // right and the total still wrong.
+            concat!(
+                "~ monthly from 2024-01-01  Fun\n",
+                "    expenses:fun-money             $100.00\n",
+                "    assets\n\n",
+                "~ monthly from 2024-01-01  Rides\n",
+                "    expenses:fun-money:ride-share   $50.00\n",
+                "    assets\n\n",
+                "2024-01-10 Concert\n    expenses:fun-money  $80.00\n    assets:checking\n\n",
+                "2024-01-12 Uber\n    expenses:fun-money:ride-share  $30.00\n    assets:checking\n",
+            ),
+            "2024-01-01",
+            "2024-02-01",
+        ),
+        (
+            "multi-period",
+            concat!(
+                "~ monthly from 2024-01-01  Food\n",
+                "    expenses:food  $200.00\n",
+                "    assets\n\n",
+                "2024-01-10 Shop\n    expenses:food  $150.00\n    assets:checking\n\n",
+                "2024-02-10 Shop\n    expenses:food  $260.00\n    assets:checking\n\n",
+                "2024-03-10 Shop\n    expenses:food  $190.00\n    assets:checking\n",
+            ),
+            "2024-01-01",
+            "2024-04-01",
+        ),
+        (
+            "bounded rule",
+            concat!(
+                "~ monthly from 2024-02-01 to 2024-04-01  Gas\n",
+                "    expenses:gas  $85.00\n",
+                "    assets\n\n",
+                "2024-01-10 Early\n    expenses:gas  $70.00\n    assets:checking\n\n",
+                "2024-02-10 In\n    expenses:gas  $90.00\n    assets:checking\n\n",
+                "2024-03-10 In\n    expenses:gas  $80.00\n    assets:checking\n",
+            ),
+            "2024-02-01",
+            "2024-04-01",
+        ),
+    ];
+
+    let dir = std::env::temp_dir().join(format!("hledger-budget-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    for (name, text, begin, end) in cases {
+        let path = dir.join(format!("{}.journal", name.replace(' ', "-")));
+        std::fs::write(&path, text).unwrap();
+
+        let output = Command::new("hledger")
+            .args([
+                "-f",
+                &path.to_string_lossy(),
+                "bal",
+                "--budget",
+                "-b",
+                begin,
+                "-e",
+                end,
+                "-O",
+                "csv",
+            ])
+            .output()
+            .expect("run hledger bal --budget");
+        assert!(
+            output.status.success(),
+            "{name}: hledger failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+
+        // account -> (actual, goal), both as plain decimals.
+        let mut expected: BTreeMap<String, (Decimal, Decimal)> = BTreeMap::new();
+        for line in stdout.lines().skip(1) {
+            let cols: Vec<String> = parse_csv_row(line);
+            if cols.len() < 3 || cols[0] == "Total:" {
+                continue;
+            }
+            let num = |s: &str| -> Decimal {
+                let cleaned: String = s.chars().filter(|c| c.is_ascii_digit() || *c == '-' || *c == '.').collect();
+                cleaned.parse().unwrap_or(Decimal::ZERO)
+            };
+            expected.insert(cols[0].clone(), (num(&cols[1]), num(&cols[2])));
+        }
+
+        let journal = hledger_parser::parse(text).unwrap();
+        let budgets = hledger_core::budget::extract_budgets(&journal);
+        let txns = hledger_core::balance::resolve_transactions(&journal).unwrap();
+        let report = hledger_core::budget::budget_comparison(
+            &txns,
+            &budgets,
+            &hledger_core::price_db::PriceDb::default(),
+            "$",
+            Some(chrono::NaiveDate::parse_from_str(begin, "%Y-%m-%d").unwrap()),
+            // hledger's -e is exclusive.
+            Some(
+                chrono::NaiveDate::parse_from_str(end, "%Y-%m-%d")
+                    .unwrap()
+                    .pred_opt()
+                    .unwrap(),
+            ),
+        );
+
+        for row in &report.rows {
+            let (their_actual, their_goal) = expected.get(&row.account).unwrap_or_else(|| {
+                panic!("{name}: hledger has no row for {}; it has {:?}", row.account, expected.keys().collect::<Vec<_>>())
+            });
+            let ours_actual: Decimal = row.actual.parse().unwrap();
+            let ours_goal: Decimal = row.budget.parse().unwrap();
+            assert_eq!(
+                ours_actual, *their_actual,
+                "{name}: actual differs for {}",
+                row.account
+            );
+            assert_eq!(
+                ours_goal, *their_goal,
+                "{name}: goal differs for {}",
+                row.account
+            );
+        }
+        assert!(!report.rows.is_empty(), "{name}: produced no rows");
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Minimal CSV row splitter for hledger's quoted output.
+fn parse_csv_row(line: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut field = String::new();
+    let mut in_quotes = false;
+    for c in line.chars() {
+        match c {
+            '"' => in_quotes = !in_quotes,
+            ',' if !in_quotes => out.push(std::mem::take(&mut field)),
+            _ => field.push(c),
+        }
+    }
+    out.push(field);
+    out
+}

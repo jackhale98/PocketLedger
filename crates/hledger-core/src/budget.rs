@@ -135,8 +135,20 @@ pub struct InactiveBudget {
     pub period: String,
     pub description: String,
     pub accounts: Vec<String>,
-    /// First occurrence outside the range, when the rule has one.
+    /// The rule's own start, when it has one.
     pub starts: Option<String>,
+    /// The rule's own end, when it has one. A rule can fall outside the range
+    /// by ending before it as easily as by starting after it.
+    pub ends: Option<String>,
+}
+
+/// Totals per commodity, computed from postings rather than by summing rows.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BudgetTotal {
+    pub commodity: String,
+    pub budget: String,
+    pub actual: String,
 }
 
 /// Budget goals against actuals, plus the budgets that fell outside the range.
@@ -144,6 +156,8 @@ pub struct InactiveBudget {
 #[serde(rename_all = "camelCase")]
 pub struct BudgetComparison {
     pub rows: Vec<BudgetRow>,
+    /// Per-commodity totals. Summing `rows` double-counts nested budgets.
+    pub totals: Vec<BudgetTotal>,
     pub inactive: Vec<InactiveBudget>,
     /// The range actually reported on, which for "all time" is the journal's
     /// own span — a budget starting after it legitimately has no goal.
@@ -201,6 +215,7 @@ pub fn budget_comparison(
     // there are no columns to fall back on, so each row is compared over its
     // own period. A rule with no `from`/`to` covers the whole range, which is
     // the common case and behaves exactly as before.
+    #[derive(Clone)]
     struct Goal {
         amount: Decimal,
         from: NaiveDate,
@@ -218,6 +233,13 @@ pub fn budget_comparison(
                 description: budget.description.clone(),
                 accounts: budget.entries.iter().map(|e| e.account.clone()).collect(),
                 starts: budget.period.start.map(|d| d.to_string()),
+                // `to` is exclusive in a period expression; report the last
+                // day the rule actually covers.
+                ends: budget
+                    .period
+                    .end
+                    .and_then(|e| e.pred_opt())
+                    .map(|d| d.to_string()),
             });
             continue;
         }
@@ -250,8 +272,29 @@ pub fn budget_comparison(
         }
     }
 
+    // hledger's tree rows include descendants on both sides: a goal on
+    // `expenses:fun` and another on `expenses:fun:rides` makes the parent row
+    // show the combined goal as well as the combined spend. Rolling up only
+    // the actual, as this did, left the parent looking over budget.
+    let authored = goals.clone();
+    let rolled: BTreeMap<(String, String), Goal> = authored
+        .iter()
+        .map(|((account, commodity), goal)| {
+            let mut merged = goal.clone();
+            let prefix = format!("{account}:");
+            for ((other, other_commodity), descendant) in &authored {
+                if other_commodity == commodity && other.starts_with(&prefix) {
+                    merged.amount += descendant.amount;
+                    merged.from = merged.from.min(descendant.from);
+                    merged.to = merged.to.max(descendant.to);
+                }
+            }
+            ((account.clone(), commodity.clone()), merged)
+        })
+        .collect();
+
     let mut rows = Vec::new();
-    for ((account, commodity), goal) in goals {
+    for ((account, commodity), goal) in rolled {
         // Sum the account and its subaccounts over the goal's own window.
         let mut actual_mixed = MixedAmount::zero();
         for txn in transactions {
@@ -299,8 +342,45 @@ pub fn budget_comparison(
         });
     }
 
+    // Totals are computed from postings, not by summing rows. Rows include
+    // their descendants on both sides, so adding them up counts a nested
+    // budget's spend twice — the classic "every row right, total wrong" bug.
+    // Each posting is attributed to the most specific budgeted account that
+    // covers it, so it lands in exactly one bucket.
+    let mut totals: BTreeMap<String, (Decimal, Decimal)> = BTreeMap::new();
+    for ((_, commodity), goal) in &authored {
+        totals.entry(commodity.clone()).or_default().0 += goal.amount;
+    }
+    for txn in transactions {
+        for posting in &txn.postings {
+            let full = &posting.account.full;
+            // Longest budgeted account that is this posting or an ancestor.
+            let owner = authored
+                .keys()
+                .filter(|(account, _)| {
+                    full == account || full.starts_with(&format!("{account}:"))
+                })
+                .max_by_key(|(account, _)| account.len());
+            let Some(key) = owner else { continue };
+            let Some(goal) = authored.get(key) else { continue };
+            if posting.date < goal.from || posting.date > goal.to {
+                continue;
+            }
+            let (value, _) = valued_quantity(&posting.amount, &key.1, price_db, goal.to);
+            totals.entry(key.1.clone()).or_default().1 += value;
+        }
+    }
+
     BudgetComparison {
         rows,
+        totals: totals
+            .into_iter()
+            .map(|(commodity, (budget, actual))| BudgetTotal {
+                commodity,
+                budget: budget.to_string(),
+                actual: actual.to_string(),
+            })
+            .collect(),
         inactive,
         from: from.to_string(),
         to: to.to_string(),
@@ -520,6 +600,60 @@ mod tests {
         let spec = parse_period_expression("yearly").unwrap();
         assert_eq!(count_occurrences(&spec, d(2026, 1, 1), d(2026, 1, 31)), 1);
         assert_eq!(count_occurrences(&spec, d(2026, 6, 1), d(2026, 6, 30)), 0);
+    }
+
+    #[test]
+    fn nested_budgets_roll_up_in_rows_but_are_not_double_counted_in_totals() {
+        // Verified against hledger 1.50.3:
+        //   hledger bal --budget -b 2024-01-01 -e 2024-02-01
+        //    expenses:fun-money            $110.00 [73% of $150.00]
+        //    expenses:fun-money:ride-share  $30.00 [60% of  $50.00]
+        // The parent rolls up the child on BOTH sides, so adding the rows
+        // together would count the child's $30 twice and its $50 goal twice.
+        let input = concat!(
+            "~ monthly from 2024-01-01  Fun\n",
+            "    expenses:fun-money             $100.00\n",
+            "    assets\n\n",
+            "~ monthly from 2024-01-01  Rides\n",
+            "    expenses:fun-money:ride-share   $50.00\n",
+            "    assets\n\n",
+            "2024-01-10 Concert\n",
+            "    expenses:fun-money             $80.00\n",
+            "    assets:checking\n\n",
+            "2024-01-12 Uber\n",
+            "    expenses:fun-money:ride-share  $30.00\n",
+            "    assets:checking\n",
+        );
+        let journal = parse(input).unwrap();
+        let budgets = extract_budgets(&journal);
+        let txns = resolve_transactions(&journal).unwrap();
+        // Same window hledger was given; without it the range defaults to the
+        // transaction span, which starts after the rules' 2024-01-01 occurrence.
+        let report = budget_comparison(
+            &txns,
+            &budgets,
+            &PriceDb::default(),
+            "$",
+            Some(d(2024, 1, 1)),
+            Some(d(2024, 1, 31)),
+        );
+
+        let parent = report.rows.iter().find(|r| r.account == "expenses:fun-money").unwrap();
+        assert_eq!(parent.budget, "150.00", "parent goal includes the child's");
+        assert_eq!(parent.actual, "110.00", "parent actual includes the child's");
+
+        let child = report
+            .rows
+            .iter()
+            .find(|r| r.account == "expenses:fun-money:ride-share")
+            .unwrap();
+        assert_eq!(child.budget, "50.00");
+        assert_eq!(child.actual, "30.00");
+
+        // The totals must not add the rows up.
+        let usd = report.totals.iter().find(|t| t.commodity == "$").unwrap();
+        assert_eq!(usd.budget, "150.00", "each authored goal counted once");
+        assert_eq!(usd.actual, "110.00", "each posting counted once");
     }
 
     #[test]
