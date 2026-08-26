@@ -172,6 +172,25 @@ pub async fn periodic_balance(
     let txns = transactions_for(loaded, &params)?;
     let commodity = resolve_target_commodity(loaded, params.target_commodity.as_deref());
 
+    // Narrow before building the report, not after: its column totals are
+    // computed from what it is given, so dropping rows later would leave
+    // totals describing accounts no longer shown.
+    use hledger_core::classify::AccountType;
+    let txns = match account_types.as_deref() {
+        None | Some("") | Some("all") => txns,
+        Some("income-expense") => hledger_core::classify::retain_postings_of_types(
+            &txns,
+            loaded.ledger.classifier(),
+            &[AccountType::Revenue, AccountType::Expense],
+        ),
+        Some("assets-liabilities") => hledger_core::classify::retain_postings_of_types(
+            &txns,
+            loaded.ledger.classifier(),
+            &[AccountType::Asset, AccountType::Cash, AccountType::Liability],
+        ),
+        Some(other) => return Err(format!("unknown account group '{other}'")),
+    };
+
     let mut report = hledger_core::periodic_report::periodic_balance_report(
         &txns,
         interval,
