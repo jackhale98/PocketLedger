@@ -3,6 +3,7 @@ import * as api from "../api/commands";
 import { useNavStore } from "../store/navStore";
 import { useAccountsViewStore } from "../store/accountsViewStore";
 import { formatAmount as fmtOne } from "../utils/format";
+import type { ValuationMode } from "../api/commands";
 import type { BalanceRow } from "../api/types";
 
 function formatAmounts(amounts: { commodity: string; quantity: string }[]): string {
@@ -39,6 +40,8 @@ export function AccountsPage() {
   const typeFilter = useAccountsViewStore((s) => s.typeFilter);
   const setTypeFilter = useAccountsViewStore((s) => s.setTypeFilter);
   const valueCurrency = useAccountsViewStore((s) => s.valueCurrency);
+  const valuation = useAccountsViewStore((s) => s.valuation);
+  const setValuation = useAccountsViewStore((s) => s.setValuation);
   const hideZero = useAccountsViewStore((s) => s.hideZero);
   const setHideZero = useAccountsViewStore((s) => s.setHideZero);
   const setValueCurrency = useAccountsViewStore((s) => s.setValueCurrency);
@@ -53,7 +56,7 @@ export function AccountsPage() {
     try {
       const [data, comms] = await Promise.all([
         valueCurrency
-          ? api.listAccountsWithBalances({ targetCommodity: valueCurrency })
+          ? api.listAccountsWithBalances({ targetCommodity: valueCurrency }, valuation)
           : api.listAccountsWithBalances(),
         api.listCommodities(),
       ]);
@@ -69,7 +72,7 @@ export function AccountsPage() {
     } finally {
       if (seq === loadSeq.current) setLoading(false);
     }
-  }, [valueCurrency]);
+  }, [valueCurrency, valuation]);
 
   useEffect(() => { loadAccounts(); }, [loadAccounts]);
 
@@ -229,6 +232,19 @@ export function AccountsPage() {
                 <option key={c} value={c}>{c}</option>
               ))}
             </select>
+            {/* Only meaningful once amounts are being converted: what a
+                holding cost, or the gain since, needs a currency to say it in. */}
+            {valueCurrency && (
+              <select
+                value={valuation}
+                onChange={(e) => setValuation(e.target.value as ValuationMode)}
+                className="shrink-0 min-w-0 px-2 py-1.5 bg-gray-100 dark:bg-gray-800 rounded-lg text-xs text-gray-900 dark:text-gray-100 border-none focus:outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                <option value="market">Value</option>
+                <option value="cost">Cost</option>
+                <option value="gain">Gain</option>
+              </select>
+            )}
           </div>
         )}
       </div>

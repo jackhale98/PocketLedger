@@ -132,10 +132,18 @@ export async function suggestPayees(prefix: string): Promise<string[]> {
 
 // ─── Reports ───
 
+/** "units" | "cost" | "market" | "gain" — hledger's balance calculation
+ *  modes. Omit for market value. */
+export type ValuationMode = "units" | "cost" | "market" | "gain";
+
 export async function balanceReport(
-  params: ReportParams = {}
+  params: ReportParams = {},
+  valuation?: ValuationMode
 ): Promise<BalanceRow[]> {
-  return invoke<BalanceRow[]>("balance_report", { params });
+  return invoke<BalanceRow[]>("balance_report", {
+    params,
+    valuation: valuation ?? null,
+  });
 }
 
 export async function registerReport(
@@ -207,10 +215,12 @@ export async function expenseBreakdownChart(
 }
 
 export async function listAccountsWithBalances(
-  params?: ReportParams
+  params?: ReportParams,
+  valuation?: ValuationMode
 ): Promise<BalanceRow[]> {
   return invoke<BalanceRow[]>("list_accounts_with_balances", {
     params: params ?? null,
+    valuation: valuation ?? null,
   });
 }
 

@@ -94,6 +94,8 @@ pub fn resolve_target_commodity(
 
 #[tauri::command]
 pub async fn balance_report(
+    // "units" | "cost" | "market" | "gain"; omit for market value.
+    valuation: Option<String>,
     params: ReportParams,
     state: State<'_, Mutex<crate::AppState>>,
 ) -> Result<Vec<reports::BalanceRow>, String> {
@@ -104,13 +106,19 @@ pub async fn balance_report(
     // Valued like every other report, so the currency the user picked applies
     // here too rather than only in the charts.
     let commodity = resolve_target_commodity(loaded, params.target_commodity.as_deref());
-    let mut rows = reports::balance_report_valued(
+    let mode = match valuation.as_deref().filter(|v| !v.is_empty()) {
+        None => reports::ValuationMode::Market,
+        Some(name) => reports::parse_valuation_mode(name)
+            .ok_or_else(|| format!("unknown valuation mode '{name}'"))?,
+    };
+    let mut rows = reports::balance_report_mode(
         &txns,
         params.account_filter.as_deref(),
         parse_date(&params.date_from),
         parse_date(&params.date_to),
         &commodity,
         loaded.ledger.price_db(),
+        mode,
     );
     hledger_core::styles::apply::balance_rows(&mut rows, loaded.ledger.styles());
     Ok(rows)
@@ -398,6 +406,7 @@ pub async fn valuation_info(
 
 #[tauri::command]
 pub async fn list_accounts_with_balances(
+    valuation: Option<String>,
     params: Option<ReportParams>,
     state: State<'_, Mutex<crate::AppState>>,
 ) -> Result<Vec<reports::BalanceRow>, String> {
@@ -407,21 +416,32 @@ pub async fn list_accounts_with_balances(
     let effective = params.clone().unwrap_or_default();
     let txns = transactions_for(loaded, &effective)?;
 
-    let mut rows = match params
+    // No target currency means show what is actually held; with one, the
+    // requested mode applies (market value unless asked otherwise).
+    let target = params
         .as_ref()
         .and_then(|p| p.target_commodity.as_deref())
-        .filter(|t| !t.is_empty())
-    {
-        Some(target) => reports::balance_report_valued(
-            &txns,
-            params.as_ref().and_then(|p| p.account_filter.as_deref()),
-            params.as_ref().and_then(|p| parse_date(&p.date_from)),
-            params.as_ref().and_then(|p| parse_date(&p.date_to)),
-            target,
-            loaded.ledger.price_db(),
-        ),
-        None => reports::balance_report(&txns, None, None, None),
+        .filter(|t| !t.is_empty());
+    let mode = match valuation.as_deref().filter(|v| !v.is_empty()) {
+        None => {
+            if target.is_some() {
+                reports::ValuationMode::Market
+            } else {
+                reports::ValuationMode::Units
+            }
+        }
+        Some(name) => reports::parse_valuation_mode(name)
+            .ok_or_else(|| format!("unknown valuation mode '{name}'"))?,
     };
+    let mut rows = reports::balance_report_mode(
+        &txns,
+        params.as_ref().and_then(|p| p.account_filter.as_deref()),
+        params.as_ref().and_then(|p| parse_date(&p.date_from)),
+        params.as_ref().and_then(|p| parse_date(&p.date_to)),
+        target.unwrap_or_default(),
+        loaded.ledger.price_db(),
+        mode,
+    );
     hledger_core::styles::apply::balance_rows(&mut rows, loaded.ledger.styles());
     Ok(rows)
 }

@@ -1798,3 +1798,81 @@ fn virtual_postings_match_hledger() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Cost, market and gain modes must match `hledger bal -B`, `-V` and `--gain`.
+///
+/// These are the lot-adjacent features the released hledger already has, and
+/// gain in particular is easy to get subtly wrong: it is market value minus
+/// cost basis, and both sides have to be computed over the same postings.
+#[test]
+fn valuation_modes_match_hledger() {
+    if !hledger_available() {
+        eprintln!("skipping: hledger not installed");
+        return;
+    }
+    use hledger_core::reports::ValuationMode;
+
+    let text = concat!(
+        "P 2024-06-01 AAPL $150.00\n\n",
+        "2024-01-10 Buy\n    assets:broker    10 AAPL @ $100.00\n    assets:cash\n\n",
+        "2024-03-10 Buy more\n    assets:broker     5 AAPL @ $120.00\n    assets:cash\n",
+    );
+
+    let dir = std::env::temp_dir().join(format!("hledger-lots-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("lots.journal");
+    std::fs::write(&path, text).unwrap();
+
+    let journal = hledger_parser::parse(text).unwrap();
+    let txns = hledger_core::balance::resolve_transactions(&journal).unwrap();
+    let price_db = hledger_core::price_db::PriceDb::from_journal(&journal);
+    let styles = hledger_core::styles::CommodityStyles::from_journal(&journal);
+
+    for (flag, mode) in [
+        ("-B", ValuationMode::Cost),
+        ("-V", ValuationMode::Market),
+        ("--gain", ValuationMode::Gain),
+    ] {
+        // --infer-market-prices to match how this app builds its price
+        // database: a purchase at a cost is a price observation, so a user who
+        // never writes P directives still sees their holdings valued. hledger
+        // makes that opt-in; we make it the default and say so here.
+        let Some(expected) = hledger_balances_with(&path, &[flag, "--infer-market-prices"])
+        else {
+            continue;
+        };
+
+        let mut rows = hledger_core::reports::balance_report_mode(
+            &txns, None, None, None, "$", &price_db, mode,
+        );
+        hledger_core::styles::apply::balance_rows(&mut rows, &styles);
+        let ours: BTreeMap<String, CommodityMap> = rows
+            .iter()
+            .map(|r| {
+                let m: CommodityMap = r
+                    .amounts
+                    .iter()
+                    .filter_map(|a| {
+                        a.quantity
+                            .parse::<Decimal>()
+                            .ok()
+                            .filter(|q| !q.is_zero())
+                            .map(|q| (a.commodity.clone(), q))
+                    })
+                    .collect();
+                (r.account.clone(), m)
+            })
+            .filter(|(_, m)| !m.is_empty())
+            .collect();
+
+        for (account, amounts) in rolled_up(&expected) {
+            assert_eq!(
+                ours.get(&account).cloned().unwrap_or_default(),
+                amounts,
+                "{flag}: account {account} differs"
+            );
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

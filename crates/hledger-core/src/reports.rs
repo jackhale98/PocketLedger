@@ -277,12 +277,10 @@ pub fn balance_report_valued(
     target_commodity: &str,
     price_db: &PriceDb,
 ) -> Vec<BalanceRow> {
-    let valuation_date = date_to.unwrap_or_else(|| {
-        transactions
-            .last()
-            .map(|t| t.date)
-            .unwrap_or_else(|| chrono::Local::now().date_naive())
-    });
+    // Today, not the last transaction: a journal that hasn't been touched in
+    // months should still be valued at the newest price available, which is
+    // what `hledger -V` does.
+    let valuation_date = date_to.unwrap_or_else(|| chrono::Local::now().date_naive());
 
     let mut balances: BTreeMap<String, MixedAmount> = BTreeMap::new();
 
@@ -644,12 +642,10 @@ pub fn expense_breakdown(
     let prefix = parent_prefix.unwrap_or("expenses");
     let prefix_depth = prefix.matches(':').count() + 1; // depth of children
 
-    let valuation_date = date_to.unwrap_or_else(|| {
-        transactions
-            .last()
-            .map(|t| t.date)
-            .unwrap_or_else(|| chrono::Local::now().date_naive())
-    });
+    // Today, not the last transaction: a journal that hasn't been touched in
+    // months should still be valued at the newest price available, which is
+    // what `hledger -V` does.
+    let valuation_date = date_to.unwrap_or_else(|| chrono::Local::now().date_naive());
 
     let mut by_category: BTreeMap<String, Decimal> = BTreeMap::new();
 
@@ -726,10 +722,8 @@ struct SectionData {
 /// conversion path in their own units rather than dropping them.
 /// Prices are looked up as of the report's end date, falling back to the last
 /// transaction so a report with no explicit end still uses current prices.
-fn valuation_date(transactions: &[ResolvedTransaction], date_to: Option<NaiveDate>) -> NaiveDate {
-    date_to
-        .or_else(|| transactions.iter().map(|t| t.date).max())
-        .unwrap_or_else(|| chrono::Local::now().date_naive())
+fn valuation_date(_transactions: &[ResolvedTransaction], date_to: Option<NaiveDate>) -> NaiveDate {
+    date_to.unwrap_or_else(|| chrono::Local::now().date_naive())
 }
 
 fn value_section(data: SectionData, target: &str, price_db: &PriceDb, date: NaiveDate) -> SectionData {
@@ -1648,4 +1642,101 @@ pub fn journal_statistics(transactions: &[ResolvedTransaction]) -> JournalStatis
             .map(|(period, postings)| ActivityPoint { period, postings })
             .collect(),
     }
+}
+
+/// How to value a balance, mirroring hledger's balance calculation modes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValuationMode {
+    /// The units held, unconverted (hledger's default).
+    Units,
+    /// What was paid: each posting's cost where one was written, else the
+    /// posting itself (`-B` / `--cost`).
+    Cost,
+    /// Worth at market prices on the valuation date (`-V` / `-X`).
+    Market,
+    /// Unrealised capital gain: market value minus cost basis (`--gain`).
+    Gain,
+}
+
+pub fn parse_valuation_mode(name: &str) -> Option<ValuationMode> {
+    match name {
+        "units" => Some(ValuationMode::Units),
+        "cost" => Some(ValuationMode::Cost),
+        "market" | "value" => Some(ValuationMode::Market),
+        "gain" => Some(ValuationMode::Gain),
+        _ => None,
+    }
+}
+
+/// What a posting cost: its cost amount when written with `@`/`@@`, else the
+/// posting's own amount. A cash posting has no cost of its own — the money is
+/// the cost.
+pub fn posting_cost(posting: &crate::balance::ResolvedPosting) -> MixedAmount {
+    posting.cost.clone().unwrap_or_else(|| posting.amount.clone())
+}
+
+/// A balance report in one of hledger's valuation modes.
+///
+/// `Gain` is the interesting one: it answers "how much of this balance is
+/// profit I haven't taken yet", which needs both sides — what the holding is
+/// worth now and what it cost — and is meaningless in the units the holding
+/// is denominated in.
+pub fn balance_report_mode(
+    transactions: &[ResolvedTransaction],
+    account_filter: Option<&str>,
+    date_from: Option<NaiveDate>,
+    date_to: Option<NaiveDate>,
+    target_commodity: &str,
+    price_db: &PriceDb,
+    mode: ValuationMode,
+) -> Vec<BalanceRow> {
+    let valuation_date = date_to.unwrap_or_else(|| chrono::Local::now().date_naive());
+
+    let mut units: BTreeMap<String, MixedAmount> = BTreeMap::new();
+    let mut costs: BTreeMap<String, MixedAmount> = BTreeMap::new();
+
+    for txn in transactions {
+        for posting in &txn.postings {
+            if let Some(filter) = account_filter {
+                if !account_matches_prefix(&posting.account.full, filter) {
+                    continue;
+                }
+            }
+            if !date_in_range(posting.date, date_from, date_to) {
+                continue;
+            }
+            units
+                .entry(posting.account.full.clone())
+                .or_insert_with(MixedAmount::zero)
+                .add_mixed(&posting.amount);
+            costs
+                .entry(posting.account.full.clone())
+                .or_insert_with(MixedAmount::zero)
+                .add_mixed(&posting_cost(posting));
+        }
+    }
+
+    let valued: BTreeMap<String, MixedAmount> = units
+        .iter()
+        .map(|(account, held)| {
+            let amount = match mode {
+                ValuationMode::Units => held.clone(),
+                ValuationMode::Cost => costs.get(account).cloned().unwrap_or_default(),
+                ValuationMode::Market => {
+                    convert_mixed(held, target_commodity, price_db, valuation_date)
+                }
+                ValuationMode::Gain => {
+                    let market =
+                        convert_mixed(held, target_commodity, price_db, valuation_date);
+                    let cost = costs.get(account).cloned().unwrap_or_default();
+                    let mut gain = market;
+                    gain.subtract(&cost);
+                    gain
+                }
+            };
+            (account.clone(), amount)
+        })
+        .collect();
+
+    rows_with_parents(valued)
 }
