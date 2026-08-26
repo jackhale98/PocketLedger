@@ -951,6 +951,18 @@ pub async fn suggest_descriptions(
     }
 }
 
+/// Accounts previously paired with this description, most-used first, so a
+/// repeat purchase can be filled in rather than retyped.
+#[tauri::command]
+pub async fn accounts_for_description(
+    description: String,
+    state: State<'_, Mutex<crate::AppState>>,
+) -> Result<Vec<String>, String> {
+    let app_state = state.lock().map_err(|e| e.to_string())?;
+    let loaded = app_state.journal.as_ref().ok_or("No journal loaded")?;
+    Ok(loaded.ledger.accounts_for_description(&description))
+}
+
 #[tauri::command]
 pub async fn suggest_payees(
     prefix: String,

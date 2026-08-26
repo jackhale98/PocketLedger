@@ -12,6 +12,9 @@ interface AccountsViewState {
   search: string;
   typeFilter: string;
   valueCurrency: string;
+  /** Hide accounts whose balance is zero — long-closed accounts otherwise
+   *  crowd a small screen. */
+  hideZero: boolean;
 
   setExpanded: (expanded: Set<string>) => void;
   /** Apply the default expansion, but only the first time. */
@@ -19,6 +22,7 @@ interface AccountsViewState {
   setSearch: (search: string) => void;
   setTypeFilter: (typeFilter: string) => void;
   setValueCurrency: (valueCurrency: string) => void;
+  setHideZero: (hideZero: boolean) => void;
 }
 
 export const useAccountsViewStore = create<AccountsViewState>((set) => ({
@@ -27,6 +31,7 @@ export const useAccountsViewStore = create<AccountsViewState>((set) => ({
   search: "",
   typeFilter: "",
   valueCurrency: "",
+  hideZero: false,
 
   setExpanded: (expanded) => set({ expanded }),
   initializeExpanded: (expanded) =>
@@ -34,4 +39,5 @@ export const useAccountsViewStore = create<AccountsViewState>((set) => ({
   setSearch: (search) => set({ search }),
   setTypeFilter: (typeFilter) => set({ typeFilter }),
   setValueCurrency: (valueCurrency) => set({ valueCurrency }),
+  setHideZero: (hideZero) => set({ hideZero }),
 }));

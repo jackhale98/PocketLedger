@@ -103,6 +103,23 @@ export function TransactionForm({
     []
   );
 
+  /** Fill blank account fields from what this payee usually posts to.
+   *  Only blanks — never overwrite something the user typed. */
+  const fillAccountsFromDescription = useCallback(async (value: string) => {
+    if (!value.trim()) return;
+    const learned = await api.accountsForDescription(value).catch(() => []);
+    if (learned.length === 0) return;
+    setPostings((prev) => {
+      const used = new Set(prev.map((p) => p.account.trim()).filter(Boolean));
+      let next = learned.filter((a) => !used.has(a));
+      return prev.map((p) =>
+        p.account.trim() || next.length === 0
+          ? p
+          : { ...p, account: next.shift() as string }
+      );
+    });
+  }, []);
+
   const suggestDescriptions = useCallback(
     (prefix: string) => api.suggestDescriptions(prefix),
     []
@@ -347,6 +364,7 @@ export function TransactionForm({
           <Autocomplete
             value={description}
             onChange={setDescription}
+            onCommit={fillAccountsFromDescription}
             onSuggest={suggestDescriptions}
             placeholder="Payee or description"
           />

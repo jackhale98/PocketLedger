@@ -119,6 +119,13 @@ export async function suggestDescriptions(prefix: string): Promise<string[]> {
   return invoke<string[]>("suggest_descriptions", { prefix });
 }
 
+/** Accounts previously used with this description, most-used first. */
+export async function accountsForDescription(
+  description: string
+): Promise<string[]> {
+  return invoke<string[]>("accounts_for_description", { description });
+}
+
 export async function suggestPayees(prefix: string): Promise<string[]> {
   return invoke<string[]>("suggest_payees", { prefix });
 }

@@ -3,6 +3,9 @@ import { useState, useRef, useEffect } from "react";
 interface AutocompleteProps {
   value: string;
   onChange: (value: string) => void;
+  /** Fired when the value is settled — a suggestion picked or the field left
+   *  — rather than on every keystroke. */
+  onCommit?: (value: string) => void;
   onSuggest: (prefix: string) => Promise<string[]>;
   placeholder?: string;
   className?: string;
@@ -12,6 +15,7 @@ interface AutocompleteProps {
 export function Autocomplete({
   value,
   onChange,
+  onCommit,
   onSuggest,
   placeholder,
   className = "",
@@ -51,6 +55,7 @@ export function Autocomplete({
 
   const handleSelect = (suggestion: string) => {
     onChange(suggestion);
+    onCommit?.(suggestion);
     setShowSuggestions(false);
     setHighlightIndex(-1);
   };
@@ -86,6 +91,7 @@ export function Autocomplete({
         onChange={(e) => onChange(e.target.value)}
         onFocus={() => setShowSuggestions(true)}
         onBlur={() => {
+          onCommit?.(value);
           // Delay to allow click on suggestion
           setTimeout(() => setShowSuggestions(false), 200);
         }}

@@ -53,6 +53,8 @@ export function AccountsPage() {
   const typeFilter = useAccountsViewStore((s) => s.typeFilter);
   const setTypeFilter = useAccountsViewStore((s) => s.setTypeFilter);
   const valueCurrency = useAccountsViewStore((s) => s.valueCurrency);
+  const hideZero = useAccountsViewStore((s) => s.hideZero);
+  const setHideZero = useAccountsViewStore((s) => s.setHideZero);
   const setValueCurrency = useAccountsViewStore((s) => s.setValueCurrency);
   const [commodities, setCommodities] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -98,8 +100,23 @@ export function AccountsPage() {
       result = result.filter((a) => a.account.toLowerCase().includes(q));
     }
 
+    if (hideZero) {
+      // Keep a parent whose descendants still have a balance, or hiding a
+      // zeroed parent would orphan its children.
+      const nonZero = new Set(
+        result
+          .filter((a) => a.amounts.some((m) => parseFloat(m.quantity) !== 0))
+          .map((a) => a.account)
+      );
+      result = result.filter(
+        (a) =>
+          nonZero.has(a.account) ||
+          [...nonZero].some((n) => n.startsWith(a.account + ":"))
+      );
+    }
+
     return result;
-  }, [allAccounts, typeFilter, search]);
+  }, [allAccounts, typeFilter, search, hideZero]);
 
   // Determine visible accounts based on expanded state
   const visibleAccounts = useMemo(() => {
@@ -200,6 +217,16 @@ export function AccountsPage() {
               {type.label}
             </button>
           ))}
+          <button
+            onClick={() => setHideZero(!hideZero)}
+            className={`px-3 py-1.5 text-xs font-medium rounded-full whitespace-nowrap ${
+              hideZero
+                ? "bg-blue-600 text-white"
+                : "bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 active:bg-gray-200 dark:active:bg-gray-700"
+            }`}
+          >
+            Hide zero
+          </button>
         </div>
 
         {/* Value in currency */}

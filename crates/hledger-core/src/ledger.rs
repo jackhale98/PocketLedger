@@ -132,6 +132,37 @@ impl Ledger {
     }
 
     /// Get account names matching a prefix (case-insensitive).
+    /// Accounts previously used with this description, most-used first.
+    ///
+    /// Entering a transaction on a phone is mostly retyping something you have
+    /// entered before; "Whole Foods" almost always means the same two
+    /// accounts. Matching is case-insensitive and ignores anything after a
+    /// `|`, which hledger treats as the payee/note separator.
+    pub fn accounts_for_description(&self, description: &str) -> Vec<String> {
+        let key = |s: &str| -> String {
+            s.split('|').next().unwrap_or(s).trim().to_lowercase()
+        };
+        let wanted = key(description);
+        if wanted.is_empty() {
+            return Vec::new();
+        }
+
+        let mut counts: std::collections::BTreeMap<String, usize> =
+            std::collections::BTreeMap::new();
+        for txn in &self.transactions {
+            if key(&txn.description) != wanted {
+                continue;
+            }
+            for posting in &txn.postings {
+                *counts.entry(posting.account.full.clone()).or_insert(0) += 1;
+            }
+        }
+
+        let mut ranked: Vec<(String, usize)> = counts.into_iter().collect();
+        ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        ranked.into_iter().map(|(account, _)| account).collect()
+    }
+
     pub fn suggest_accounts(&self, prefix: &str) -> Vec<String> {
         let prefix_lower = prefix.to_lowercase();
         self.account_tree
@@ -182,6 +213,30 @@ impl Ledger {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn accounts_for_description_ranks_by_use() {
+        let journal = hledger_parser::parse(concat!(
+            "2024-01-05 Whole Foods\n    expenses:food  $50.00\n    assets:checking\n\n",
+            "2024-02-05 Whole Foods\n    expenses:food  $60.00\n    assets:checking\n\n",
+            "2024-03-05 Whole Foods\n    expenses:food  $20.00\n    assets:cash\n\n",
+            "2024-04-05 Petrol\n    expenses:car  $40.00\n    assets:checking\n",
+        ))
+        .unwrap();
+        let ledger = Ledger::from_journal(&journal).unwrap();
+
+        let accounts = ledger.accounts_for_description("whole foods");
+        assert_eq!(accounts[0], "expenses:food", "used every time");
+        assert_eq!(accounts[1], "assets:checking", "used twice");
+        assert!(accounts.contains(&"assets:cash".to_string()));
+        assert!(!accounts.contains(&"expenses:car".to_string()), "other payee");
+
+        // The payee/note separator is ignored, and an empty query matches none.
+        assert_eq!(ledger.accounts_for_description("Whole Foods | weekly")[0], "expenses:food");
+        assert!(ledger.accounts_for_description("  ").is_empty());
+    }
+
     use super::*;
     use hledger_parser::parse;
 

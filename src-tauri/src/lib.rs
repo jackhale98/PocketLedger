@@ -58,6 +58,7 @@ pub fn run() {
             commands::journal::suggest_accounts,
             commands::journal::suggest_descriptions,
             commands::journal::suggest_payees,
+            commands::journal::accounts_for_description,
             commands::transactions::list_transactions,
             commands::transactions::search_transactions,
             commands::transactions::get_transaction,
