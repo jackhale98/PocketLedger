@@ -6,9 +6,6 @@ import { formatAmount as fmtOne } from "../utils/format";
 import type { ValuationMode } from "../api/commands";
 import type { BalanceRow } from "../api/types";
 
-function formatAmounts(amounts: { commodity: string; quantity: string }[]): string {
-  return amounts.map((a) => fmtOne(a.quantity, a.commodity)).join(", ");
-}
 
 const ACCOUNT_TYPES = [
   { value: "", label: "All" },
@@ -273,12 +270,6 @@ export function AccountsPage() {
               const shortName = search.trim()
                 ? row.account
                 : row.account.split(":").pop() ?? row.account;
-              const isLeaf = !canExpand;
-              const isMultiCommodity = row.amounts.length > 1;
-              // In valued mode (single currency), always show totals including parents.
-              // In original mode, hide parent accounts with many commodities.
-              const showAmount = !!valueCurrency || isLeaf || row.amounts.length <= 2;
-              const isNegative = !isMultiCommodity && parseFloat(row.amounts[0]?.quantity ?? "0") < 0;
               const displayDepth = search.trim() ? 0 : row.depth;
 
               return (
@@ -310,18 +301,23 @@ export function AccountsPage() {
                     {shortName}
                   </button>
 
-                  {/* Balance */}
-                  {showAmount && (
-                    <span
-                      className={`text-sm font-mono shrink-0 ml-2 text-right max-w-[45%] truncate ${
-                        isMultiCommodity
-                          ? "text-gray-700 dark:text-gray-300"
-                          : isNegative ? "text-red-500" : "text-green-500"
-                      }`}
-                    >
-                      {formatAmounts(row.amounts)}
-                    </span>
-                  )}
+                  {/* Balance. A parent holding several commodities gets one
+                      line each, the way hledger prints it -- previously any
+                      parent with more than two was given no total at all,
+                      which left Assets and Equity looking empty while the
+                      single-currency trees showed theirs. */}
+                  <div className="shrink-0 ml-2 text-right max-w-[55%] flex flex-col items-end">
+                    {row.amounts.map((amount, i) => (
+                      <span
+                        key={`${amount.commodity}-${i}`}
+                        className={`text-sm font-mono truncate max-w-full ${
+                          parseFloat(amount.quantity) < 0 ? "text-red-500" : "text-green-500"
+                        }`}
+                      >
+                        {fmtOne(amount.quantity, amount.commodity)}
+                      </span>
+                    ))}
+                  </div>
                 </div>
               );
             })}

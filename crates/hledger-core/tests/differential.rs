@@ -2152,3 +2152,76 @@ fn twr_matches_hledger_valued_on_each_date() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A parent account holding several commodities must roll every one of them
+/// up, matching `hledger bal --depth 1`.
+///
+/// The Accounts screen used to render no total at all for a parent with more
+/// than two commodities, so the two mixed trees -- the ones most worth
+/// totalling -- appeared blank beside the single-currency ones. The rollup
+/// itself was right; only the display suppressed it. This pins the rollup so a
+/// future change to either cannot drift from the CLI unnoticed.
+#[test]
+fn multi_commodity_parents_roll_up_every_commodity() {
+    if !hledger_available() {
+        eprintln!("skipping: hledger not installed");
+        return;
+    }
+
+    let text = concat!(
+        "2024-01-01 shares\n    assets:broker:gme      4.000 GME @ $20.00\n    assets:cash\n\n",
+        "2024-01-02 more shares\n    assets:broker:joby     5.000 JOBY @ $8.00\n    assets:cash\n\n",
+        "2024-01-03 fund\n    assets:ira:vtwax      10.500 VTWAX @ $30.00\n    assets:cash\n\n",
+        "2024-01-04 salary\n    assets:cash        $2000.00\n    income:salary\n\n",
+        "2024-01-05 card\n    expenses:food        $40.00\n    liabilities:card\n",
+    );
+
+    let dir = std::env::temp_dir().join(format!("hledger-rollup-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("rollup.journal");
+    std::fs::write(&path, text).unwrap();
+
+    let output = Command::new("hledger")
+        .args(["-f", &path.to_string_lossy(), "bal", "--depth", "1", "-O", "csv"])
+        .output()
+        .expect("run hledger bal");
+    assert!(
+        output.status.success(),
+        "hledger bal failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Compared as commodity -> quantity, so that "$1565.00" and "1565.00 $"
+    // -- the same amount written either way round -- do not read as a
+    // difference in the rollup.
+    let mut theirs: Vec<(String, CommodityMap)> = Vec::new();
+    for line in stdout.lines().skip(1) {
+        let cells: Vec<&str> = line.trim_matches('"').split("\",\"").collect();
+        if cells.len() != 2 || cells[0] == "Total:" {
+            continue;
+        }
+        theirs.push((cells[0].to_string(), parse_amount_cell(cells[1])));
+    }
+    assert!(
+        theirs.iter().any(|(_, a)| a.len() > 2),
+        "fixture should produce a parent with more than two commodities"
+    );
+
+    let journal = hledger_parser::parse(text).unwrap();
+    let txns = hledger_core::balance::resolve_transactions(&journal).unwrap();
+    let ledger = hledger_core::ledger::Ledger::from_journal(&journal).unwrap();
+    let mut rows = hledger_core::reports::balance_report(&txns, None, None, None);
+    hledger_core::styles::apply::balance_rows(&mut rows, ledger.styles());
+
+    for (account, their_amounts) in theirs {
+        let name = rows
+            .iter()
+            .find(|r| r.depth == 0 && r.account.eq_ignore_ascii_case(&account))
+            .map(|r| r.account.clone())
+            .unwrap_or_else(|| panic!("no top-level row for {account}"));
+        assert_eq!(row_amounts(&rows, &name), their_amounts, "rollup for {account}");
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
