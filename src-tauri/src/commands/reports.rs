@@ -462,7 +462,9 @@ pub async fn commodity_prices(
 ) -> Result<Vec<hledger_core::price_db::PriceSeries>, String> {
     let app_state = state.lock().map_err(|e| e.to_string())?;
     let loaded = app_state.journal.as_ref().ok_or("No journal loaded")?;
-    Ok(loaded.ledger.price_db().series())
+    let mut series = loaded.ledger.price_db().series();
+    hledger_core::styles::apply::prices(&mut series, loaded.ledger.styles());
+    Ok(series)
 }
 
 #[tauri::command]

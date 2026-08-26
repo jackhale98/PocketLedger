@@ -992,6 +992,16 @@ impl<'a> Parser<'a> {
             (c, p.trim())
         };
 
+        // A directive may carry a trailing comment. Without stripping it the
+        // amount fails to parse and the whole price is dropped in silence --
+        // a journal recording "P 2021-03-08 VLXVX 27.97 USD ; from statement"
+        // lost that price and every report valued from it. The commodity has
+        // already been taken above, so a ';' here can only start a comment.
+        let price_str = match price_str.find(';') {
+            Some(i) => price_str[..i].trim(),
+            None => price_str,
+        };
+
         if price_str.is_empty() {
             return None;
         }
@@ -1707,5 +1717,36 @@ mod tests {
         // A virtual posting with an empty account: "()  $5.00"
         let input = "2024-01-15 T\n    ()  $5.00\n    assets:cash\n";
         assert!(parse(input).is_err());
+    }
+}
+
+#[cfg(test)]
+mod price_comment_tests {
+    use super::*;
+
+    /// A trailing comment on a price directive must not discard the price.
+    ///
+    /// A real journal annotating its prices ("; from statement/trade") lost 21
+    /// of 137 prices this way, silently, which then skewed every valued
+    /// report -- net worth, balance sheet, returns.
+    #[test]
+    fn a_price_directive_may_carry_a_comment() {
+        let journal = parse(concat!(
+            "P 2021-03-08 VLXVX 27.97 USD   ; from statement/trade\n",
+            "P 2021-03-09 VLXVX 28.10 USD\n",
+        ))
+        .unwrap();
+        let prices: Vec<_> = journal
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                JournalItem::PriceDirective(pd) => Some(pd),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(prices.len(), 2, "both prices must survive");
+        assert_eq!(prices[0].commodity, "VLXVX");
+        assert_eq!(prices[0].price_commodity, "USD");
+        assert_eq!(prices[0].price_quantity.to_string(), "27.97");
     }
 }

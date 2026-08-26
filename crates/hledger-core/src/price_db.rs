@@ -42,41 +42,34 @@ impl PriceDb {
     pub fn from_journal(journal: &Journal) -> Self {
         let mut db = Self::new();
 
+        // Costs first, `P` directives second. `add_price` is last-write-wins,
+        // so this is what gives a declared price precedence over one derived
+        // from a transaction's cost on the same day -- hledger does the same,
+        // printing the declared `P 2021-03-08 VLXVX 27.97 USD` rather than the
+        // 27.9704839345... implied by that day's `@@` exchange.
         for item in &journal.items {
-            match item {
-                JournalItem::PriceDirective(pd) => {
-                    db.add_price(pd.date, &pd.commodity, &pd.price_commodity, pd.price_quantity);
-                }
-                JournalItem::Transaction(txn) => {
-                    for posting in &txn.postings {
-                        if let Some(ref amt) = posting.amount {
-                            if let Some(ref cost) = amt.cost {
-                                match cost {
-                                    Cost::UnitCost(c) => {
-                                        db.add_price(
-                                            txn.date,
-                                            &amt.commodity,
-                                            &c.commodity,
-                                            c.quantity,
-                                        );
-                                    }
-                                    Cost::TotalCost(c) => {
-                                        if !amt.quantity.is_zero() {
-                                            let rate = c.quantity / amt.quantity;
-                                            db.add_price(
-                                                txn.date,
-                                                &amt.commodity,
-                                                &c.commodity,
-                                                rate.abs(),
-                                            );
-                                        }
-                                    }
-                                }
+            if let JournalItem::Transaction(txn) = item {
+                for posting in &txn.postings {
+                    let Some(ref amt) = posting.amount else { continue };
+                    let Some(ref cost) = amt.cost else { continue };
+                    match cost {
+                        Cost::UnitCost(c) => {
+                            db.add_price(txn.date, &amt.commodity, &c.commodity, c.quantity);
+                        }
+                        Cost::TotalCost(c) => {
+                            if !amt.quantity.is_zero() {
+                                let rate = c.quantity / amt.quantity;
+                                db.add_price(txn.date, &amt.commodity, &c.commodity, rate.abs());
                             }
                         }
                     }
                 }
-                _ => {}
+            }
+        }
+
+        for item in &journal.items {
+            if let JournalItem::PriceDirective(pd) = item {
+                db.add_price(pd.date, &pd.commodity, &pd.price_commodity, pd.price_quantity);
             }
         }
 
@@ -327,5 +320,53 @@ mod tests {
         let db = PriceDb::from_journal(&journal);
 
         assert_eq!(db.get_price("EUR", "$", d(2024, 1, 15)), Some(dec!(1.10)));
+    }
+}
+
+#[cfg(test)]
+mod precedence_tests {
+    use super::*;
+    use hledger_parser::parse;
+
+    /// A declared price wins over one derived from a cost on the same day.
+    ///
+    /// Verified against hledger 1.50.3: with both a `P 2021-03-08 VLXVX 27.97
+    /// USD` directive and an `@@` exchange implying 27.9704839345..., hledger
+    /// prices reports 27.97. Taking the derived one instead put a
+    /// 27-significant-digit price on the Commodities screen.
+    #[test]
+    fn a_declared_price_beats_one_derived_from_a_cost() {
+        let journal = parse(concat!(
+            "P 2021-03-08 VLXVX 27.97 USD\n\n",
+            "2021-03-08 exchange\n",
+            "    assets:a   -279.17 VLXVX @@ 7808.52 USD\n",
+            "    assets:b    233.30 VTWAX @@ 7808.52 USD\n",
+            "    equity:x\n",
+        ))
+        .unwrap();
+        let db = PriceDb::from_journal(&journal);
+        let date = NaiveDate::from_ymd_opt(2021, 3, 8).unwrap();
+
+        assert_eq!(
+            db.get_price("VLXVX", "USD", date),
+            Some(rust_decimal::Decimal::new(2797, 2)),
+        );
+        // The commodity with no directive still gets the derived price.
+        assert!(db.get_price("VTWAX", "USD", date).is_some());
+    }
+
+    /// Order within a kind is unchanged: the last directive for a date wins.
+    #[test]
+    fn the_last_declared_price_for_a_date_still_wins() {
+        let journal = parse(concat!(
+            "P 2021-03-08 FOO 1.00 USD\n",
+            "P 2021-03-08 FOO 2.00 USD\n",
+        ))
+        .unwrap();
+        let db = PriceDb::from_journal(&journal);
+        assert_eq!(
+            db.get_price("FOO", "USD", NaiveDate::from_ymd_opt(2021, 3, 8).unwrap()),
+            Some(rust_decimal::Decimal::new(200, 2)),
+        );
     }
 }

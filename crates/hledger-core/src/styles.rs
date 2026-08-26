@@ -166,6 +166,43 @@ mod tests {
         assert_eq!(summary[0].budgeted, "264980.61");
         assert_eq!(summary[0].actual, "264980.61");
     }
+
+    /// A price keeps the decimals it needs, but a rate derived by division
+    /// cannot spill its full Decimal scale onto the screen.
+    #[test]
+    fn price_precision_is_floored_by_the_currency_and_capped() {
+        let journal = parse("commodity 1,000.00 USD\n").unwrap();
+        let styles = CommodityStyles::from_journal(&journal);
+        let mut series = vec![crate::price_db::PriceSeries {
+            base: "VLXVX".into(),
+            quote: "USD".into(),
+            points: vec![
+                // Derived from 7808.52 / 279.17 -- what reached the screen.
+                crate::price_db::PricePoint {
+                    date: "2021-03-08".into(),
+                    rate: "27.97048393452018500000000000".into(),
+                },
+                // A declared price reads like money, not 27.970000.
+                crate::price_db::PricePoint {
+                    date: "2021-03-04".into(),
+                    rate: "27.82".into(),
+                },
+                // A currency pair keeps the place it actually moves in.
+                crate::price_db::PricePoint {
+                    date: "2021-03-05".into(),
+                    rate: "0.9234".into(),
+                },
+                // Fewer decimals than the currency are padded up to it.
+                crate::price_db::PricePoint {
+                    date: "2021-03-06".into(),
+                    rate: "28".into(),
+                },
+            ],
+        }];
+        apply::prices(&mut series, &styles);
+        let rates: Vec<&str> = series[0].points.iter().map(|p| p.rate.as_str()).collect();
+        assert_eq!(rates, vec!["27.97048393", "27.82", "0.9234", "28.00"]);
+    }
 }
 
 /// Restyling finished reports.
@@ -304,6 +341,31 @@ pub mod apply {
         for point in points {
             quantity(&mut point.budgeted, commodity, styles);
             quantity(&mut point.actual, commodity, styles);
+        }
+    }
+
+    /// A price can legitimately need more decimals than the currency it is
+    /// quoted in -- a currency pair moves in the fourth place -- so a price is
+    /// not simply rounded to the quote commodity's precision. It keeps the
+    /// decimals it has, floored at that precision so a declared price still
+    /// reads like money, and capped so a rate derived by dividing one cost by
+    /// a share count cannot spill 27 significant digits onto the screen.
+    /// hledger shows a derived price to 8 places for the same reason.
+    const MAX_PRICE_DECIMALS: u32 = 8;
+
+    pub fn prices(series: &mut [crate::price_db::PriceSeries], styles: &CommodityStyles) {
+        for s in series {
+            let floor = styles.precision(&s.quote);
+            for point in &mut s.points {
+                if let Ok(rate) = point.rate.parse::<Decimal>() {
+                    let dp = rate
+                        .normalize()
+                        .scale()
+                        .min(MAX_PRICE_DECIMALS)
+                        .max(floor);
+                    point.rate = format!("{:.*}", dp as usize, rate);
+                }
+            }
         }
     }
 

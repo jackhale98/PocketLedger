@@ -959,11 +959,15 @@ function CommoditiesView({ onBack }: { onBack: () => void }) {
           const latest = s.points[s.points.length - 1];
           return (
             <div key={`${s.base}/${s.quote}`}>
-              <div className="flex justify-between items-baseline mb-2 min-w-0">
-                <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 truncate">
+              {/* The name identifies the chart, so it is the part that must
+                  survive: it holds its width and the price truncates. When the
+                  price carried a full Decimal scale it squeezed the title to
+                  nothing and the chart lost its label entirely. */}
+              <div className="flex justify-between items-baseline gap-2 mb-2 min-w-0">
+                <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 shrink-0">
                   {s.base} / {s.quote}
                 </h3>
-                <span className="text-xs font-mono text-gray-500 dark:text-gray-400 shrink-0 ml-2">
+                <span className="text-xs font-mono text-gray-500 dark:text-gray-400 min-w-0 truncate">
                   {latest && `${fmtAmt([{ commodity: s.quote, quantity: latest.rate }])} on ${latest.date}`}
                 </span>
               </div>
