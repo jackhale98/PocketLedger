@@ -45,7 +45,7 @@ pub struct PeriodicBalanceRow {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PeriodicBalanceReport {
-    /// Period labels, e.g. "2024-01" / "2024-Q1" / "2024" / "2024-W05".
+    /// Period labels, matching hledger: "2024-01" / "2024Q1" / "2024" / "2024-W05".
     pub periods: Vec<String>,
     pub rows: Vec<PeriodicBalanceRow>,
     /// Column totals across all rows.
@@ -119,8 +119,11 @@ fn period_label(start: NaiveDate, interval: ReportInterval) -> String {
     match interval {
         ReportInterval::Weekly => format!("{}-W{:02}", start.iso_week().year(), start.iso_week().week()),
         ReportInterval::Monthly => start.format("%Y-%m").to_string(),
+        // hledger writes quarters without a separator ("2024Q1"), unlike
+        // weeks ("2024-W01"). Matching it keeps our columns comparable with
+        // the CLI's.
         ReportInterval::Quarterly => {
-            format!("{}-Q{}", start.year(), (start.month() - 1) / 3 + 1)
+            format!("{}Q{}", start.year(), (start.month() - 1) / 3 + 1)
         }
         ReportInterval::Yearly => start.year().to_string(),
     }
@@ -469,7 +472,8 @@ mod tests {
             "",
             &crate::price_db::PriceDb::default(),
         );
-        assert_eq!(q.periods, vec!["2024-Q1"]);
+        // hledger writes quarters without a separator.
+        assert_eq!(q.periods, vec!["2024Q1"]);
         let y = periodic_balance_report(
             &t,
             ReportInterval::Yearly,

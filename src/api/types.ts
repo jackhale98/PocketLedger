@@ -99,7 +99,7 @@ export interface PeriodicBalanceRow {
 
 /** Multi-period balance report */
 export interface PeriodicBalanceReport {
-  /** Period labels, e.g. "2024-01" / "2024-Q1" / "2024" / "2024-W05" */
+  /** Period labels, matching hledger: "2024-01" / "2024Q1" / "2024" / "2024-W05" */
   periods: string[];
   rows: PeriodicBalanceRow[];
   /** Column totals across all rows, one per period */

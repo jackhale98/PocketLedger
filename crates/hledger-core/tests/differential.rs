@@ -1217,3 +1217,409 @@ fn depth_limited_balances_match_hledger() {
         }
     }
 }
+
+/// Run `hledger bal` with extra arguments and return account -> commodity -> qty.
+fn hledger_balances_with(file: &Path, extra: &[&str]) -> Option<BTreeMap<String, CommodityMap>> {
+    let mut args = vec!["-f", &*file.to_string_lossy(), "bal", "--flat", "-N", "-O", "csv"]
+        .into_iter()
+        .map(String::from)
+        .collect::<Vec<_>>();
+    args.extend(extra.iter().map(|s| s.to_string()));
+
+    let output = Command::new("hledger").args(&args).output().expect("run hledger bal");
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Some(
+        stdout
+            .lines()
+            .skip(1)
+            .filter_map(|line| {
+                let c = parse_csv_row(line);
+                (c.len() >= 2 && c[0] != "Total:").then(|| (c[0].clone(), parse_amount_cell(&c[1])))
+            })
+            .filter(|(_, m)| !m.is_empty())
+            .collect(),
+    )
+}
+
+fn engine_balances_filtered(
+    txns: &[hledger_core::balance::ResolvedTransaction],
+) -> BTreeMap<String, CommodityMap> {
+    let mut result: BTreeMap<String, CommodityMap> = BTreeMap::new();
+    for txn in txns {
+        for posting in &txn.postings {
+            let entry = result.entry(posting.account.full.clone()).or_default();
+            for (commodity, qty) in &posting.amount.amounts {
+                *entry.entry(commodity.clone()).or_insert(Decimal::ZERO) += qty;
+            }
+        }
+    }
+    for m in result.values_mut() {
+        m.retain(|_, q| !q.is_zero());
+    }
+    result.retain(|_, m| !m.is_empty());
+    result
+}
+
+/// Our query language must select the same postings hledger's does.
+///
+/// This one has the widest blast radius in the suite: the query now filters
+/// every report, so a divergence here is wrong everywhere at once.
+#[test]
+fn query_filtering_matches_hledger() {
+    if !hledger_available() {
+        eprintln!("skipping: hledger not installed");
+        return;
+    }
+
+    let queries = [
+        "acct:expenses",
+        "acct:assets",
+        "cur:$",
+        "amt:>100",
+        "amt:<0",
+        "not:acct:expenses",
+        "desc:Grocery",
+        "status:*",
+        "date:2024",
+    ];
+
+    for file in all_fixtures() {
+        let Some((txns, _)) = statement_inputs(&file) else { continue };
+
+        for q in queries {
+            let Some(expected) = hledger_balances_with(&file, &[q]) else { continue };
+            let Ok(query) = hledger_core::query::parse_query(q) else { continue };
+            let filtered = hledger_core::query::retain_matching_postings(&txns, &query);
+            let ours = engine_balances_filtered(&filtered);
+
+            assert_eq!(
+                ours,
+                expected,
+                "{}: query '{q}' selects different postings",
+                file.display()
+            );
+        }
+    }
+}
+
+/// Cumulative and historical accumulation must match `bal --cumulative` / `-H`.
+///
+/// Only the periodic mode had a check; these two are what the Table and
+/// Account reports use for "balance as of", where an off-by-one period would
+/// be invisible in a single-column comparison.
+#[test]
+fn accumulation_modes_match_hledger() {
+    if !hledger_available() {
+        eprintln!("skipping: hledger not installed");
+        return;
+    }
+    use hledger_core::periodic_report::{AccumulationMode, ReportInterval};
+
+    for file in all_fixtures() {
+        let Some((txns, _)) = statement_inputs(&file) else { continue };
+
+        for (flag, mode) in [
+            ("--cumulative", AccumulationMode::Cumulative),
+            ("-H", AccumulationMode::Historical),
+        ] {
+            let output = Command::new("hledger")
+                .args([
+                    "-f", &file.to_string_lossy(), "bal", "--flat", "-M", flag, "-O", "csv",
+                ])
+                .output()
+                .expect("run hledger bal");
+            if !output.status.success() {
+                continue;
+            }
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let mut lines = stdout.lines();
+            let Some(header) = lines.next() else { continue };
+            let periods: Vec<String> = parse_csv_row(header).into_iter().skip(1).collect();
+            if periods.is_empty() {
+                continue;
+            }
+
+            let expected: BTreeMap<String, Vec<CommodityMap>> = lines
+                .filter_map(|line| {
+                    let c = parse_csv_row(line);
+                    (c.len() >= 2 && c[0] != "Total:").then(|| {
+                        (c[0].clone(), c[1..].iter().map(|v| parse_amount_cell(v)).collect())
+                    })
+                })
+                .collect();
+
+            let report = hledger_core::periodic_report::periodic_balance_report(
+                &txns,
+                ReportInterval::Monthly,
+                mode,
+                None,
+                None,
+                None,
+                None,
+                "",
+                &hledger_core::price_db::PriceDb::default(),
+            );
+
+            assert_eq!(
+                report.periods, periods,
+                "{}: {flag} period columns differ",
+                file.display()
+            );
+
+            for (account, cells) in &expected {
+                let Some(row) = report.rows.iter().find(|r| &r.account == account) else {
+                    continue;
+                };
+                for (i, cell) in cells.iter().enumerate() {
+                    let got: CommodityMap = row.amounts[i]
+                        .iter()
+                        .filter_map(|a| {
+                            a.quantity
+                                .parse::<Decimal>()
+                                .ok()
+                                .filter(|q| !q.is_zero())
+                                .map(|q| (a.commodity.clone(), q))
+                        })
+                        .collect();
+                    assert_eq!(
+                        &got, cell,
+                        "{}: {flag} {account} period {} differs",
+                        file.display(),
+                        periods[i]
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Valuing in a target commodity must match `hledger bal -X CUR`.
+///
+/// Valuation now applies to every report, so a conversion or price-lookup
+/// difference is wrong everywhere rather than in one chart.
+#[test]
+fn valued_balances_match_hledger() {
+    if !hledger_available() {
+        eprintln!("skipping: hledger not installed");
+        return;
+    }
+
+    for file in all_fixtures() {
+        let Some((txns, _)) = statement_inputs(&file) else { continue };
+        let text = std::fs::read_to_string(&file).unwrap();
+        let journal = hledger_parser::parse(&text).unwrap();
+        let price_db = hledger_core::price_db::PriceDb::from_journal(&journal);
+
+        // Commodities actually priced in this fixture; valuing into something
+        // with no path proves nothing.
+        let mut targets: Vec<String> = price_db.known_commodities();
+        targets.sort();
+        targets.dedup();
+
+        for target in targets.iter().take(3) {
+            let Some(expected) =
+                hledger_balances_with(&file, &["-X", target, "--infer-market-prices"])
+            else {
+                continue;
+            };
+
+            let rows = hledger_core::reports::balance_report_valued(
+                &txns, None, None, None, target, &price_db,
+            );
+            let ours: BTreeMap<String, CommodityMap> = rows
+                .iter()
+                .map(|r| {
+                    let m: CommodityMap = r
+                        .amounts
+                        .iter()
+                        .filter_map(|a| {
+                            a.quantity
+                                .parse::<Decimal>()
+                                .ok()
+                                .filter(|q| !q.is_zero())
+                                .map(|q| (a.commodity.clone(), q))
+                        })
+                        .collect();
+                    (r.account.clone(), m)
+                })
+                .filter(|(_, m)| !m.is_empty())
+                .collect();
+
+            // Compare only the accounts hledger reports; our report includes
+            // parent rows that its flat output does not.
+            for (account, amounts) in &expected {
+                let Some(got) = ours.get(account) else {
+                    panic!("{}: -X {target} missing account {account}", file.display());
+                };
+                // hledger rounds a valued amount to the commodity's display
+                // precision; we keep full precision so downstream sums don't
+                // accumulate rounding. Compare at the precision it printed.
+                for (commodity, theirs) in amounts {
+                    let ours_q = got.get(commodity).copied().unwrap_or(Decimal::ZERO);
+                    let dp = theirs.scale();
+                    assert_eq!(
+                        ours_q.round_dp(dp),
+                        theirs.round_dp(dp),
+                        "{}: -X {target} {account} {commodity} differs",
+                        file.display()
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Weekly, quarterly and yearly period columns must match hledger's.
+///
+/// Only the monthly interval had a check, and period boundaries are exactly
+/// where an interval implementation goes wrong — ISO weeks especially.
+#[test]
+fn all_intervals_match_hledger() {
+    if !hledger_available() {
+        eprintln!("skipping: hledger not installed");
+        return;
+    }
+    use hledger_core::periodic_report::{AccumulationMode, ReportInterval};
+
+    for file in all_fixtures() {
+        let Some((txns, _)) = statement_inputs(&file) else { continue };
+
+        for (flag, interval) in [
+            ("-W", ReportInterval::Weekly),
+            ("-Q", ReportInterval::Quarterly),
+            ("-Y", ReportInterval::Yearly),
+        ] {
+            let output = Command::new("hledger")
+                .args(["-f", &file.to_string_lossy(), "bal", "--flat", "-N", flag, "-O", "csv"])
+                .output()
+                .expect("run hledger bal");
+            if !output.status.success() {
+                continue;
+            }
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let mut lines = stdout.lines();
+            let Some(header) = lines.next() else { continue };
+            let periods: Vec<String> = parse_csv_row(header).into_iter().skip(1).collect();
+            if periods.is_empty() {
+                continue;
+            }
+
+            let expected: BTreeMap<String, Vec<CommodityMap>> = lines
+                .filter_map(|line| {
+                    let c = parse_csv_row(line);
+                    (c.len() >= 2 && c[0] != "Total:").then(|| {
+                        (c[0].clone(), c[1..].iter().map(|v| parse_amount_cell(v)).collect())
+                    })
+                })
+                .collect();
+
+            let report = hledger_core::periodic_report::periodic_balance_report(
+                &txns,
+                interval,
+                AccumulationMode::Periodic,
+                None,
+                None,
+                None,
+                None,
+                "",
+                &hledger_core::price_db::PriceDb::default(),
+            );
+
+            assert_eq!(
+                report.periods, periods,
+                "{}: {flag} period columns differ",
+                file.display()
+            );
+
+            for (account, cells) in &expected {
+                let Some(row) = report.rows.iter().find(|r| &r.account == account) else {
+                    continue;
+                };
+                for (i, cell) in cells.iter().enumerate() {
+                    let got: CommodityMap = row.amounts[i]
+                        .iter()
+                        .filter_map(|a| {
+                            a.quantity
+                                .parse::<Decimal>()
+                                .ok()
+                                .filter(|q| !q.is_zero())
+                                .map(|q| (a.commodity.clone(), q))
+                        })
+                        .collect();
+                    assert_eq!(
+                        &got, cell,
+                        "{}: {flag} {account} period {} differs",
+                        file.display(),
+                        periods[i]
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Date-range filtering must match hledger's `-b`/`-e`, whose end is exclusive.
+#[test]
+fn date_ranges_match_hledger() {
+    if !hledger_available() {
+        eprintln!("skipping: hledger not installed");
+        return;
+    }
+
+    for file in all_fixtures() {
+        let Some((txns, _)) = statement_inputs(&file) else { continue };
+        let Some(first) = txns.iter().map(|t| t.date).min() else { continue };
+        let Some(last) = txns.iter().map(|t| t.date).max() else { continue };
+        let mid = first + chrono::Duration::days((last - first).num_days() / 2);
+
+        for (begin, end) in [(first, mid), (mid, last), (first, last)] {
+            let end_exclusive = end.succ_opt().unwrap();
+            let Some(expected) = hledger_balances_with(
+                &file,
+                &["-b", &begin.to_string(), "-e", &end_exclusive.to_string()],
+            ) else {
+                continue;
+            };
+
+            let rows = hledger_core::reports::balance_report(
+                &txns,
+                None,
+                Some(begin),
+                Some(end),
+            );
+            let ours: BTreeMap<String, CommodityMap> = rows
+                .iter()
+                .map(|r| {
+                    let m: CommodityMap = r
+                        .amounts
+                        .iter()
+                        .filter_map(|a| {
+                            a.quantity
+                                .parse::<Decimal>()
+                                .ok()
+                                .filter(|q| !q.is_zero())
+                                .map(|q| (a.commodity.clone(), q))
+                        })
+                        .collect();
+                    (r.account.clone(), m)
+                })
+                .filter(|(_, m)| !m.is_empty())
+                .collect();
+
+            // balance_report gives inclusive parent rows; hledger's --flat is
+            // exclusive. Roll its numbers up so this compares the date
+            // filtering rather than that difference.
+            for (account, amounts) in rolled_up(&expected) {
+                let got = ours.get(&account).cloned().unwrap_or_default();
+                assert_eq!(
+                    got, amounts,
+                    "{}: {begin}..{end} account {account} differs",
+                    file.display()
+                );
+            }
+        }
+    }
+}

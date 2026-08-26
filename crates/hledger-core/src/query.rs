@@ -354,8 +354,14 @@ fn parse_amount_term(rest: &str) -> Result<Term, String> {
     };
 
     let num = num.trim();
-    // Unsigned query value compares magnitudes (hledger semantics).
-    let abs = !num.starts_with('-') && !num.starts_with('+');
+    // hledger compares magnitudes for an unsigned value, but signed numbers
+    // when the value carries a sign OR IS ZERO. Without the zero case,
+    // `amt:<0` asks for a magnitude below zero and matches nothing, when it
+    // plainly means "the negative postings".
+    let signed = num.starts_with('-')
+        || num.starts_with('+')
+        || num.parse::<Decimal>().map(|v| v.is_zero()).unwrap_or(false);
+    let abs = !signed;
     let value: Decimal = num
         .parse()
         .map_err(|_| format!("amt: expects a number, got '{}'", num))?;
