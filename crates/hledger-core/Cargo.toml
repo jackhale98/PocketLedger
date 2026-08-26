@@ -1,6 +1,6 @@
 [package]
 name = "hledger-core"
-version = "0.2.7"
+version = "0.2.8"
 edition = "2021"
 description = "Financial engine for hledger/ledger plain text accounting"
 
