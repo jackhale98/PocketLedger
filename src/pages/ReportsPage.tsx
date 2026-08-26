@@ -42,6 +42,24 @@ function fmtBudgetAmt(value: string, commodity: string): string {
   return formatAmount(value, commodity);
 }
 
+/** What period a statement covers, in the terms that statement uses.
+ *  A balance sheet is a snapshot, so only its end date means anything —
+ *  a start date would imply it excludes earlier balances, which it does not. */
+function describeRange(
+  view: DrillView,
+  range: { from: string; to: string } | null
+): string | null {
+  const from = range?.from || "";
+  const to = range?.to || "";
+  if (view === "balance-sheet") {
+    return to ? `as of ${to}` : "as of the latest transaction";
+  }
+  if (from && to) return `${from} to ${to}`;
+  if (from) return `from ${from}`;
+  if (to) return `through ${to}`;
+  return "all dates";
+}
+
 function StatementView({ statement, subtitle, onBack }: { statement: FinancialStatement; subtitle?: string | null; onBack: () => void }) {
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
 
@@ -1306,7 +1324,10 @@ export function ReportsPage() {
         : type === "income-statement" ? await api.incomeStatementReport(params)
         : await api.cashFlowReport(params);
       setStatement(data);
-      setStatementRange(range ?? null);
+      // Always record the window, not just an override, so the statement can
+      // say what it covers. Without that, a filtered statement is
+      // indistinguishable from an unfiltered one.
+      setStatementRange(range ?? { from: dateFrom, to: dateTo });
       setDrillView(type);
     } catch (err) {
       setPageError(err instanceof Error ? err.message : String(err));
@@ -1324,7 +1345,7 @@ export function ReportsPage() {
     return (
       <StatementView
         statement={statement}
-        subtitle={statementRange ? `${statementRange.from} to ${statementRange.to}` : null}
+        subtitle={describeRange(drillView, statementRange)}
         onBack={() => { setDrillView(null); setStatementRange(null); }}
       />
     );

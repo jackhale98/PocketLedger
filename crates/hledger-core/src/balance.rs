@@ -458,26 +458,39 @@ fn apply_auto_rule(
         if !patterns.iter().any(|re| re.is_match(&posting.account.full)) {
             continue;
         }
+        // Build this rule's postings for the matched posting. One of them may
+        // omit its amount, which hledger infers so the generated set balances
+        // — a rule like `expenses:carbon $5 / liabilities:offset` depends on
+        // it. Dropping that posting, as this used to, left the books short.
+        let mut batch: Vec<ResolvedPosting> = Vec::new();
+        let mut elided: Option<usize> = None;
         for rule_posting in &rule.postings {
-            let Some(rule_amt) = &rule_posting.amount else {
-                warnings.push(ResolveWarning {
-                    line: rule.span.line,
-                    message: "auto posting without an amount is not supported; skipped"
-                        .to_string(),
-                });
-                continue;
-            };
-            let amount = if rule_amt.multiplier {
-                // Multiply the matched posting's amount(s).
-                let mut m = MixedAmount::zero();
-                for (commodity, qty) in &posting.amount.amounts {
-                    m.add(commodity, qty * rule_amt.quantity);
+            let amount = match &rule_posting.amount {
+                Some(rule_amt) if rule_amt.multiplier => {
+                    // Scale the matched posting's amount(s).
+                    let mut m = MixedAmount::zero();
+                    for (commodity, qty) in &posting.amount.amounts {
+                        m.add(commodity, qty * rule_amt.quantity);
+                    }
+                    m
                 }
-                m
-            } else {
-                MixedAmount::single(&rule_amt.commodity, rule_amt.quantity)
+                Some(rule_amt) => MixedAmount::single(&rule_amt.commodity, rule_amt.quantity),
+                None => {
+                    if elided.is_some() {
+                        warnings.push(ResolveWarning {
+                            line: rule.span.line,
+                            message: format!(
+                                "auto posting rule '{}' leaves more than one amount blank; only one can be inferred",
+                                rule.query
+                            ),
+                        });
+                        continue;
+                    }
+                    elided = Some(batch.len());
+                    MixedAmount::zero()
+                }
             };
-            generated.push(ResolvedPosting {
+            batch.push(ResolvedPosting {
                 account: rule_posting.account.clone(),
                 amount,
                 status: resolved.status,
@@ -490,6 +503,21 @@ fn apply_auto_rule(
                 generated: true,
             });
         }
+
+        // Infer the blank one from the others in its balancing group; an
+        // unbalanced-virtual posting balances against nothing.
+        if let Some(idx) = elided {
+            let target_virtual = batch[idx].is_virtual;
+            let mut sum = MixedAmount::zero();
+            for (i, p) in batch.iter().enumerate() {
+                if i != idx && p.is_virtual == target_virtual {
+                    sum.add_mixed(&p.amount);
+                }
+            }
+            batch[idx].amount = sum.negate();
+        }
+
+        generated.extend(batch);
     }
 
     if generated.is_empty() {

@@ -1620,3 +1620,125 @@ fn date_ranges_match_hledger() {
         }
     }
 }
+
+/// The income statement must respect `-b`/`-e`, not just report everything.
+///
+/// A period statement is the point of an income statement; silently ignoring
+/// the range would make every "this month" view wrong while still looking
+/// plausible.
+#[test]
+fn income_statement_date_range_matches_hledger() {
+    if !hledger_available() {
+        eprintln!("skipping: hledger not installed");
+        return;
+    }
+
+    for file in all_fixtures() {
+        let Some((txns, classifier)) = statement_inputs(&file) else { continue };
+        let Some(first) = txns.iter().map(|t| t.date).min() else { continue };
+        let Some(last) = txns.iter().map(|t| t.date).max() else { continue };
+        if first == last {
+            continue;
+        }
+        let mid = first + chrono::Duration::days((last - first).num_days() / 2);
+
+        for (begin, end) in [(first, mid), (mid, last)] {
+            let end_exclusive = end.succ_opt().unwrap();
+            let output = Command::new("hledger")
+                .args([
+                    "-f", &file.to_string_lossy(), "is",
+                    "-b", &begin.to_string(),
+                    "-e", &end_exclusive.to_string(),
+                    "-O", "csv",
+                ])
+                .output()
+                .expect("run hledger is");
+            if !output.status.success() {
+                continue;
+            }
+            let sections = parse_statement_csv(&String::from_utf8_lossy(&output.stdout));
+            if sections.is_empty() {
+                continue;
+            }
+
+            let is = hledger_core::reports::income_statement(
+                &txns,
+                &classifier,
+                &hledger_core::price_db::PriceDb::default(),
+                "",
+                Some(begin),
+                Some(end),
+            );
+
+            for (idx, label) in ["Revenues", "Expenses"].iter().enumerate() {
+                if let Some(expected) = sections.get(*label) {
+                    for (account, amounts) in rolled_up(expected) {
+                        assert_eq!(
+                            row_amounts(&is.sections[idx].rows, &account),
+                            amounts,
+                            "{}: {label} {account} over {begin}..{end} differs",
+                            file.display()
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Auto posting rules (`= QUERY`) must generate what `hledger --auto` does.
+///
+/// This is the most intricate untested feature in the engine: rules match by
+/// query, multipliers scale off the matched posting, and the generated
+/// postings then have to balance.
+#[test]
+fn auto_postings_match_hledger() {
+    if !hledger_available() {
+        eprintln!("skipping: hledger not installed");
+        return;
+    }
+
+    let cases: [(&str, &str); 3] = [
+        (
+            "multiplier",
+            concat!(
+                "= expenses:food\n    (budget:food)   *0.1\n\n",
+                "2024-01-05 Grocery\n    expenses:food   $100.00\n    assets:checking\n",
+            ),
+        ),
+        (
+            "fixed amount",
+            concat!(
+                "= expenses:travel\n    expenses:carbon   $5.00\n    liabilities:offset\n\n",
+                "2024-01-05 Flight\n    expenses:travel   $300.00\n    assets:checking\n",
+            ),
+        ),
+        (
+            "no match",
+            concat!(
+                "= expenses:rent\n    (budget:rent)   *1\n\n",
+                "2024-01-05 Grocery\n    expenses:food   $40.00\n    assets:checking\n",
+            ),
+        ),
+    ];
+
+    let dir = std::env::temp_dir().join(format!("hledger-auto-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    for (name, text) in cases {
+        let path = dir.join(format!("{}.journal", name.replace(' ', "-")));
+        std::fs::write(&path, text).unwrap();
+
+        let Some(expected) = hledger_balances_with(&path, &["--auto"]) else {
+            continue;
+        };
+
+        let journal = hledger_parser::parse(text).unwrap();
+        let txns = hledger_core::balance::resolve_transactions(&journal).unwrap();
+        let ours = engine_balances_filtered(&txns);
+
+        assert_eq!(ours, expected, "{name}: auto postings differ");
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
