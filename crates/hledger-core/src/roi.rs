@@ -253,6 +253,20 @@ fn solve_irr(flows: &[(NaiveDate, f64)]) -> Option<f64> {
 /// holding's own, not the jump caused by paying money in. The last span runs
 /// to the exclusive end of the period, which is what picks up gains dated on
 /// the final day.
+///
+/// Each boundary is valued at that boundary's own date, which matches
+/// `hledger roi --value=then` -- verified against the CLI in the differential
+/// suite. It deliberately does not match `--value=end`, which prices every
+/// boundary at the closing price and so reports 0% however the holding moved.
+///
+/// One deviation, taken knowingly: hledger drops a price change dated on the
+/// same day as a cash flow (hledger #2415), and its own notes on TWR (#2420)
+/// limit the calculation to journals with at most one transaction per date, no
+/// price directive on a transaction date, and no cash flow combined with a
+/// balance assertion. Real journals routinely break all three -- month-end
+/// prices land on month-end transactions, and reconciliation entries carry
+/// assertions. We value the boundary regardless, so a holding that moved 32%
+/// reports 32% where hledger reports 0%.
 fn time_weighted(
     transactions: &[ResolvedTransaction],
     investment: &Query,

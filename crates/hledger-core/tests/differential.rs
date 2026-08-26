@@ -2066,3 +2066,89 @@ fn share_denominated_contributions_are_valued() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// TWR must match `hledger roi --value=then` on a price-driven holding.
+///
+/// This is the alignment that matters for time-weighted return: `--value=then`
+/// values each amount on its own date, which is what makes hledger's
+/// subperiod boundaries carry real market values. `--value=end` instead prices
+/// every boundary at the closing price, so price movement cancels out and
+/// hledger reports 0% however the holding actually performed.
+///
+/// The journal deliberately satisfies hledger's documented preconditions for
+/// TWR (hledger #2420): one transaction per date, one price per date, and no
+/// price directive falling on a transaction date. hledger #2415 -- "TWR
+/// calculation ignores prices on the day of cashflow operation" -- means that
+/// moving the 2024-06-30 price onto 2024-07-01 makes hledger report 0.00%
+/// where the answer is plainly 32%, while this engine still reports 32%. We
+/// keep the correct figure there rather than reproducing that behaviour.
+#[test]
+fn twr_matches_hledger_valued_on_each_date() {
+    if !hledger_available() {
+        eprintln!("skipping: hledger not installed");
+        return;
+    }
+
+    // 100 units at $10 grow to $12, then 50 more are bought at $12 and all
+    // grow to $13.20: (1200/1000) * (1980/1800) - 1 = 32%.
+    let text = concat!(
+        "P 2024-01-01 FUND $10.00\n",
+        "P 2024-06-30 FUND $12.00\n",
+        "P 2024-12-31 FUND $13.20\n\n",
+        "2024-01-01 buy\n    assets:fund      100 FUND @ $10.00\n    assets:cash\n\n",
+        "2024-07-01 buy\n    assets:fund       50 FUND @ $12.00\n    assets:cash\n",
+    );
+
+    let dir = std::env::temp_dir().join(format!("hledger-twr-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("twr.journal");
+    std::fs::write(&path, text).unwrap();
+
+    let output = Command::new("hledger")
+        .args([
+            "-f", &path.to_string_lossy(), "roi",
+            "--inv", "assets:fund", "--pnl", "income",
+            "-b", "2024-01-01", "-e", "2025-01-01",
+            "--value=then,$",
+        ])
+        .output()
+        .expect("run hledger roi");
+    assert!(
+        output.status.success(),
+        "hledger roi failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let row = stdout
+        .lines()
+        .find(|l| l.starts_with("| 1 |"))
+        .unwrap_or_else(|| panic!("no data row in\n{stdout}"));
+    let cells: Vec<&str> = row.split('|').map(|c| c.trim()).filter(|c| !c.is_empty()).collect();
+    let pct = |s: &str| -> f64 { s.trim_end_matches('%').trim().parse().unwrap_or(f64::NAN) };
+    let their_irr = pct(cells[7]);
+    let their_twr = pct(cells[8]);
+
+    let journal = hledger_parser::parse(text).unwrap();
+    let txns = hledger_core::balance::resolve_transactions(&journal).unwrap();
+    let ledger = hledger_core::ledger::Ledger::from_journal(&journal).unwrap();
+    let report = hledger_core::roi::roi(
+        &txns,
+        &hledger_core::query::parse_query("acct:assets:fund").unwrap(),
+        &hledger_core::roi::PnlSelector::AccountTypes(ledger.classifier()),
+        chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+        chrono::NaiveDate::from_ymd_opt(2024, 12, 31).unwrap(),
+        "$",
+        ledger.price_db(),
+    );
+    let ours_twr: f64 = report.twr_period.as_deref().unwrap_or("nan").parse().unwrap();
+    let ours_irr: f64 = report.irr.as_deref().unwrap_or("nan").parse().unwrap();
+
+    assert!(
+        (their_twr - 32.0).abs() < 0.01,
+        "sanity: hledger should report the textbook 32%, got {their_twr}"
+    );
+    assert!((ours_twr - their_twr).abs() < 0.01, "TWR {ours_twr} vs hledger {their_twr}");
+    assert!((ours_irr - their_irr).abs() < 0.01, "IRR {ours_irr} vs hledger {their_irr}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
