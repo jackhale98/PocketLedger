@@ -1876,3 +1876,101 @@ fn valuation_modes_match_hledger() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// IRR and TWR must match `hledger roi`.
+///
+/// The two returns disagree by design — IRR reflects when money went in, TWR
+/// removes that — so getting one right proves nothing about the other, and
+/// both are checked.
+#[test]
+fn roi_matches_hledger() {
+    if !hledger_available() {
+        eprintln!("skipping: hledger not installed");
+        return;
+    }
+
+    let cases: [(&str, &str); 2] = [
+        (
+            "contributions then gain",
+            concat!(
+                "2024-01-01 deposit\n    assets:investment    $1000.00\n    assets:cash\n\n",
+                "2024-07-01 deposit\n    assets:investment     $500.00\n    assets:cash\n\n",
+                "2024-12-31 gain\n    assets:investment     $200.00\n    income:gains\n",
+            ),
+        ),
+        (
+            "gain before contribution",
+            concat!(
+                "2024-01-01 deposit\n    assets:investment    $1000.00\n    assets:cash\n\n",
+                "2024-03-01 gain\n    assets:investment     $300.00\n    income:gains\n\n",
+                "2024-09-01 deposit\n    assets:investment    $2000.00\n    assets:cash\n",
+            ),
+        ),
+    ];
+
+    let dir = std::env::temp_dir().join(format!("hledger-roi-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    for (name, text) in cases {
+        let path = dir.join(format!("{}.journal", name.replace(' ', "-")));
+        std::fs::write(&path, text).unwrap();
+
+        let output = Command::new("hledger")
+            .args([
+                "-f", &path.to_string_lossy(), "roi",
+                "--inv", "assets:investment",
+                "--pnl", "income:gains",
+                "-b", "2024-01-01", "-e", "2025-01-01",
+            ])
+            .output()
+            .expect("run hledger roi");
+        assert!(
+            output.status.success(),
+            "{name}: hledger roi failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+
+        // The data row is the one starting "| 1 ||".
+        let row = stdout
+            .lines()
+            .find(|l| l.starts_with("| 1 |"))
+            .unwrap_or_else(|| panic!("{name}: no data row in\n{stdout}"));
+        let cells: Vec<&str> = row.split('|').map(|c| c.trim()).filter(|c| !c.is_empty()).collect();
+        let pct = |s: &str| -> f64 {
+            s.trim_end_matches('%').trim().parse().unwrap_or(f64::NAN)
+        };
+        // cells: 1, begin, end, value(begin), cashflow, value(end), pnl, IRR, TWR/period, TWR/year
+        let their_irr = pct(cells[7]);
+        let their_twr_period = pct(cells[8]);
+
+        let journal = hledger_parser::parse(text).unwrap();
+        let txns = hledger_core::balance::resolve_transactions(&journal).unwrap();
+        let investment = hledger_core::query::parse_query("acct:assets:investment").unwrap();
+        let pnl = hledger_core::query::parse_query("acct:income:gains").unwrap();
+        let report = hledger_core::roi::roi(
+            &txns,
+            &investment,
+            Some(&pnl),
+            chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
+            chrono::NaiveDate::from_ymd_opt(2024, 12, 31).unwrap(),
+            "$",
+            &hledger_core::price_db::PriceDb::default(),
+        );
+
+        let ours_irr: f64 = report.irr.as_deref().unwrap_or("nan").parse().unwrap();
+        let ours_twr: f64 = report.twr_period.as_deref().unwrap_or("nan").parse().unwrap();
+
+        // Both are iterative; agree to a hundredth of a percent.
+        assert!(
+            (ours_irr - their_irr).abs() < 0.01,
+            "{name}: IRR {ours_irr} vs hledger {their_irr}"
+        );
+        assert!(
+            (ours_twr - their_twr_period).abs() < 0.01,
+            "{name}: TWR {ours_twr} vs hledger {their_twr_period}"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

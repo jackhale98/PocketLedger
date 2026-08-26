@@ -394,3 +394,26 @@ export interface ForecastProjection {
    *  the projection starts from a balance that hasn't been updated lately. */
   daysSinceLastActual: number | null;
 }
+
+export interface RoiCashFlow {
+  date: string;
+  /** Positive when money enters the investment. */
+  amount: string;
+}
+
+export interface RoiReport {
+  begin: string;
+  end: string;
+  valueBegin: string;
+  valueEnd: string;
+  /** Net money added over the period. */
+  cashflow: string;
+  /** Value gained beyond what was contributed. */
+  pnl: string;
+  /** Percentages, already annualised. Null when unsolvable. */
+  irr: string | null;
+  twrPeriod: string | null;
+  twrAnnual: string | null;
+  commodity: string;
+  flows: RoiCashFlow[];
+}

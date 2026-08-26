@@ -28,6 +28,7 @@ import type {
   JournalFileInfo,
   PriceSeries,
   JournalStatistics,
+  RoiReport,
 } from "./types";
 
 // ─── Journal ───
@@ -378,6 +379,16 @@ export async function valuationInfo(
   params: ReportParams = {}
 ): Promise<ValuationInfo> {
   return invoke<ValuationInfo>("valuation_info", { params });
+}
+
+/** Investment return for `investment` accounts, with growth booked to `pnl`.
+ *  Mirrors `hledger roi`. */
+export async function roiReport(
+  investment: string,
+  pnl: string | null,
+  params: ReportParams = {}
+): Promise<RoiReport> {
+  return invoke<RoiReport>("roi_report", { investment, pnl, params });
 }
 
 export async function cancelReconciliation(): Promise<void> {

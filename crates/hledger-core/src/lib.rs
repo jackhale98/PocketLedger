@@ -10,6 +10,7 @@ pub mod price_db;
 pub mod query;
 pub mod reconciliation;
 pub mod reports;
+pub mod roi;
 pub mod styles;
 
 pub mod balance;

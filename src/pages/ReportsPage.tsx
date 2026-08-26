@@ -18,7 +18,7 @@ import type {
   BudgetRow, BudgetSummaryPoint, ForecastRule, InactiveBudget, BudgetTotal,
   PriceSeries, JournalStatistics,
   AmountEntry, BalanceInterval, BalanceAccumulationMode, PeriodicBalanceReport,
-  ForecastProjection, TransactionSummary,
+  ForecastProjection, TransactionSummary, RoiReport,
 } from "../api/types";
 
 type DrillView = "balance-sheet" | "income-statement" | "cash-flow" | "commodities" | "statistics" | null;
@@ -177,6 +177,122 @@ function StatementView({ statement, subtitle, onBack }: { statement: FinancialSt
  *  did per period, and the postings behind that. Previously the balance chart
  *  lived on Overview with its own account picker and the postings lived here
  *  with another — two pickers for two halves of the same question. */
+
+/** Accounts where investment growth is booked. Money arriving from these is
+ *  return; money arriving from anywhere else is a contribution the investor
+ *  made, which shouldn't be counted as performance. */
+const PNL_DEFAULT = "acct:^(income|revenues?|expenses?)(:|$)";
+
+/** Money-weighted (IRR) and time-weighted (TWR) return, mirroring
+ *  `hledger roi`.
+ *
+ *  The two answer different questions: IRR is what the investor earned given
+ *  when they put money in, TWR is how the holding itself performed regardless
+ *  of timing. Both are shown because neither alone is the whole story.
+ *
+ *  Only renders once there is growth to measure, so a plain cash account
+ *  doesn't sprout an empty panel. */
+function ReturnsSection({ account, dateFrom, dateTo, currency }: {
+  account: string; dateFrom: string; dateTo: string; currency: string;
+}) {
+  const [report, setReport] = useState<RoiReport | null>(null);
+  const [pnlQuery, setPnlQuery] = useState(PNL_DEFAULT);
+  const [error, setError] = useState<string | null>(null);
+  const [showFlows, setShowFlows] = useState(false);
+  const loadSeq = useRef(0);
+
+  useEffect(() => {
+    const seq = ++loadSeq.current;
+    if (!account) { setReport(null); setError(null); return; }
+    api
+      .roiReport(`acct:${account}`, pnlQuery, {
+        dateFrom: dateFrom || null,
+        dateTo: dateTo || null,
+        targetCommodity: currency,
+      })
+      .then((r) => { if (seq === loadSeq.current) { setReport(r); setError(null); } })
+      .catch((err) => {
+        if (seq !== loadSeq.current) return;
+        setReport(null);
+        setError(err instanceof Error ? err.message : String(err));
+      });
+  }, [account, dateFrom, dateTo, currency, pnlQuery]);
+
+  if (error) {
+    return (
+      <div className="text-xs text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/30 px-3 py-2 rounded-lg break-words">
+        {error}
+      </div>
+    );
+  }
+  if (!report) return null;
+  const gained = parseFloat(report.pnl);
+  if (!Number.isFinite(gained) || (gained === 0 && !report.irr)) return null;
+
+  const amt = (v: string) => formatAmount(v, report.commodity);
+  const pct = (v: string | null) => (v === null ? "\u2014" : `${v}%`);
+  const tone = gained < 0 ? "text-red-500" : "text-green-500";
+
+  return (
+    <div>
+      <h2 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-2">Return</h2>
+      <div className="grid grid-cols-2 gap-2">
+        <Stat label="IRR (annual)" value={pct(report.irr)} tone={tone} />
+        <Stat label="TWR (annual)" value={pct(report.twrAnnual)} tone={tone} />
+        <Stat label="Gain" value={amt(report.pnl)} tone={tone} />
+        <Stat label="Net invested" value={amt(report.cashflow)} />
+        <Stat label="Value at start" value={amt(report.valueBegin)} />
+        <Stat label="Value at end" value={amt(report.valueEnd)} />
+      </div>
+      <button
+        onClick={() => setShowFlows(!showFlows)}
+        className="mt-2 text-xs text-blue-600 dark:text-blue-400"
+      >
+        {showFlows ? "Hide" : "Show"} cash flows and settings
+      </button>
+      {showFlows && (
+        <div className="mt-2 space-y-2">
+          <label className="block">
+            <span className="block text-xs text-gray-500 dark:text-gray-400 mb-1">
+              Accounts counted as gains rather than contributions
+            </span>
+            <input
+              value={pnlQuery}
+              onChange={(e) => setPnlQuery(e.target.value)}
+              className="w-full min-w-0 px-3 py-2 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg text-sm font-mono text-gray-900 dark:text-gray-100"
+            />
+          </label>
+          {report.flows.length === 0 ? (
+            <div className="text-xs text-gray-500 dark:text-gray-400">
+              No money moved in or out over this period.
+            </div>
+          ) : (
+            <div className="divide-y divide-gray-100 dark:divide-gray-800">
+              {report.flows.map((f, i) => (
+                <div key={i} className="flex justify-between py-1.5 text-xs">
+                  <span className="text-gray-500 dark:text-gray-400">{f.date}</span>
+                  <span className={`font-mono ${parseFloat(f.amount) < 0 ? "text-red-500" : "text-gray-800 dark:text-gray-200"}`}>
+                    {amt(f.amount)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Stat({ label, value, tone }: { label: string; value: string; tone?: string }) {
+  return (
+    <div className="bg-gray-50 dark:bg-gray-800 rounded-lg px-3 py-2 min-w-0">
+      <div className="text-xs text-gray-500 dark:text-gray-400 truncate">{label}</div>
+      <div className={`text-sm font-mono truncate ${tone ?? "text-gray-900 dark:text-gray-100"}`}>{value}</div>
+    </div>
+  );
+}
+
 function AccountView({ accountList, account, onAccountChange, dateFrom, dateTo, query, currency, onChanged }: { accountList: string[]; account: string; onAccountChange: (a: string) => void; dateFrom: string; dateTo: string; query: string; currency: string; onChanged: () => void }) {
   const [editIndex, setEditIndex] = useState<number | null>(null);
   const [rows, setRows] = useState<RegisterRow[]>([]);
@@ -283,6 +399,10 @@ function AccountView({ accountList, account, onAccountChange, dateFrom, dateTo, 
             </ResponsiveContainer>
           </div>
         </div>
+      )}
+
+      {account && (
+        <ReturnsSection account={account} dateFrom={dateFrom} dateTo={dateTo} currency={currency} />
       )}
 
       {account && periods && periods.periods.length > 0 && (

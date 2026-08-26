@@ -487,3 +487,52 @@ pub async fn list_commodities(
     }
     Ok(commodities.into_iter().collect())
 }
+
+/// Money-weighted (IRR) and time-weighted (TWR) return for a set of
+/// investment accounts, matching `hledger roi`.
+///
+/// The investment query names the accounts holding the asset; the PnL query
+/// names where its growth is booked. Anything moving between an investment
+/// account and the outside world is a cash flow; anything moving in from PnL
+/// is return, not a contribution.
+#[tauri::command]
+pub async fn roi_report(
+    investment: String,
+    pnl: Option<String>,
+    params: ReportParams,
+    state: State<'_, Mutex<crate::AppState>>,
+) -> Result<hledger_core::roi::RoiReport, String> {
+    let app_state = state.lock().map_err(|e| e.to_string())?;
+    let loaded = app_state.journal.as_ref().ok_or("No journal loaded")?;
+
+    if investment.trim().is_empty() {
+        return Err("Choose at least one investment account".into());
+    }
+    let investment_q = hledger_core::query::parse_query(&investment)?;
+    let pnl_q = match pnl.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(p) => Some(hledger_core::query::parse_query(p)?),
+        None => None,
+    };
+
+    let txns = transactions_for(loaded, &params)?;
+    let commodity = resolve_target_commodity(loaded, params.target_commodity.as_deref());
+
+    let from = parse_date(&params.date_from)
+        .or_else(|| txns.first().map(|t| t.date))
+        .ok_or("Journal has no transactions")?;
+    let to = parse_date(&params.date_to)
+        .unwrap_or_else(|| chrono::Local::now().date_naive());
+    if to < from {
+        return Err("End date is before the start date".into());
+    }
+
+    Ok(hledger_core::roi::roi(
+        &txns,
+        &investment_q,
+        pnl_q.as_ref(),
+        from,
+        to,
+        &commodity,
+        loaded.ledger.price_db(),
+    ))
+}

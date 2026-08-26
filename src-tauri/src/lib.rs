@@ -89,6 +89,7 @@ pub fn run() {
             commands::forecast::forecast_projection,
             commands::forecast::upcoming_transactions,
             commands::reports::valuation_info,
+            commands::reports::roi_report,
             commands::journal::switch_journal,
             commands::csv_import::preview_csv_import,
             commands::csv_import::import_csv,
