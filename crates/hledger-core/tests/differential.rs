@@ -1974,3 +1974,92 @@ fn roi_matches_hledger() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A contribution paid in something other than the valuation currency must be
+/// valued before it counts.
+///
+/// A fund-to-fund exchange hands over shares. Counting the bare share number
+/// as if it were dollars understates the contribution enormously, and that
+/// missing money comes straight back out as phantom profit — this journal
+/// reported a 323% IRR before the amounts were valued.
+///
+/// hledger needs an explicit valuation here, since the accounts hold two
+/// different commodities and it will otherwise report the columns unconverted.
+/// Only the money columns and IRR are compared: under `--value=end` every
+/// price is the closing price, which flattens the subperiod growth TWR is
+/// built from and makes hledger's TWR a constant 0%.
+#[test]
+fn share_denominated_contributions_are_valued() {
+    if !hledger_available() {
+        eprintln!("skipping: hledger not installed");
+        return;
+    }
+
+    let text = concat!(
+        "2020-01-01 buy VTSAX\n    Assets:IRA:VTSAX      100 VTSAX @ $100.00\n    Assets:Cash\n\n",
+        "2023-01-01 exchange\n    Assets:IRA:VTWAX      150 VTWAX @ $100.00\n",
+        "    Assets:IRA:VTSAX     -100 VTSAX @ $150.00\n\n",
+        "2025-01-01 revalue\n    Assets:IRA:VTWAX        0 VTWAX @ $130.00\n    Assets:Cash    0\n",
+    );
+
+    let dir = std::env::temp_dir().join(format!("hledger-roi-fx-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("exchange.journal");
+    std::fs::write(&path, text).unwrap();
+
+    let pnl_pattern =
+        "interest|dividend|gain|loss|capital|realized|unrealized|distribution|yield|commission|brokerage";
+    let output = Command::new("hledger")
+        .args([
+            "-f", &path.to_string_lossy(), "roi",
+            "--inv", "Assets:IRA:VTWAX",
+            "--pnl", pnl_pattern,
+            "-b", "2020-01-01", "-e", "2026-08-27",
+            "--infer-market-prices", "--value=end,$",
+        ])
+        .output()
+        .expect("run hledger roi");
+    assert!(
+        output.status.success(),
+        "hledger roi failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let row = stdout
+        .lines()
+        .find(|l| l.starts_with("| 1 |"))
+        .unwrap_or_else(|| panic!("no data row in\n{stdout}"));
+    let cells: Vec<&str> = row.split('|').map(|c| c.trim()).filter(|c| !c.is_empty()).collect();
+    let money = |s: &str| -> f64 {
+        s.replace(['$', ','], "").trim().parse().unwrap_or(f64::NAN)
+    };
+    let their_cashflow = money(cells[4]);
+    let their_pnl = money(cells[6]);
+    let their_irr: f64 = cells[7].trim_end_matches('%').parse().unwrap();
+
+    let journal = hledger_parser::parse(text).unwrap();
+    let txns = hledger_core::balance::resolve_transactions(&journal).unwrap();
+    let ledger = hledger_core::ledger::Ledger::from_journal(&journal).unwrap();
+    let report = hledger_core::roi::roi(
+        &txns,
+        &hledger_core::query::parse_query("acct:Assets:IRA:VTWAX").unwrap(),
+        Some(&hledger_core::query::parse_query(&format!("acct:{pnl_pattern}")).unwrap()),
+        chrono::NaiveDate::from_ymd_opt(2020, 1, 1).unwrap(),
+        chrono::NaiveDate::from_ymd_opt(2026, 8, 26).unwrap(),
+        "$",
+        ledger.price_db(),
+    );
+
+    let ours_cashflow: f64 = report.cashflow.parse().unwrap();
+    let ours_pnl: f64 = report.pnl.parse().unwrap();
+    let ours_irr: f64 = report.irr.as_deref().unwrap_or("nan").parse().unwrap();
+
+    assert!(
+        (ours_cashflow - their_cashflow).abs() < 0.01,
+        "cashflow {ours_cashflow} vs hledger {their_cashflow}"
+    );
+    assert!((ours_pnl - their_pnl).abs() < 0.01, "pnl {ours_pnl} vs hledger {their_pnl}");
+    assert!((ours_irr - their_irr).abs() < 0.01, "IRR {ours_irr} vs hledger {their_irr}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

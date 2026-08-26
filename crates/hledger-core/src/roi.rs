@@ -109,12 +109,19 @@ fn held_commodities(
 /// A transaction that touches the investment moves money in from outside
 /// exactly when it also touches an account that is neither the investment nor
 /// profit-and-loss. The amount is what those outside accounts gave up.
+///
+/// The outside amount is valued before it is counted. A fund-to-fund exchange
+/// hands over shares, not currency, and adding a bare share count to a running
+/// total of dollars understates the contribution by orders of magnitude —
+/// which then reappears as an enormous phantom gain and an absurd IRR.
 fn cash_flows(
     transactions: &[ResolvedTransaction],
     investment: &Query,
     pnl: Option<&Query>,
     from: NaiveDate,
     to: NaiveDate,
+    commodity: &str,
+    price_db: &PriceDb,
 ) -> Vec<(NaiveDate, Decimal)> {
     let mut flows: Vec<(NaiveDate, Decimal)> = Vec::new();
 
@@ -137,9 +144,8 @@ fn cash_flows(
             if pnl.is_some_and(|q| q.matches_posting(txn, posting)) {
                 continue;
             }
-            for (_, qty) in &posting.amount.amounts {
-                outside += *qty;
-            }
+            let (value, _) = valued_quantity(&posting.amount, commodity, price_db, txn.date);
+            outside += value;
         }
 
         if outside.is_zero() || date < from || date > to {
@@ -271,7 +277,9 @@ pub fn roi(
         price_db,
     );
     let value_end = value_on(transactions, investment, to, commodity, price_db);
-    let flows = cash_flows(transactions, investment, pnl, from, to);
+    let flows = cash_flows(
+        transactions, investment, pnl, from, to, commodity, price_db,
+    );
     let contributed: Decimal = flows.iter().map(|(_, a)| *a).sum();
     let pnl_amount = value_end - value_begin - contributed;
 
