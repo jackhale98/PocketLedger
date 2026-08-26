@@ -859,3 +859,361 @@ fn parse_csv_row(line: &str) -> Vec<String> {
     out.push(field);
     out
 }
+
+type CommodityMap = BTreeMap<String, Decimal>;
+
+/// Split a balance cell into its commodities. A cell can hold several
+/// ("$-100.00, -50 EUR"), so stripping non-digits fuses them into nonsense.
+fn parse_amount_cell(cell: &str) -> CommodityMap {
+    let mut out = CommodityMap::new();
+    for part in cell.split('\n').flat_map(|p| p.split(", ")) {
+        let part = part.trim();
+        if part.is_empty() || part == "0" {
+            continue;
+        }
+        if let Ok(amt) = hledger_parser::parse_amount(part) {
+            *out.entry(amt.commodity).or_insert(Decimal::ZERO) += amt.quantity;
+        }
+    }
+    out.retain(|_, q| !q.is_zero());
+    out
+}
+
+/// Parse an `is`/`bs` CSV into section label -> account -> amounts. Section
+/// headers are rows with an empty value; `Total:`/`Net:` are handled by the
+/// caller.
+fn parse_statement_csv(stdout: &str) -> BTreeMap<String, BTreeMap<String, CommodityMap>> {
+    let mut sections: BTreeMap<String, BTreeMap<String, CommodityMap>> = BTreeMap::new();
+    let mut current = String::new();
+
+    for line in stdout.lines().skip(1) {
+        let cols = parse_csv_row(line);
+        if cols.len() < 2 {
+            continue;
+        }
+        let (label, value) = (cols[0].trim(), cols[1].trim());
+        if label == "Account" || label == "Total:" || label == "Net:" {
+            continue;
+        }
+        if value.is_empty() {
+            current = label.to_string();
+            continue;
+        }
+        sections
+            .entry(current.clone())
+            .or_default()
+            .insert(label.to_string(), parse_amount_cell(value));
+    }
+    sections
+}
+
+/// Roll flat rows up into inclusive ones.
+///
+/// hledger's CSV gives each account only its own postings; our statement rows
+/// are inclusive, because collapsing a parent has to show the whole subtree.
+/// Rolling hledger's numbers up the same way compares the arithmetic rather
+/// than a presentation choice.
+fn rolled_up(flat: &BTreeMap<String, CommodityMap>) -> BTreeMap<String, CommodityMap> {
+    flat.keys()
+        .map(|account| {
+            let prefix = format!("{account}:");
+            let mut sum = CommodityMap::new();
+            for (other, amounts) in flat {
+                if other == account || other.starts_with(&prefix) {
+                    for (commodity, q) in amounts {
+                        *sum.entry(commodity.clone()).or_insert(Decimal::ZERO) += q;
+                    }
+                }
+            }
+            sum.retain(|_, q| !q.is_zero());
+            (account.clone(), sum)
+        })
+        .collect()
+}
+
+fn row_amounts(rows: &[hledger_core::reports::BalanceRow], account: &str) -> CommodityMap {
+    rows.iter()
+        .find(|r| r.account == account)
+        .map(|r| {
+            r.amounts
+                .iter()
+                .filter_map(|a| {
+                    a.quantity
+                        .parse::<Decimal>()
+                        .ok()
+                        .filter(|q| !q.is_zero())
+                        .map(|q| (a.commodity.clone(), q))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Compare one statement section against hledger's rows for it.
+fn assert_section_matches(
+    file: &Path,
+    label: &str,
+    expected_flat: &BTreeMap<String, CommodityMap>,
+    ours: &[hledger_core::reports::BalanceRow],
+) {
+    for (account, amounts) in rolled_up(expected_flat) {
+        assert_eq!(
+            row_amounts(ours, &account),
+            amounts,
+            "{}: {label} row {account} differs",
+            file.display()
+        );
+    }
+}
+
+fn statement_inputs(
+    file: &Path,
+) -> Option<(
+    Vec<hledger_core::balance::ResolvedTransaction>,
+    hledger_core::classify::AccountClassifier,
+)> {
+    let text = std::fs::read_to_string(file).ok()?;
+    let journal = hledger_parser::parse(&text).ok()?;
+    let txns = hledger_core::balance::resolve_transactions(&journal).ok()?;
+    let classifier = hledger_core::classify::AccountClassifier::from_journal(&journal);
+    Some((txns, classifier))
+}
+
+fn hledger_statement(file: &Path, command: &str) -> Option<BTreeMap<String, BTreeMap<String, CommodityMap>>> {
+    let output = Command::new("hledger")
+        .args(["-f", &file.to_string_lossy(), command, "-O", "csv"])
+        .output()
+        .expect("run hledger statement");
+    if !output.status.success() {
+        return None;
+    }
+    let sections = parse_statement_csv(&String::from_utf8_lossy(&output.stdout));
+    (!sections.is_empty()).then_some(sections)
+}
+
+/// Income statement rows must agree with `hledger is`, including hledger's
+/// convention of negating revenue for display.
+#[test]
+fn income_statement_matches_hledger() {
+    if !hledger_available() {
+        eprintln!("skipping: hledger not installed");
+        return;
+    }
+    for file in all_fixtures() {
+        let Some(sections) = hledger_statement(&file, "is") else { continue };
+        let Some((txns, classifier)) = statement_inputs(&file) else { continue };
+        let is = hledger_core::reports::income_statement(
+            &txns,
+            &classifier,
+            &hledger_core::price_db::PriceDb::default(),
+            "",
+            None,
+            None,
+        );
+        for (idx, label) in ["Revenues", "Expenses"].iter().enumerate() {
+            if let Some(expected) = sections.get(*label) {
+                assert_section_matches(&file, label, expected, &is.sections[idx].rows);
+            }
+        }
+    }
+}
+
+/// Balance sheet rows must agree with `hledger bs`.
+#[test]
+fn balance_sheet_matches_hledger() {
+    if !hledger_available() {
+        eprintln!("skipping: hledger not installed");
+        return;
+    }
+    for file in all_fixtures() {
+        let Some(sections) = hledger_statement(&file, "bs") else { continue };
+        let Some((txns, classifier)) = statement_inputs(&file) else { continue };
+        let bs = hledger_core::reports::balance_sheet(
+            &txns,
+            &classifier,
+            &hledger_core::price_db::PriceDb::default(),
+            "",
+            None,
+            None,
+        );
+        for (idx, label) in ["Assets", "Liabilities"].iter().enumerate() {
+            if let Some(expected) = sections.get(*label) {
+                assert_section_matches(&file, label, expected, &bs.sections[idx].rows);
+            }
+        }
+    }
+}
+
+/// Register rows and their running totals must match `hledger reg ACCOUNT`.
+///
+/// The running total is the part worth pinning: it depends on posting order
+/// and on how multi-commodity balances accumulate, neither of which a
+/// balance-only comparison exercises.
+#[test]
+fn register_running_totals_match_hledger() {
+    if !hledger_available() {
+        eprintln!("skipping: hledger not installed");
+        return;
+    }
+
+    for file in all_fixtures() {
+        let Some((txns, _)) = statement_inputs(&file) else { continue };
+
+        // Every account with postings, so this isn't pinned to one shape.
+        let mut accounts: Vec<String> = txns
+            .iter()
+            .flat_map(|t| t.postings.iter().map(|p| p.account.full.clone()))
+            .collect();
+        accounts.sort();
+        accounts.dedup();
+
+        for account in accounts.iter().take(6) {
+            let output = Command::new("hledger")
+                .args(["-f", &file.to_string_lossy(), "reg", account, "-O", "csv"])
+                .output()
+                .expect("run hledger reg");
+            if !output.status.success() {
+                continue;
+            }
+            let stdout = String::from_utf8_lossy(&output.stdout);
+
+            // (date, amount, running total) per row.
+            let expected: Vec<(String, CommodityMap, CommodityMap)> = stdout
+                .lines()
+                .skip(1)
+                .filter_map(|line| {
+                    let c = parse_csv_row(line);
+                    (c.len() >= 7).then(|| {
+                        (c[1].clone(), parse_amount_cell(&c[5]), parse_amount_cell(&c[6]))
+                    })
+                })
+                .collect();
+            if expected.is_empty() {
+                continue;
+            }
+
+            let ours = hledger_core::reports::register_report(&txns, account, None, None);
+            assert_eq!(
+                ours.len(),
+                expected.len(),
+                "{}: {account} row count differs",
+                file.display()
+            );
+
+            for (i, (date, amount, total)) in expected.iter().enumerate() {
+                let row = &ours[i];
+                assert_eq!(&row.date, date, "{}: {account} row {i} date", file.display());
+                let got_amount: CommodityMap = row
+                    .amount
+                    .iter()
+                    .filter_map(|a| {
+                        a.quantity
+                            .parse::<Decimal>()
+                            .ok()
+                            .filter(|q| !q.is_zero())
+                            .map(|q| (a.commodity.clone(), q))
+                    })
+                    .collect();
+                let got_total: CommodityMap = row
+                    .running_total
+                    .iter()
+                    .filter_map(|a| {
+                        a.quantity
+                            .parse::<Decimal>()
+                            .ok()
+                            .filter(|q| !q.is_zero())
+                            .map(|q| (a.commodity.clone(), q))
+                    })
+                    .collect();
+                assert_eq!(&got_amount, amount, "{}: {account} row {i} amount", file.display());
+                assert_eq!(&got_total, total, "{}: {account} row {i} running total", file.display());
+            }
+        }
+    }
+}
+
+/// A depth-limited balance must match `hledger bal --depth N`, which clips
+/// account names and folds descendants into the clipped parent.
+#[test]
+fn depth_limited_balances_match_hledger() {
+    if !hledger_available() {
+        eprintln!("skipping: hledger not installed");
+        return;
+    }
+
+    for file in all_fixtures() {
+        for depth in 1..=3usize {
+            let output = Command::new("hledger")
+                .args([
+                    "-f",
+                    &file.to_string_lossy(),
+                    "bal",
+                    "--flat",
+                    "-N",
+                    "--depth",
+                    &depth.to_string(),
+                    "-O",
+                    "csv",
+                ])
+                .output()
+                .expect("run hledger bal --depth");
+            if !output.status.success() {
+                continue;
+            }
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let expected: BTreeMap<String, CommodityMap> = stdout
+                .lines()
+                .skip(1)
+                .filter_map(|line| {
+                    let c = parse_csv_row(line);
+                    (c.len() >= 2 && c[0] != "Total:")
+                        .then(|| (c[0].clone(), parse_amount_cell(&c[1])))
+                })
+                .collect();
+            if expected.is_empty() {
+                continue;
+            }
+
+            let Some((txns, _)) = statement_inputs(&file) else { continue };
+            let query = hledger_core::query::parse_query(&format!("depth:{depth}")).unwrap();
+            let report = hledger_core::periodic_report::periodic_balance_report(
+                &txns,
+                hledger_core::periodic_report::ReportInterval::Yearly,
+                hledger_core::periodic_report::AccumulationMode::Historical,
+                Some(depth),
+                Some(&query),
+                None,
+                None,
+                "",
+                &hledger_core::price_db::PriceDb::default(),
+            );
+
+            // Historical mode's last column is the running balance to date,
+            // which is what `bal` reports.
+            for (account, amounts) in &expected {
+                let row = report.rows.iter().find(|r| &r.account == account);
+                let got: CommodityMap = row
+                    .and_then(|r| r.total.last().map(|_| r.total.clone()))
+                    .map(|total| {
+                        total
+                            .iter()
+                            .filter_map(|a| {
+                                a.quantity
+                                    .parse::<Decimal>()
+                                    .ok()
+                                    .filter(|q| !q.is_zero())
+                                    .map(|q| (a.commodity.clone(), q))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                assert_eq!(
+                    &got,
+                    amounts,
+                    "{}: depth {depth} account {account} differs",
+                    file.display()
+                );
+            }
+        }
+    }
+}

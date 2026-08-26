@@ -66,7 +66,14 @@ function StatementView({ statement, subtitle, onBack }: { statement: FinancialSt
         )}
       </div>
       <div className="flex-1 overflow-y-auto overflow-x-hidden p-4 space-y-4">
-        {statement.sections.map((section, si) => (
+        {statement.sections.map((section, si) => {
+          // Liabilities and equity are shown with their signs flipped, as
+          // hledger does, so a positive number there is money owed rather than
+          // money gained — colouring it green would read as good news.
+          const positiveIsGood = ["Assets", "Income", "Cash Changes"].includes(section.title);
+          const tone = (q: number) =>
+            q < 0 ? "text-red-500" : positiveIsGood ? "text-green-500" : "text-gray-800 dark:text-gray-200";
+          return (
           <div key={si}>
             <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 uppercase tracking-wide mb-2">{section.title}</h3>
             {section.rows.length > 0 ? (
@@ -85,7 +92,7 @@ function StatementView({ statement, subtitle, onBack }: { statement: FinancialSt
                           <span className="text-gray-400 dark:text-gray-500">&middot;</span>
                         ) : (
                           row.amounts.map((a, ai) => (
-                            <div key={ai} className={parseFloat(a.quantity) < 0 ? "text-red-500" : "text-green-500"}>
+                            <div key={ai} className={tone(parseFloat(a.quantity))}>
                               {fmtAmt([a])}
                             </div>
                           ))
@@ -134,7 +141,8 @@ function StatementView({ statement, subtitle, onBack }: { statement: FinancialSt
               </span>
             </div>
           </div>
-        ))}
+          );
+        })}
         <div className="border-t-2 border-gray-300 dark:border-gray-600 pt-2 flex justify-between items-start gap-2 font-bold text-sm text-gray-900 dark:text-gray-100">
           <span className="shrink-0">Net</span>
           <span className="font-mono text-right" style={{ fontVariantNumeric: "tabular-nums" }}>

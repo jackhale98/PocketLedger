@@ -383,8 +383,9 @@ pub fn balance_sheet(
         title: "Balance Sheet".to_string(),
         sections: vec![
             format_section("Assets", &assets),
-            format_section("Liabilities", &liabilities),
-            format_section("Equity", &equity),
+            // Net below still uses the raw signs, so net worth is unaffected.
+            negated_section("Liabilities", &liabilities),
+            negated_section("Equity", &equity),
         ],
         net: mixed_to_entries(&net),
     }
@@ -413,7 +414,7 @@ pub fn income_statement(
         sections: vec![
             StatementSection {
                 title: "Income".to_string(),
-                rows: income.rows.clone(),
+                rows: negated_rows(&income.rows),
                 total: mixed_to_entries(&income_negated),
             },
             format_section("Expenses", &expenses),
@@ -780,6 +781,42 @@ fn section_by_type(
     SectionData {
         rows: rows_with_parents(balances),
         total,
+    }
+}
+
+/// Flip the sign of every amount in a set of rows.
+///
+/// Revenue, liabilities and equity are credits, so they carry negative
+/// balances in double entry. hledger's statements negate them for display —
+/// income reads as what you earned, a card balance as what you owe — and a
+/// section whose total was negated while its rows were not contradicts itself.
+fn negated_rows(rows: &[BalanceRow]) -> Vec<BalanceRow> {
+    rows.iter()
+        .map(|row| BalanceRow {
+            account: row.account.clone(),
+            depth: row.depth,
+            amounts: row
+                .amounts
+                .iter()
+                .map(|a| AmountEntry {
+                    commodity: a.commodity.clone(),
+                    quantity: a
+                        .quantity
+                        .parse::<Decimal>()
+                        .map(|q| (-q).to_string())
+                        .unwrap_or_else(|_| a.quantity.clone()),
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+/// A section shown with credit balances flipped, like hledger's statements.
+fn negated_section(title: &str, data: &SectionData) -> StatementSection {
+    StatementSection {
+        title: title.to_string(),
+        rows: negated_rows(&data.rows),
+        total: mixed_to_entries(&data.total.negate()),
     }
 }
 
