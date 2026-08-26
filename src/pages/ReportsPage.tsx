@@ -145,7 +145,7 @@ function StatementView({ statement, subtitle, onBack }: { statement: FinancialSt
   );
 }
 
-function RegisterView({ accountList, account, onAccountChange, dateFrom, dateTo, currency, onChanged }: { accountList: string[]; account: string; onAccountChange: (a: string) => void; dateFrom: string; dateTo: string; currency: string; onChanged: () => void }) {
+function RegisterView({ accountList, account, onAccountChange, dateFrom, dateTo, query, currency, onChanged }: { accountList: string[]; account: string; onAccountChange: (a: string) => void; dateFrom: string; dateTo: string; query: string; currency: string; onChanged: () => void }) {
   const [editIndex, setEditIndex] = useState<number | null>(null);
   const [rows, setRows] = useState<RegisterRow[]>([]);
   const [loading, setLoading] = useState(false);
@@ -159,7 +159,7 @@ function RegisterView({ accountList, account, onAccountChange, dateFrom, dateTo,
     setLoading(true);
     setError(null);
     try {
-      const data = await api.registerReport(account, { dateFrom: dateFrom || null, dateTo: dateTo || null, targetCommodity: currency });
+      const data = await api.registerReport(account, { dateFrom: dateFrom || null, dateTo: dateTo || null, query: query.trim() || null, targetCommodity: currency });
       if (seq !== loadSeq.current) return;
       setRows(data);
     } catch (err) {
@@ -168,7 +168,7 @@ function RegisterView({ accountList, account, onAccountChange, dateFrom, dateTo,
     } finally {
       if (seq === loadSeq.current) setLoading(false);
     }
-  }, [account, dateFrom, dateTo, currency]);
+  }, [account, dateFrom, dateTo, query, currency]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -277,31 +277,25 @@ const TABLE_INTERVALS: [BalanceInterval, string][] = [
 ];
 const TABLE_DEPTHS: (number | null)[] = [null, 1, 2, 3, 4];
 
-function TableView({ dateFrom, dateTo }: { dateFrom: string; dateTo: string }) {
+function TableView({ dateFrom, dateTo, query, currency }: { dateFrom: string; dateTo: string; query: string; currency: string }) {
   const [interval, setInterval_] = useState<BalanceInterval>("monthly");
   const [mode, setMode] = useState<BalanceAccumulationMode>("periodic");
   const [depth, setDepth] = useState<number | null>(null);
-  const [query, setQuery] = useState("");
-  const [debouncedQuery, setDebouncedQuery] = useState("");
   const [forecast, setForecast] = useState(false);
   const [report, setReport] = useState<PeriodicBalanceReport | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const loadSeq = useRef(0);
 
-  useEffect(() => {
-    const t = setTimeout(() => setDebouncedQuery(query), 300);
-    return () => clearTimeout(t);
-  }, [query]);
-
   const load = useCallback(async () => {
     const seq = ++loadSeq.current;
     setLoading(true);
     try {
       const data = await api.periodicBalance(interval, mode, depth, {
+        targetCommodity: currency,
         dateFrom: dateFrom || null,
         dateTo: dateTo || null,
-        query: debouncedQuery.trim() || null,
+        query: query.trim() || null,
         forecast: forecast || null,
       });
       if (seq !== loadSeq.current) return;
@@ -313,7 +307,7 @@ function TableView({ dateFrom, dateTo }: { dateFrom: string; dateTo: string }) {
     } finally {
       if (seq === loadSeq.current) setLoading(false);
     }
-  }, [interval, mode, depth, debouncedQuery, forecast, dateFrom, dateTo]);
+  }, [interval, mode, depth, query, forecast, dateFrom, dateTo, currency]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -370,15 +364,6 @@ function TableView({ dateFrom, dateTo }: { dateFrom: string; dateTo: string }) {
         </label>
       </div>
 
-      {/* Query */}
-      <input
-        type="text"
-        value={query}
-        onChange={(e) => setQuery(e.target.value)}
-        placeholder="Query: acct:expenses cur:EUR not:rent..."
-        className="w-full px-3 py-2 bg-gray-100 dark:bg-gray-800 rounded-lg text-sm text-gray-900 dark:text-gray-100 placeholder-gray-500 dark:placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
-      />
-
       {error && (
         <div className="text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/30 px-3 py-2 rounded-lg break-words">{error}</div>
       )}
@@ -428,7 +413,7 @@ function TableView({ dateFrom, dateTo }: { dateFrom: string; dateTo: string }) {
   );
 }
 
-function BudgetView({ dateFrom, dateTo, currency }: { dateFrom: string; dateTo: string; currency: string }) {
+function BudgetView({ dateFrom, dateTo, query, currency }: { dateFrom: string; dateTo: string; query: string; currency: string }) {
   const [budgetRows, setBudgetRows] = useState<BudgetRow[]>([]);
   const [inactive, setInactive] = useState<InactiveBudget[]>([]);
   const [range, setRange] = useState<{ from: string; to: string } | null>(null);
@@ -448,6 +433,7 @@ function BudgetView({ dateFrom, dateTo, currency }: { dateFrom: string; dateTo: 
       targetCommodity: currency,
       dateFrom: dateFrom || null,
       dateTo: dateTo || null,
+      query: query.trim() || null,
     };
     try {
       const [rows, chart, ruleList] = await Promise.all([
@@ -467,7 +453,7 @@ function BudgetView({ dateFrom, dateTo, currency }: { dateFrom: string; dateTo: 
     } finally {
       if (seq === loadSeq.current) setLoading(false);
     }
-  }, [dateFrom, dateTo, currency]);
+  }, [dateFrom, dateTo, query, currency]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -674,7 +660,7 @@ function horizonDate(months: number): string {
   return `${d.getFullYear()}-${mm}-${dd}`;
 }
 
-function ForecastView({ accountList, dateFrom, dateTo, currency }: { accountList: string[]; dateFrom: string; dateTo: string; currency: string }) {
+function ForecastView({ accountList, dateFrom, dateTo, query, currency }: { accountList: string[]; dateFrom: string; dateTo: string; query: string; currency: string }) {
   // Empty means "let the backend pick every asset account by type".
   const [account, setAccount] = useState("");
   const [months, setMonths] = useState(12);
@@ -693,6 +679,7 @@ function ForecastView({ accountList, dateFrom, dateTo, currency }: { accountList
       targetCommodity: currency,
       dateFrom: dateFrom || null,
       dateTo: dateTo || null,
+      query: query.trim() || null,
     };
     try {
       const [proj, up] = await Promise.all([
@@ -708,7 +695,7 @@ function ForecastView({ accountList, dateFrom, dateTo, currency }: { accountList
     } finally {
       if (seq === loadSeq.current) setLoading(false);
     }
-  }, [account, months, dateFrom, dateTo, currency]);
+  }, [account, months, dateFrom, dateTo, query, currency]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -910,6 +897,12 @@ export function ReportsPage() {
   const [loading, setLoading] = useState(true);
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
+  // One query for every tab. The backend applies it to all reports, so
+  // leaving it per-tab meant a filter silently stopped applying when the
+  // user switched views.
+  const [query, setQuery] = useState("");
+  const [debouncedQuery, setDebouncedQuery] = useState("");
+  const [showQuery, setShowQuery] = useState(false);
   const [accountList, setAccountList] = useState<string[]>([]);
   const [selectedAccount, setSelectedAccount] = useState("");
   const [accountSeries, setAccountSeries] = useState<TimeSeriesPoint[]>([]);
@@ -923,11 +916,17 @@ export function ReportsPage() {
   const seriesSeq = useRef(0);
   const drillSeq = useRef(0);
 
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedQuery(query), 300);
+    return () => clearTimeout(t);
+  }, [query]);
+
   const makeParams = useCallback((): ReportParams => ({
     targetCommodity: defaultCurrency,
     dateFrom: dateFrom || null,
     dateTo: dateTo || null,
-  }), [defaultCurrency, dateFrom, dateTo]);
+    query: debouncedQuery.trim() || null,
+  }), [defaultCurrency, dateFrom, dateTo, debouncedQuery]);
 
   const loadDashboard = useCallback(async () => {
     const seq = ++dashboardSeq.current;
@@ -1105,6 +1104,31 @@ export function ReportsPage() {
           ))}
         </div>
         <DateFilter dateFrom={dateFrom} dateTo={dateTo} onChange={(f, t) => { setDateFrom(f); setDateTo(t); }} />
+        {showQuery || query ? (
+          <div className="flex gap-2 items-center min-w-0">
+            <input
+              type="text"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="acct:expenses cur:EUR not:rent"
+              autoFocus={showQuery && !query}
+              className="flex-1 min-w-0 px-3 py-2 bg-gray-100 dark:bg-gray-800 rounded-lg text-sm text-gray-900 dark:text-gray-100 placeholder-gray-500 dark:placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+            <button
+              onClick={() => { setQuery(""); setShowQuery(false); }}
+              className="text-xs text-gray-500 dark:text-gray-400 shrink-0 px-2 py-1"
+            >
+              Clear
+            </button>
+          </div>
+        ) : (
+          <button
+            onClick={() => setShowQuery(true)}
+            className="self-start text-xs text-blue-600 dark:text-blue-400 py-1"
+          >
+            Filter&hellip;
+          </button>
+        )}
         {tab === "overview" && (
           <label className="flex items-center gap-1.5 text-xs text-gray-600 dark:text-gray-400">
             <input type="checkbox" checked={forecast} onChange={(e) => setForecast(e.target.checked)} className="accent-blue-600" />
@@ -1129,13 +1153,13 @@ export function ReportsPage() {
           </div>
         )}
         {tab === "budget" ? (
-          <div className="p-4"><BudgetView dateFrom={dateFrom} dateTo={dateTo} currency={defaultCurrency} /></div>
+          <div className="p-4"><BudgetView dateFrom={dateFrom} dateTo={dateTo} query={debouncedQuery} currency={defaultCurrency} /></div>
         ) : tab === "forecast" ? (
-          <div className="p-4"><ForecastView accountList={accountList} dateFrom={dateFrom} dateTo={dateTo} currency={defaultCurrency} /></div>
+          <div className="p-4"><ForecastView accountList={accountList} dateFrom={dateFrom} dateTo={dateTo} query={debouncedQuery} currency={defaultCurrency} /></div>
         ) : tab === "table" ? (
-          <div className="p-4"><TableView dateFrom={dateFrom} dateTo={dateTo} /></div>
+          <div className="p-4"><TableView dateFrom={dateFrom} dateTo={dateTo} query={debouncedQuery} currency={defaultCurrency} /></div>
         ) : tab === "register" ? (
-          <div className="p-4"><RegisterView accountList={accountList} account={registerAccount} onAccountChange={setRegisterAccount} dateFrom={dateFrom} dateTo={dateTo} currency={defaultCurrency} onChanged={() => { refreshJournal(); loadDashboard(); }} /></div>
+          <div className="p-4"><RegisterView accountList={accountList} account={registerAccount} onAccountChange={setRegisterAccount} dateFrom={dateFrom} dateTo={dateTo} query={debouncedQuery} currency={defaultCurrency} onChanged={() => { refreshJournal(); loadDashboard(); }} /></div>
         ) : loading ? (
           <div className="flex items-center justify-center h-32 text-gray-500 text-sm">Loading...</div>
         ) : (
