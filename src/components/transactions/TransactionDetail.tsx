@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { TransactionSummary } from "../../api/types";
 import { AmountDisplay } from "../common/AmountDisplay";
 import { StatusBadge } from "../common/StatusBadge";
+import { useBackHandler } from "../../store/backStore";
 
 interface TransactionDetailProps {
   transaction: TransactionSummary;
@@ -19,7 +20,12 @@ export function TransactionDetail({
   onDelete,
   onDuplicate,
 }: TransactionDetailProps) {
+  // The delete confirmation is the innermost thing back should dismiss.
   const [showConfirmDelete, setShowConfirmDelete] = useState(false);
+  useBackHandler(true, () => {
+    if (showConfirmDelete) setShowConfirmDelete(false);
+    else onBack();
+  });
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
 

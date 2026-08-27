@@ -7,6 +7,7 @@ import { RecurringEditor } from "../components/recurring/RecurringEditor";
 import { CsvImportFlow } from "../components/csv/CsvImportFlow";
 import { MobileJournalPicker } from "../components/common/MobileJournalPicker";
 import { getPlatformInfo } from "../utils/platform";
+import { useBackHandler } from "../store/backStore";
 
 const COMMON_CURRENCIES = [
   { symbol: "$", label: "Dollar ($)" },
@@ -36,6 +37,7 @@ export function MorePage() {
   const [showRecurringEditor, setShowRecurringEditor] = useState(false);
   const [showCsvImport, setShowCsvImport] = useState(false);
   const [showJournalPicker, setShowJournalPicker] = useState(false);
+  useBackHandler(showJournalPicker, () => setShowJournalPicker(false));
   const [isMobile, setIsMobile] = useState(false);
   const [storageDir, setStorageDir] = useState("");
 

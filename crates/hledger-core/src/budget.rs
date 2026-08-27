@@ -149,6 +149,10 @@ pub struct BudgetTotal {
     pub commodity: String,
     pub budget: String,
     pub actual: String,
+    /// Budget less actual, subtracted here in exact decimal arithmetic. The
+    /// UI used to derive it by parsing both figures as floats, where
+    /// 74,690.08 - 74,335.39 comes out as 354.6900000000023.
+    pub remaining: String,
 }
 
 /// Budget goals against actuals, plus the budgets that fell outside the range.
@@ -379,6 +383,7 @@ pub fn budget_comparison(
                 commodity,
                 budget: budget.to_string(),
                 actual: actual.to_string(),
+                remaining: (budget - actual).to_string(),
             })
             .collect(),
         inactive,
@@ -929,5 +934,37 @@ mod tests {
 
         let utilities = report.iter().find(|r| r.account == "expenses:utilities").unwrap();
         assert!(utilities.over_budget, "Utilities should be over budget");
+    }
+
+    /// Budget less actual is subtracted here, in exact decimal arithmetic.
+    ///
+    /// The UI used to derive it by parsing both figures as floats, which
+    /// printed the remaining balance of a real journal as
+    /// "354.6900000000023 USD" -- 74,690.08 minus 74,335.39 is not
+    /// representable in binary floating point.
+    #[test]
+    fn remaining_is_exact() {
+        let input = "~ monthly\n    expenses:all  $74690.08\n    assets:cash\n\n\
+                     2024-01-15 spend\n    expenses:all  $74335.39\n    assets:cash\n";
+        let journal = parse(input).unwrap();
+        let budgets = extract_budgets(&journal);
+        let txns = resolve(input);
+
+        let report = budget_comparison(
+            &txns,
+            &budgets,
+            &db(),
+            "$",
+            Some(d(2024, 1, 1)),
+            Some(d(2024, 1, 31)),
+        );
+        let total = report
+            .totals
+            .iter()
+            .find(|t| t.commodity == "$")
+            .expect("a dollar total");
+        assert_eq!(total.budget, "74690.08");
+        assert_eq!(total.actual, "74335.39");
+        assert_eq!(total.remaining, "354.69");
     }
 }

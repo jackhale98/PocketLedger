@@ -330,6 +330,7 @@ pub mod apply {
             let commodity = total.commodity.clone();
             quantity(&mut total.budget, &commodity, styles);
             quantity(&mut total.actual, &commodity, styles);
+            quantity(&mut total.remaining, &commodity, styles);
         }
     }
 

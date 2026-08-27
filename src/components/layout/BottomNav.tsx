@@ -7,6 +7,10 @@ interface BottomNavProps {
   onTabChange: (tab: TabId) => void;
 }
 
+/** Left-to-right order, shared with the swipe gesture so the two can't
+ *  disagree about which tab is "next". */
+export const TAB_ORDER: TabId[] = ["transactions", "accounts", "reports", "more"];
+
 const tabs: { id: TabId; label: string }[] = [
   { id: "transactions", label: "Transactions" },
   { id: "accounts", label: "Accounts" },

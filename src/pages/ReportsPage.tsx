@@ -8,6 +8,7 @@ import * as api from "../api/commands";
 import { useSettingsStore } from "../store/settingsStore";
 import { useJournalStore } from "../store/journalStore";
 import { useNavStore, type ReportTab } from "../store/navStore";
+import { useBackHandler } from "../store/backStore";
 import { formatAmount } from "../utils/format";
 import { hasChildren, isHiddenUnder, toggleCollapsed, collapsibleAccounts } from "../utils/tree";
 import { DateFilter } from "../components/common/DateFilter";
@@ -61,6 +62,8 @@ function describeRange(
 }
 
 function StatementView({ statement, subtitle, onBack }: { statement: FinancialStatement; subtitle?: string | null; onBack: () => void }) {
+  // Reachable by the back gesture, not just the arrow.
+  useBackHandler(true, onBack);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
 
   const allRows = statement.sections.flatMap((s) => s.rows);
@@ -804,8 +807,13 @@ function BudgetView({ dateFrom, dateTo, query, currency }: { dateFrom: string; d
   // the rows up would double-count a budget nested inside another, since each
   // row already includes its descendants.
   const incomeRowCount = budgetRows.filter((r) => parseFloat(r.budget) < 0).length;
-  const commodityTotals: [string, { budget: number; actual: number }][] = totals
-    .map((t) => [t.commodity, { budget: parseFloat(t.budget), actual: parseFloat(t.actual) }] as [string, { budget: number; actual: number }])
+  const commodityTotals: [string, { budget: number; actual: number; text: BudgetTotal }][] = totals
+    .map((t) => [
+      t.commodity,
+      // Strings, not floats: these are printed as-is, and the backend has
+      // already subtracted and rounded them.
+      { budget: parseFloat(t.budget), actual: parseFloat(t.actual), text: t },
+    ] as [string, { budget: number; actual: number; text: BudgetTotal }])
     .filter(([, v]) => v.budget >= 0)
     .sort((a, b) => Math.abs(b[1].budget) - Math.abs(a[1].budget));
   const mainTotal = commodityTotals[0];
@@ -828,19 +836,19 @@ function BudgetView({ dateFrom, dateTo, query, currency }: { dateFrom: string; d
             <div className="bg-gray-50 dark:bg-gray-800 rounded-lg p-3 text-center">
               <div className="text-xs text-gray-500 dark:text-gray-400">Budgeted</div>
               <div className="text-sm font-semibold text-gray-900 dark:text-gray-100 font-mono">
-                {fmtBudgetAmt(mainTotal[1].budget.toString(), mainTotal[0])}
+                {fmtBudgetAmt(mainTotal[1].text.budget, mainTotal[0])}
               </div>
             </div>
             <div className="bg-gray-50 dark:bg-gray-800 rounded-lg p-3 text-center">
               <div className="text-xs text-gray-500 dark:text-gray-400">Spent</div>
               <div className="text-sm font-semibold text-gray-900 dark:text-gray-100 font-mono">
-                {fmtBudgetAmt(mainTotal[1].actual.toString(), mainTotal[0])}
+                {fmtBudgetAmt(mainTotal[1].text.actual, mainTotal[0])}
               </div>
             </div>
             <div className="bg-gray-50 dark:bg-gray-800 rounded-lg p-3 text-center">
               <div className="text-xs text-gray-500 dark:text-gray-400">Remaining</div>
-              <div className={`text-sm font-semibold font-mono ${mainTotal[1].budget - mainTotal[1].actual >= 0 ? "text-green-500" : "text-red-500"}`}>
-                {fmtBudgetAmt((mainTotal[1].budget - mainTotal[1].actual).toString(), mainTotal[0])}
+              <div className={`text-sm font-semibold font-mono ${parseFloat(mainTotal[1].text.remaining) >= 0 ? "text-green-500" : "text-red-500"}`}>
+                {fmtBudgetAmt(mainTotal[1].text.remaining, mainTotal[0])}
               </div>
             </div>
           </div>
@@ -926,6 +934,8 @@ function monthRange(period: string): { from: string; to: string } {
 }
 
 function CommoditiesView({ onBack }: { onBack: () => void }) {
+  // Reachable by the back gesture, not just the arrow.
+  useBackHandler(true, onBack);
   const [series, setSeries] = useState<PriceSeries[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -997,6 +1007,8 @@ function CommoditiesView({ onBack }: { onBack: () => void }) {
 }
 
 function StatisticsView({ params, onBack }: { params: ReportParams; onBack: () => void }) {
+  // Reachable by the back gesture, not just the arrow.
+  useBackHandler(true, onBack);
   const [stats, setStats] = useState<JournalStatistics | null>(null);
   const [error, setError] = useState<string | null>(null);
 

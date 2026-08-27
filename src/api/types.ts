@@ -232,6 +232,8 @@ export interface BudgetTotal {
   commodity: string;
   budget: string;
   actual: string;
+  /** Budget less actual, subtracted in exact decimal arithmetic. */
+  remaining: string;
 }
 
 export interface BudgetComparison {

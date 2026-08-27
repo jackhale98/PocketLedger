@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import { BottomNav } from "./components/layout/BottomNav";
+import { BottomNav, TAB_ORDER } from "./components/layout/BottomNav";
 import { TransactionsPage } from "./pages/TransactionsPage";
 import { AccountsPage } from "./pages/AccountsPage";
 import { ReportsPage } from "./pages/ReportsPage";
@@ -9,6 +9,7 @@ import { MobileJournalPicker } from "./components/common/MobileJournalPicker";
 import { MissingIncludesBanner } from "./components/common/MissingIncludesBanner";
 import { useJournalStore } from "./store/journalStore";
 import { useNavStore } from "./store/navStore";
+import { useSwipeNavigation } from "./hooks/useSwipeNavigation";
 import { useSettingsStore } from "./store/settingsStore";
 import { getPlatformInfo, resolveJournalRef } from "./utils/platform";
 import * as api from "./api/commands";
@@ -17,6 +18,10 @@ function App() {
   // Tab selection lives in a store so charts and lists can jump between tabs.
   const activeTab = useNavStore((s) => s.activeTab);
   const setActiveTab = useNavStore((s) => s.setActiveTab);
+  const mainRef = useRef<HTMLElement>(null);
+  useSwipeNavigation(mainRef, TAB_ORDER, activeTab, (tab) =>
+    setActiveTab(tab as typeof activeTab)
+  );
   const { isLoaded, isLoading, error, summary, openJournal, reloadFromDisk, clearError } =
     useJournalStore();
   const { defaultCurrency, lastJournalPath, loaded: settingsLoaded, loadSettings, setLastJournalPath } = useSettingsStore();
@@ -252,7 +257,9 @@ function App() {
       )}
 
       {/* Main content */}
-      <main className="flex-1 overflow-hidden bg-white dark:bg-gray-900">{renderPage()}</main>
+      <main ref={mainRef} className="flex-1 overflow-hidden bg-white dark:bg-gray-900">
+        {renderPage()}
+      </main>
 
       {/* Bottom navigation */}
       <BottomNav activeTab={activeTab} onTabChange={setActiveTab} />

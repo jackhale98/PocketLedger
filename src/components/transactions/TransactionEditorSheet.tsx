@@ -3,6 +3,7 @@ import * as api from "../../api/commands";
 import type { TransactionSummary } from "../../api/types";
 import { TransactionDetail } from "./TransactionDetail";
 import { TransactionForm } from "./TransactionForm";
+import { useBackHandler } from "../../store/backStore";
 
 /** View/edit/delete one transaction by index, self-contained so any report
  *  that can name a transaction (the register, say) gets the same flow the
@@ -25,6 +26,17 @@ export function TransactionEditorSheet({
   // prefill serves both.
   const [duplicating, setDuplicating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // While the form is open, back abandons the edit; TransactionDetail
+  // registers its own handler for the view state.
+  useBackHandler(editing || duplicating || error !== null, () => {
+    if (editing || duplicating) {
+      setEditing(false);
+      setDuplicating(false);
+    } else {
+      onClose();
+    }
+  });
 
   useEffect(() => {
     let live = true;
