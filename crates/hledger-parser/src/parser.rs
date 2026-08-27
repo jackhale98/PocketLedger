@@ -224,12 +224,12 @@ impl<'a> Parser<'a> {
         }
         if let Some(rest) = line.strip_prefix("include ") {
             self.items.push(JournalItem::IncludeDirective(IncludeDirective {
-                path: rest.trim().to_string(),
+                path: strip_inline_comment(rest).trim().to_string(),
             }));
             return Ok(Some(i + 1));
         }
         if let Some(rest) = line.strip_prefix("alias ") {
-            self.parse_alias_directive(rest, i);
+            self.parse_alias_directive(strip_inline_comment(rest), i);
             return Ok(Some(i + 1));
         }
         if line.trim() == "end aliases" {
@@ -253,7 +253,7 @@ impl<'a> Parser<'a> {
             return Ok(Some(i + 1));
         }
         if let Some(rest) = line.strip_prefix("D ") {
-            match parse_style_example(rest.trim()) {
+            match parse_style_example(strip_inline_comment(rest).trim()) {
                 Some((commodity, style)) if !commodity.is_empty() => {
                     self.amount_ctx
                         .commodity_marks
@@ -271,7 +271,7 @@ impl<'a> Parser<'a> {
             .or_else(|| line.strip_prefix("Y "))
             .or_else(|| if line.starts_with('Y') && line[1..].trim().chars().all(|c| c.is_ascii_digit()) && !line[1..].trim().is_empty() { Some(&line[1..]) } else { None });
         if let Some(rest) = year_rest {
-            match rest.trim().parse::<i32>() {
+            match strip_inline_comment(rest).trim().parse::<i32>() {
                 Ok(y) => self.default_year = Some(y),
                 Err(_) => self.warn(i + 1, format!("malformed year directive: {}", line)),
             }
@@ -279,7 +279,8 @@ impl<'a> Parser<'a> {
             return Ok(Some(i + 1));
         }
         if let Some(rest) = line.strip_prefix("apply account ") {
-            self.account_prefix.push(rest.trim().to_string());
+            self.account_prefix
+                .push(strip_inline_comment(rest).trim().to_string());
             self.items.push(JournalItem::OtherDirective(line.to_string()));
             return Ok(Some(i + 1));
         }
@@ -1017,6 +1018,23 @@ impl<'a> Parser<'a> {
     }
 }
 
+/// Cut a trailing inline comment off a directive's argument.
+///
+/// hledger lets any directive carry a `; ...` note. Where the argument is
+/// consumed as a value -- a path, an account name, a year -- leaving the
+/// comment attached silently corrupts it: `alias Chk = Assets:Checking ; note`
+/// aliased to an account literally named "Assets:Checking   ; note", and
+/// `D $1,000.00 ; note` set no default commodity at all.
+///
+/// Not used for `account`, whose comment carries the `type:` tag and must
+/// reach the classifier intact.
+fn strip_inline_comment(s: &str) -> &str {
+    match s.find(';') {
+        Some(i) => s[..i].trim_end(),
+        None => s,
+    }
+}
+
 /// Append a comment line to an optional multi-line comment.
 fn append_comment(slot: &mut Option<Comment>, text: &str) {
     match slot {
@@ -1723,6 +1741,73 @@ mod tests {
 #[cfg(test)]
 mod price_comment_tests {
     use super::*;
+
+    /// Every directive whose argument is consumed as a value must survive a
+    /// trailing comment. hledger permits one on any directive, and leaving it
+    /// attached corrupts the value silently -- an alias pointing at an account
+    /// name with "; note" welded on, or a default commodity that vanishes.
+    #[test]
+    fn directives_may_carry_a_trailing_comment() {
+        fn first_txn(j: &Journal) -> &Transaction {
+            j.items
+                .iter()
+                .find_map(|i| match i {
+                    JournalItem::Transaction(t) => Some(t),
+                    _ => None,
+                })
+                .expect("expected a transaction")
+        }
+
+        // `year` sets the default year for partial dates.
+        let j = parse("year 2024   ; fiscal\n\n01-05 x\n    a   1 FOO\n    b\n").unwrap();
+        let dated: Vec<_> = j
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                JournalItem::Transaction(t) => Some(t.date.to_string()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(dated, vec!["2024-01-05"]);
+
+        // `alias` rewrites an account name.
+        let j = parse("alias Chk = Assets:Checking   ; note\n\n2024-01-01 x\n    Chk   1 FOO\n    b\n").unwrap();
+        assert_eq!(first_txn(&j).postings[0].account.full, "Assets:Checking");
+
+        // `D` sets the default commodity for bare amounts.
+        let j = parse("D $1,000.00   ; note\n\n2024-01-01 x\n    a   5\n    b\n").unwrap();
+        assert_eq!(
+            first_txn(&j).postings[0].amount.as_ref().unwrap().commodity,
+            "$"
+        );
+
+        // `include` names a path.
+        let j = parse("include other.journal   ; pulled in\n").unwrap();
+        let inc = j
+            .items
+            .iter()
+            .find_map(|i| match i {
+                JournalItem::IncludeDirective(d) => Some(d),
+                _ => None,
+            })
+            .expect("expected an include");
+        assert_eq!(inc.path, "other.journal");
+
+        // `apply account` prefixes every account below it.
+        let j = parse("apply account Assets   ; note\n\n2024-01-01 x\n    Bank   1 FOO\n    b\n").unwrap();
+        assert_eq!(first_txn(&j).postings[0].account.full, "Assets:Bank");
+    }
+
+    /// The `account` directive is the exception: its comment carries the
+    /// `type:` tag, so it must reach the classifier intact.
+    #[test]
+    fn an_account_directive_keeps_its_comment() {
+        let j = parse("account Assets:B  ; type:C, spending money\n").unwrap();
+        // Classification itself is covered in hledger-core; here we only
+        // assert the comment was not discarded on the way through.
+        let text = format!("{:?}", j.items[0]);
+        assert!(text.contains("type:C"), "type tag lost: {text}");
+    }
 
     /// A trailing comment on a price directive must not discard the price.
     ///
