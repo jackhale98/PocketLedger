@@ -14,24 +14,40 @@ jobs:
   # yet. On v0.2.18 two of them created duplicate drafts and the Android run
   # failed while cleaning its own up, so the APK never reached the release.
   #
-  # This job creates it once. The shared concurrency group is repository-wide,
-  # so the copy of this job in each workflow queues behind the others rather
-  # than racing them; whichever runs first creates the draft and the rest are
-  # a no-op update. Attaching assets to a release that already exists is safe
-  # to do concurrently -- only creation was ever the problem.
+  # This job creates it once, before any build can finish. It is idempotent
+  # rather than serialized: a concurrency group would have GitHub cancel the
+  # queued copy when the third workflow arrived, since only one job per group
+  # may wait. Checking first and tolerating a lost race needs no coordination
+  # and leaves no cancelled jobs in the run list.
+  #
+  # Attaching assets to a release that already exists is safe to do
+  # concurrently -- only creating it was ever the problem.
   create-release:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
-    concurrency:
-      group: create-release-${{ github.ref }}
-      cancel-in-progress: false
     steps:
       - name: Ensure the draft release exists
-        uses: softprops/action-gh-release@v2
-        with:
-          draft: true
-          name: PocketHLedger ${{ github.ref_name }}
-          body: "Plain text accounting in your pocket. See assets below for downloads."
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            echo "Release $TAG already exists."
+            exit 0
+          fi
+          # Another workflow may create it between the check and the create,
+          # so losing that race is fine as long as the release then exists.
+          if gh release create "$TAG" --repo "$REPO" --draft \
+               --title "PocketHLedger $TAG" \
+               --notes "Plain text accounting in your pocket. See assets below for downloads."; then
+            echo "Created release $TAG."
+          else
+            echo "Create failed; checking whether another job won the race."
+            gh release view "$TAG" --repo "$REPO" >/dev/null
+            echo "Release $TAG exists."
+          fi
 
   build-release:
     needs: create-release
