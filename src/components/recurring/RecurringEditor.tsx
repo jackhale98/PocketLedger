@@ -5,6 +5,7 @@ import * as api from "../../api/commands";
 import { normalizeAmountInput } from "../../utils/amount";
 import { formatAmount } from "../../utils/format";
 import type { JournalFileInfo, ForecastRule, SaveForecastPosting } from "../../api/types";
+import { useBackHandler } from "../../store/backStore";
 
 const PERIOD_PRESETS = [
   { value: "monthly", label: "Monthly" },
@@ -191,6 +192,12 @@ export function RecurringEditor({ onDone }: { onDone: () => void }) {
     if (amount === null) return "auto";
     return formatAmount(amount, commodity);
   };
+
+  // Mirrors the arrows below: back leaves the form first, then the list.
+  useBackHandler(true, () => {
+    if (editing) setEditing(false);
+    else onDone();
+  });
 
   // Existing rules list view
   if (!editing) {

@@ -3,6 +3,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import * as api from "../../api/commands";
 import { formatAmount } from "../../utils/format";
 import type { CsvPreviewTransaction } from "../../api/types";
+import { useBackHandler } from "../../store/backStore";
 
 type Step = "pick-files" | "preview" | "importing" | "done";
 
@@ -102,6 +103,14 @@ export function CsvImportFlow({ onDone }: { onDone: () => void }) {
     const base = path.split("/").pop()?.split("\\").pop() ?? path;
     return base.replace(/^\d{6,}-/, "");
   };
+
+  // Mirrors the arrow: back steps out of the preview, then closes the flow.
+  // Without this a swipe would page to another tab and unmount the import
+  // mid-way, which loses more than stepping back does.
+  useBackHandler(true, () => {
+    if (step === "preview") setStep("pick-files");
+    else onDone();
+  });
 
   return (
     <div className="flex flex-col h-full">
