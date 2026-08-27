@@ -9,7 +9,33 @@ permissions:
   contents: write
 
 jobs:
+  # All three release workflows and the four desktop matrix legs would
+  # otherwise each try to create the release for a tag that does not exist
+  # yet. On v0.2.18 two of them created duplicate drafts and the Android run
+  # failed while cleaning its own up, so the APK never reached the release.
+  #
+  # This job creates it once. The shared concurrency group is repository-wide,
+  # so the copy of this job in each workflow queues behind the others rather
+  # than racing them; whichever runs first creates the draft and the rest are
+  # a no-op update. Attaching assets to a release that already exists is safe
+  # to do concurrently -- only creation was ever the problem.
+  create-release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    concurrency:
+      group: create-release-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - name: Ensure the draft release exists
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          name: PocketHLedger ${{ github.ref_name }}
+          body: "Plain text accounting in your pocket. See assets below for downloads."
+
   build:
+    needs: create-release
+    if: ${{ always() && needs.create-release.result != 'failure' }}
     strategy:
       fail-fast: false
       matrix:
