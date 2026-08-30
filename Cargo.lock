@@ -2599,7 +2599,7 @@ dependencies = [
 
 [[package]]
 name = "pockethledger"
-version = "0.2.21"
+version = "0.2.22"
 dependencies = [
  "chrono",
  "glob",
