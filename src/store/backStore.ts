@@ -57,6 +57,17 @@ export function canGoBack(): boolean {
   );
 }
 
+/** Notify `listener` whenever what back would do changes -- something opened
+ *  or closed. Returns the unsubscribe function. */
+export function onBackStackChange(listener: () => void): () => void {
+  const a = useBackStore.subscribe(listener);
+  const b = useNavStore.subscribe(listener);
+  return () => {
+    a();
+    b();
+  };
+}
+
 /** Run the innermost back action. Returns false when there was nothing to do,
  *  so a caller can fall through to whatever it would otherwise have done. */
 export function goBack(): boolean {

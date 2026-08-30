@@ -1,8 +1,10 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import { format } from "date-fns";
 import { Autocomplete } from "../common/Autocomplete";
+import { SignToggle } from "../common/SignToggle";
 import * as api from "../../api/commands";
-import { normalizeAmountInput, exactDecimalSum, isDecimalZero } from "../../utils/amount";
+import { normalizeAmountInput, exactDecimalSum, isDecimalZero, negateDecimal } from "../../utils/amount";
+import { useBackHandler } from "../../store/backStore";
 import type { NewPosting, JournalFileInfo } from "../../api/types";
 
 interface PrefillData {
@@ -58,6 +60,9 @@ export function TransactionForm({
   chooseFile = false,
 }: TransactionFormProps) {
   const [date, setDate] = useState(prefill?.date ?? format(new Date(), "yyyy-MM-dd"));
+  // A swipe or hardware back cancels the form, the same as the button --
+  // without this the gesture paged to another tab and dropped the entry.
+  useBackHandler(true, onCancel);
   const [files, setFiles] = useState<JournalFileInfo[]>([]);
   const [fileIndex, setFileIndex] = useState(0);
 
@@ -111,7 +116,7 @@ export function TransactionForm({
     if (learned.length === 0) return;
     setPostings((prev) => {
       const used = new Set(prev.map((p) => p.account.trim()).filter(Boolean));
-      let next = learned.filter((a) => !used.has(a));
+      const next = learned.filter((a) => !used.has(a));
       return prev.map((p) =>
         p.account.trim() || next.length === 0
           ? p
@@ -154,21 +159,28 @@ export function TransactionForm({
     const commodities = new Set(filledPostings.map((p) => p.commodity));
     if (commodities.size > 1) return "";
 
-    let total = 0;
+    const normalized: string[] = [];
     for (const p of filledPostings) {
-      const normalized = normalizeAmountInput(p.amount);
-      if (normalized === null) return "";
-      total += parseFloat(normalized);
+      const n = normalizeAmountInput(p.amount);
+      if (n === null) return "";
+      normalized.push(n);
     }
 
-    if (total === 0) return "";
-    return (-total).toFixed(2);
+    // Exact arithmetic at the precision the user typed: "0.1" and "0.2"
+    // balance with "-0.3", not "-0.30000000000000004" or a forced "-0.30".
+    const total = exactDecimalSum(normalized);
+    if (total === null || isDecimalZero(total)) return "";
+    return negateDecimal(total);
   };
 
   const handleSubmit = async () => {
     if (submittingRef.current) return;
     setError(null);
 
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      setError("Pick a date");
+      return;
+    }
     if (!description.trim()) {
       setError("Description is required");
       return;
@@ -279,7 +291,7 @@ export function TransactionForm({
       <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 dark:border-gray-700">
         <button
           onClick={onCancel}
-          className="text-gray-600 dark:text-gray-300 text-sm font-medium min-w-[60px]"
+          className="text-gray-600 dark:text-gray-300 text-sm font-medium min-w-[60px] min-h-[44px]"
         >
           Cancel
         </button>
@@ -287,7 +299,7 @@ export function TransactionForm({
         <button
           onClick={handleSubmit}
           disabled={saving}
-          className="text-blue-600 text-sm font-semibold min-w-[60px] text-right disabled:opacity-50"
+          className="text-blue-600 text-sm font-semibold min-w-[60px] min-h-[44px] text-right disabled:opacity-50"
         >
           {saving ? "Saving..." : "Save"}
         </button>
@@ -309,8 +321,9 @@ export function TransactionForm({
           <input
             type="date"
             value={date}
+            required
             onChange={(e) => setDate(e.target.value)}
-            className="w-full min-w-0 max-w-full box-border px-3 py-2 border border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            className="w-full min-w-0 max-w-full box-border px-3 py-2 min-h-[44px] border border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
           />
         </div>
 
@@ -343,7 +356,8 @@ export function TransactionForm({
               <button
                 key={opt.value}
                 onClick={() => setStatus(opt.value)}
-                className={`flex-1 py-2 text-sm rounded-lg border ${
+                aria-pressed={status === opt.value}
+                className={`flex-1 py-2 min-h-[44px] text-sm rounded-lg border ${
                   status === opt.value
                     ? "border-blue-500 bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400 font-medium"
                     : "border-gray-300 dark:border-gray-600 text-gray-600 dark:text-gray-300"
@@ -367,6 +381,7 @@ export function TransactionForm({
             onCommit={fillAccountsFromDescription}
             onSuggest={suggestDescriptions}
             placeholder="Payee or description"
+            aria-label="Description"
           />
         </div>
 
@@ -380,7 +395,9 @@ export function TransactionForm({
             value={comment}
             onChange={(e) => setComment(e.target.value)}
             placeholder="Optional note or comment"
-            className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            aria-label="Note"
+            enterKeyHint="next"
+            className="w-full px-3 py-2 min-h-[44px] border border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
           />
         </div>
 
@@ -399,7 +416,7 @@ export function TransactionForm({
               return (
                 <div
                   key={posting.id}
-                  className="bg-gray-50 dark:bg-gray-800 rounded-lg p-3 space-y-2 overflow-hidden"
+                  className="bg-gray-50 dark:bg-gray-800 rounded-lg p-3 space-y-2 min-w-0"
                 >
                   <div className="flex items-center justify-between">
                     <span className="text-xs text-gray-400 dark:text-gray-500">
@@ -408,7 +425,7 @@ export function TransactionForm({
                     {postings.length > 2 && (
                       <button
                         onClick={() => removePosting(posting.id)}
-                        className="text-xs text-red-500"
+                        className="text-xs text-red-500 min-h-[44px] px-2 -mr-2 -my-2"
                       >
                         Remove
                       </button>
@@ -421,14 +438,20 @@ export function TransactionForm({
                     onChange={(v) => updatePosting(posting.id, "account", v)}
                     onSuggest={suggestAccounts}
                     placeholder="Account name"
+                    aria-label={`Posting ${index + 1} account`}
                   />
 
                   {/* Amount + Commodity */}
-                  <div className="flex gap-2">
-                    <div className="flex-1 relative">
+                  <div className="flex gap-2 min-w-0">
+                    <div className="flex-1 min-w-0 relative">
                       <input
                         type="text"
                         inputMode="decimal"
+                        autoCapitalize="none"
+                        autoCorrect="off"
+                        spellCheck={false}
+                        enterKeyHint="next"
+                        aria-label={`Posting ${index + 1} amount`}
                         value={posting.amount}
                         onChange={(e) =>
                           updatePosting(posting.id, "amount", e.target.value)
@@ -438,13 +461,17 @@ export function TransactionForm({
                             ? balancingAmount
                             : "Amount (empty to infer)"
                         }
-                        className={`w-full px-3 py-2 border border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-100 rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500 ${
+                        className={`w-full px-3 py-2 min-h-[44px] border border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-100 rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500 ${
                           isLastEmpty && balancingAmount
                             ? "placeholder:text-gray-400 dark:placeholder:text-gray-500"
                             : ""
                         }`}
                       />
                     </div>
+                    <SignToggle
+                      value={posting.amount}
+                      onChange={(v) => updatePosting(posting.id, "amount", v)}
+                    />
                     <input
                       type="text"
                       value={posting.commodity}
@@ -452,7 +479,12 @@ export function TransactionForm({
                         updatePosting(posting.id, "commodity", e.target.value)
                       }
                       placeholder="$"
-                      className="w-16 px-2 py-2 border border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-100 rounded-lg text-sm text-center focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      aria-label={`Posting ${index + 1} commodity`}
+                      autoCapitalize="none"
+                      autoCorrect="off"
+                      spellCheck={false}
+                      enterKeyHint="next"
+                      className="w-14 shrink-0 px-1 py-2 min-h-[44px] border border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-100 rounded-lg text-sm text-center focus:outline-none focus:ring-2 focus:ring-blue-500"
                     />
                   </div>
 
@@ -464,7 +496,9 @@ export function TransactionForm({
                       updatePosting(posting.id, "comment", e.target.value)
                     }
                     placeholder="Posting note (optional)"
-                    className="w-full px-3 py-1.5 border border-gray-200 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-300 rounded text-xs text-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    aria-label={`Posting ${index + 1} note`}
+                    enterKeyHint="next"
+                    className="w-full px-3 py-1.5 min-h-[40px] border border-gray-200 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-300 rounded text-xs text-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500"
                   />
                 </div>
               );

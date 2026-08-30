@@ -85,7 +85,7 @@ pub async fn preview_csv_import(
     let result = load_and_convert(&csv_path, &rules_path)?;
 
     let duplicates = {
-        let app_state = state.lock().map_err(|e| e.to_string())?;
+        let app_state = crate::lock_or_recover(&state);
         match app_state.journal.as_ref() {
             Some(loaded) => csv_import::mark_probable_duplicates(
                 &result.transactions,
@@ -140,7 +140,7 @@ pub async fn import_csv(
 ) -> Result<CsvImportResultResponse, String> {
     let result = load_and_convert(&csv_path, &rules_path)?;
 
-    let mut app_state = state.lock().map_err(|e| e.to_string())?;
+    let mut app_state = crate::lock_or_recover(&state);
 
     // Recompute duplicates at import time: the preview may be stale.
     let (duplicates, config) = {

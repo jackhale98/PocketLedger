@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { load } from "@tauri-apps/plugin-store";
 import { setIncognito } from "../utils/format";
+import * as api from "../api/commands";
 
 export type Theme = "light" | "dark" | "system";
 
@@ -10,6 +11,9 @@ interface SettingsState {
   lastJournalPath: string | null;
   /** Mask every amount, for using the app where others can see the screen. */
   incognito: boolean;
+  /** Use transaction costs (`@`) as market prices, like hledger's
+   *  --infer-market-prices. Off matches the CLI's defaults. */
+  inferMarketPrices: boolean;
   loaded: boolean;
 
   loadSettings: () => Promise<void>;
@@ -17,6 +21,7 @@ interface SettingsState {
   setTheme: (theme: Theme) => Promise<void>;
   setLastJournalPath: (path: string) => Promise<void>;
   setIncognito: (on: boolean) => Promise<void>;
+  setInferMarketPrices: (on: boolean) => Promise<void>;
 }
 
 const STORE_NAME = "settings.json";
@@ -28,18 +33,31 @@ function applyIncognito(on: boolean) {
   document.documentElement.classList.toggle("incognito", on);
 }
 
+const systemDark = (): MediaQueryList | null =>
+  typeof window !== "undefined" && window.matchMedia
+    ? window.matchMedia("(prefers-color-scheme: dark)")
+    : null;
+
+/** While the theme is "system", follow the OS as it changes -- evaluating
+ *  the media query once at startup left the app in the wrong theme after
+ *  the phone flipped to dark at sunset. */
+let unfollowSystem: (() => void) | null = null;
+
 function applyTheme(theme: Theme) {
   const root = document.documentElement;
+  unfollowSystem?.();
+  unfollowSystem = null;
   if (theme === "dark") {
     root.classList.add("dark");
   } else if (theme === "light") {
     root.classList.remove("dark");
   } else {
-    // system
-    if (window.matchMedia("(prefers-color-scheme: dark)").matches) {
-      root.classList.add("dark");
-    } else {
-      root.classList.remove("dark");
+    const mq = systemDark();
+    const sync = () => root.classList.toggle("dark", mq?.matches ?? false);
+    sync();
+    if (mq) {
+      mq.addEventListener("change", sync);
+      unfollowSystem = () => mq.removeEventListener("change", sync);
     }
   }
 }
@@ -49,6 +67,7 @@ export const useSettingsStore = create<SettingsState>((set) => ({
   theme: "system",
   lastJournalPath: null,
   incognito: false,
+  inferMarketPrices: false,
   loaded: false,
 
   loadSettings: async () => {
@@ -58,6 +77,12 @@ export const useSettingsStore = create<SettingsState>((set) => ({
       const theme = (await store.get<string>("theme")) as Theme | null;
       const lastPath = await store.get<string>("lastJournalPath");
       const incognito = (await store.get<boolean>("incognito")) ?? false;
+      const inferMarketPrices = (await store.get<boolean>("inferMarketPrices")) ?? false;
+      if (inferMarketPrices) {
+        // Must reach the engine before the journal opens; failure only
+        // means the CLI default applies.
+        api.setEngineOptions({ inferMarketPrices }).catch(() => {});
+      }
       const resolvedTheme = theme ?? "system";
       applyTheme(resolvedTheme);
       applyIncognito(incognito);
@@ -66,6 +91,7 @@ export const useSettingsStore = create<SettingsState>((set) => ({
         theme: resolvedTheme,
         lastJournalPath: lastPath ?? null,
         incognito,
+        inferMarketPrices,
         loaded: true,
       });
     } catch {
@@ -93,6 +119,27 @@ export const useSettingsStore = create<SettingsState>((set) => ({
       await store.save();
     } catch (err) {
       console.error("Failed to save last journal path:", err);
+    }
+  },
+
+  setInferMarketPrices: async (on: boolean) => {
+    set({ inferMarketPrices: on });
+    try {
+      const store = await load(STORE_NAME);
+      await store.set("inferMarketPrices", on);
+      await store.save();
+    } catch (err) {
+      console.error("Failed to save valuation setting:", err);
+    }
+    // Applying reloads the open journal; the store notices via the summary.
+    try {
+      const summary = await api.setEngineOptions({ inferMarketPrices: on });
+      if (summary) {
+        const { useJournalStore } = await import("./journalStore");
+        await useJournalStore.getState().refresh();
+      }
+    } catch (err) {
+      console.error("Failed to apply valuation setting:", err);
     }
   },
 

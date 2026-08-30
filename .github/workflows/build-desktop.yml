@@ -56,18 +56,24 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # `bundles` narrows bundle.targets ("all" in tauri.conf.json) to
+          # what each platform actually ships, instead of every bundler.
           - platform: macos-latest
             target: aarch64-apple-darwin
             label: macOS-arm64
+            bundles: dmg
           - platform: macos-latest
             target: x86_64-apple-darwin
             label: macOS-x64
+            bundles: dmg
           - platform: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             label: Linux-x64
+            bundles: deb,appimage
           - platform: windows-latest
             target: x86_64-pc-windows-msvc
             label: Windows-x64
+            bundles: nsis
 
     runs-on: ${{ matrix.platform }}
     name: Desktop (${{ matrix.label }})
@@ -75,9 +81,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust stable
+      - name: Install Rust 1.98.0
         uses: dtolnay/rust-toolchain@stable
         with:
+          # Same version as rust-toolchain.toml at the repo root.
+          toolchain: "1.98.0"
           targets: ${{ matrix.target }}
 
       - name: Rust cache
@@ -112,7 +120,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          args: --target ${{ matrix.target }}
+          args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
           tagName: v__VERSION__
           releaseName: "PocketHLedger v__VERSION__"
           releaseBody: "Plain text accounting in your pocket. See assets below for downloads."

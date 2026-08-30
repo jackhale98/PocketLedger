@@ -20,9 +20,13 @@ function insideHorizontalScroller(start: Element | null, root: Element): boolean
   return false;
 }
 
-/** True for controls a horizontal drag means something to. */
+/** True for controls a horizontal drag means something to: text fields
+ *  (caret placement, selection), sliders, and charts, where dragging
+ *  scrubs the tooltip across the series. */
 function isDraggableControl(target: EventTarget | null): boolean {
-  const el = target instanceof Element ? target.closest("input,textarea,select") : null;
+  if (!(target instanceof Element)) return false;
+  if (target.closest(".recharts-wrapper")) return true;
+  const el = target.closest("input,textarea,select");
   if (!el) return false;
   return !(el instanceof HTMLInputElement) || el.type === "range" || el.type === "text";
 }

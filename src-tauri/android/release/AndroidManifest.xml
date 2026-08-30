@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Release-only manifest overlay. build-android.yml copies this to
+  src-tauri/gen/android/app/src/release/AndroidManifest.xml, where the Android
+  Gradle plugin merges it into the release build type only.
+
+  The app has no network code: journals are local files and the WebView is
+  served through Tauri's asset loader, not a socket. Dropping INTERNET keeps
+  the Play Console data-safety form honest and removes an attack surface.
+  Debug builds (`tauri android dev`) keep INTERNET because they load the Vite
+  dev server over the network.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <uses-permission android:name="android.permission.INTERNET" tools:node="remove" />
+    <application tools:remove="android:usesCleartextTraffic" />
+</manifest>

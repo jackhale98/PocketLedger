@@ -1,11 +1,12 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import * as api from "../api/commands";
 import { useNavStore } from "../store/navStore";
+import { useJournalStore } from "../store/journalStore";
 import { useAccountsViewStore } from "../store/accountsViewStore";
-import { formatAmount as fmtOne } from "../utils/format";
+import { amountTone, decimalSign, formatAmount } from "../utils/format";
+import { isRevealedBy, parentAccounts, toggleCollapsed } from "../utils/tree";
 import type { ValuationMode } from "../api/commands";
 import type { BalanceRow } from "../api/types";
-
 
 const ACCOUNT_TYPES = [
   { value: "", label: "All" },
@@ -16,14 +17,29 @@ const ACCOUNT_TYPES = [
   { value: "equity", label: "Equity" },
 ];
 
-
-
 /** Case-insensitive check if account matches a type filter */
 function matchesType(account: string, typeFilter: string): boolean {
   if (!typeFilter) return true;
   const lower = account.toLowerCase();
   return lower === typeFilter || lower.startsWith(typeFilter + ":");
 }
+
+/** Every ancestor name of every account in `accounts`. */
+function ancestorsOf(accounts: Iterable<string>): Set<string> {
+  const out = new Set<string>();
+  for (const account of accounts) {
+    const parts = account.split(":");
+    for (let i = 1; i < parts.length; i++) out.add(parts.slice(0, i).join(":"));
+  }
+  return out;
+}
+
+const chip = (active: boolean) =>
+  `px-3 min-h-[44px] text-xs font-medium rounded-full whitespace-nowrap ${
+    active
+      ? "bg-blue-600 text-white"
+      : "bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 active:bg-gray-200 dark:active:bg-gray-700"
+  }`;
 
 export function AccountsPage() {
   const [allAccounts, setAllAccounts] = useState<BalanceRow[]>([]);
@@ -42,6 +58,8 @@ export function AccountsPage() {
   const hideZero = useAccountsViewStore((s) => s.hideZero);
   const setHideZero = useAccountsViewStore((s) => s.setHideZero);
   const setValueCurrency = useAccountsViewStore((s) => s.setValueCurrency);
+  // Balances are stale once the journal changes under us.
+  const loadGeneration = useJournalStore((s) => s.loadGeneration);
   const [commodities, setCommodities] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const loadSeq = useRef(0);
@@ -69,7 +87,9 @@ export function AccountsPage() {
     } finally {
       if (seq === loadSeq.current) setLoading(false);
     }
-  }, [valueCurrency, valuation]);
+    // loadGeneration is a trigger, not an input.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [valueCurrency, valuation, initializeExpanded, loadGeneration]);
 
   useEffect(() => { loadAccounts(); }, [loadAccounts]);
 
@@ -89,56 +109,37 @@ export function AccountsPage() {
     if (hideZero) {
       // Keep a parent whose descendants still have a balance, or hiding a
       // zeroed parent would orphan its children.
-      const nonZero = new Set(
-        result
-          .filter((a) => a.amounts.some((m) => parseFloat(m.quantity) !== 0))
-          .map((a) => a.account)
-      );
-      result = result.filter(
-        (a) =>
-          nonZero.has(a.account) ||
-          [...nonZero].some((n) => n.startsWith(a.account + ":"))
-      );
+      const nonZero = result
+        .filter((a) => a.amounts.some((m) => decimalSign(m.quantity) !== 0))
+        .map((a) => a.account);
+      const keep = new Set(nonZero);
+      for (const anc of ancestorsOf(nonZero)) keep.add(anc);
+      result = result.filter((a) => keep.has(a.account));
     }
 
     return result;
   }, [allAccounts, typeFilter, search, hideZero]);
+
+  // Which rows have children, computed once per filtered set rather than by
+  // scanning the whole list for every row rendered.
+  const parents = useMemo(() => parentAccounts(filteredAccounts), [filteredAccounts]);
 
   // Determine visible accounts based on expanded state
   const visibleAccounts = useMemo(() => {
     if (search.trim()) {
       return filteredAccounts;
     }
-
     return filteredAccounts.filter((row) => {
-      const parts = row.account.split(":");
-
-      if (typeFilter) {
-        // Under a type filter, the type root (e.g. "Assets") is always visible
-        if (parts.length <= 1) return true;
-        // Check if all ancestors are expanded
-        for (let i = 1; i < parts.length; i++) {
-          const ancestor = parts.slice(0, i).join(":");
-          if (!expanded.has(ancestor)) return false;
-        }
-        return true;
-      }
-
-      if (row.depth === 0) return true;
-      for (let i = 1; i < parts.length; i++) {
-        const ancestor = parts.slice(0, i).join(":");
-        if (!expanded.has(ancestor)) return false;
-      }
-      return true;
+      // Under a type filter the type root (e.g. "Assets") is always visible;
+      // otherwise so is any depth-0 row. Below that every ancestor must be
+      // expanded.
+      if (typeFilter ? row.account.split(":").length <= 1 : row.depth === 0) return true;
+      return isRevealedBy(expanded, row.account);
     });
   }, [filteredAccounts, expanded, typeFilter, search]);
 
-  const hasChildren = (account: string) =>
-    filteredAccounts.some((a) => a.account !== account && a.account.startsWith(account + ":"));
-
   const expandAll = () => {
-    const all = new Set(filteredAccounts.map((a) => a.account));
-    setExpanded(all);
+    setExpanded(new Set(filteredAccounts.map((a) => a.account)));
   };
 
   const collapseAll = () => {
@@ -149,13 +150,7 @@ export function AccountsPage() {
   const navigate = useNavStore((s) => s.navigate);
 
   const toggleExpand = (account: string) => {
-    const next = new Set(expanded);
-    if (next.has(account)) {
-      next.delete(account);
-    } else {
-      next.add(account);
-    }
-    setExpanded(next);
+    setExpanded(toggleCollapsed(expanded, account));
   };
 
   const handleAccountTap = (account: string) => {
@@ -165,15 +160,15 @@ export function AccountsPage() {
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
-      <div className="px-4 py-3 border-b border-gray-200 dark:border-gray-700 space-y-2">
+      <div className="px-4 py-2 border-b border-gray-200 dark:border-gray-700 space-y-2">
         <div className="flex items-center justify-between">
           <h1 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Accounts</h1>
-          <div className="flex gap-2">
-            <button onClick={expandAll} className="text-xs text-gray-500 dark:text-gray-400 active:text-gray-700 dark:active:text-gray-200">
+          <div className="flex items-center -mr-2">
+            <button onClick={expandAll} className="text-xs px-2 min-h-[44px] text-gray-500 dark:text-gray-400 active:text-gray-700 dark:active:text-gray-200">
               Expand
             </button>
-            <span className="text-xs text-gray-300 dark:text-gray-600">|</span>
-            <button onClick={collapseAll} className="text-xs text-gray-500 dark:text-gray-400 active:text-gray-700 dark:active:text-gray-200">
+            <span className="text-xs text-gray-300 dark:text-gray-600" aria-hidden="true">|</span>
+            <button onClick={collapseAll} className="text-xs px-2 min-h-[44px] text-gray-500 dark:text-gray-400 active:text-gray-700 dark:active:text-gray-200">
               Collapse
             </button>
           </div>
@@ -185,31 +180,30 @@ export function AccountsPage() {
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           placeholder="Search accounts..."
-          className="w-full px-3 py-2 bg-gray-100 dark:bg-gray-800 rounded-lg text-sm text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white dark:focus:bg-gray-700"
+          aria-label="Search accounts"
+          autoCapitalize="none"
+          autoCorrect="off"
+          spellCheck={false}
+          enterKeyHint="search"
+          className="w-full px-3 py-2 min-h-[44px] bg-gray-100 dark:bg-gray-800 rounded-lg text-sm text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white dark:focus:bg-gray-700"
         />
 
         {/* Type filter */}
-        <div className="flex gap-1.5 overflow-x-auto pb-1 -mx-1 px-1">
+        <div className="flex gap-1.5 overflow-x-auto -mx-1 px-1" role="group" aria-label="Account type">
           {ACCOUNT_TYPES.map((type) => (
             <button
               key={type.value}
               onClick={() => setTypeFilter(type.value)}
-              className={`px-3 py-1.5 text-xs font-medium rounded-full whitespace-nowrap ${
-                typeFilter === type.value
-                  ? "bg-blue-600 text-white"
-                  : "bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 active:bg-gray-200 dark:active:bg-gray-700"
-              }`}
+              aria-pressed={typeFilter === type.value}
+              className={chip(typeFilter === type.value)}
             >
               {type.label}
             </button>
           ))}
           <button
             onClick={() => setHideZero(!hideZero)}
-            className={`px-3 py-1.5 text-xs font-medium rounded-full whitespace-nowrap ${
-              hideZero
-                ? "bg-blue-600 text-white"
-                : "bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 active:bg-gray-200 dark:active:bg-gray-700"
-            }`}
+            aria-pressed={hideZero}
+            className={chip(hideZero)}
           >
             Hide zero
           </button>
@@ -222,7 +216,8 @@ export function AccountsPage() {
             <select
               value={valueCurrency}
               onChange={(e) => setValueCurrency(e.target.value)}
-              className="flex-1 px-2 py-1.5 bg-gray-100 dark:bg-gray-800 rounded-lg text-xs text-gray-900 dark:text-gray-100 border-none focus:outline-none focus:ring-2 focus:ring-blue-500"
+              aria-label="Value in currency"
+              className="flex-1 px-2 min-h-[44px] bg-gray-100 dark:bg-gray-800 rounded-lg text-xs text-gray-900 dark:text-gray-100 border-none focus:outline-none focus:ring-2 focus:ring-blue-500"
             >
               <option value="">Original</option>
               {commodities.map((c) => (
@@ -235,7 +230,8 @@ export function AccountsPage() {
               <select
                 value={valuation}
                 onChange={(e) => setValuation(e.target.value as ValuationMode)}
-                className="shrink-0 min-w-0 px-2 py-1.5 bg-gray-100 dark:bg-gray-800 rounded-lg text-xs text-gray-900 dark:text-gray-100 border-none focus:outline-none focus:ring-2 focus:ring-blue-500"
+                aria-label="Valuation"
+                className="shrink-0 min-w-0 px-2 min-h-[44px] bg-gray-100 dark:bg-gray-800 rounded-lg text-xs text-gray-900 dark:text-gray-100 border-none focus:outline-none focus:ring-2 focus:ring-blue-500"
               >
                 <option value="market">Value</option>
                 <option value="cost">Cost</option>
@@ -251,7 +247,7 @@ export function AccountsPage() {
         {error && (
           <div className="mx-4 mt-3 flex items-center justify-between text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/30 px-3 py-2 rounded-lg">
             <span className="min-w-0 break-words">{error}</span>
-            <button onClick={loadAccounts} className="text-xs text-red-500 ml-2 shrink-0 underline">Retry</button>
+            <button onClick={loadAccounts} className="text-xs text-red-500 ml-2 shrink-0 underline min-h-[44px] px-2">Retry</button>
           </div>
         )}
         {loading ? (
@@ -263,10 +259,10 @@ export function AccountsPage() {
             No accounts found
           </div>
         ) : (
-          <div className="divide-y divide-gray-50 dark:divide-gray-800">
+          <div className="divide-y divide-gray-50 dark:divide-gray-800" role="tree">
             {visibleAccounts.map((row) => {
               const isExpanded = expanded.has(row.account);
-              const canExpand = hasChildren(row.account);
+              const canExpand = parents.has(row.account);
               const shortName = search.trim()
                 ? row.account
                 : row.account.split(":").pop() ?? row.account;
@@ -275,7 +271,9 @@ export function AccountsPage() {
               return (
                 <div
                   key={row.account}
-                  className="flex items-center px-4 py-2.5 min-h-[44px]"
+                  role="treeitem"
+                  aria-expanded={canExpand && !search.trim() ? isExpanded : undefined}
+                  className="flex items-center pl-4 pr-4 min-h-[44px]"
                 >
                   {/* Indent */}
                   <div style={{ width: displayDepth * 16 }} className="shrink-0" />
@@ -284,9 +282,10 @@ export function AccountsPage() {
                   {canExpand && !search.trim() ? (
                     <button
                       onClick={() => toggleExpand(row.account)}
-                      className="w-6 h-6 flex items-center justify-center text-gray-400 shrink-0"
+                      aria-label={isExpanded ? `Collapse ${shortName}` : `Expand ${shortName}`}
+                      className="w-8 -ml-2 min-h-[44px] flex items-center justify-center text-gray-400 shrink-0"
                     >
-                      {isExpanded ? "\u25BE" : "\u25B8"}
+                      {isExpanded ? "▾" : "▸"}
                     </button>
                   ) : (
                     <div className="w-6 shrink-0" />
@@ -296,25 +295,20 @@ export function AccountsPage() {
                   <button
                     onClick={() => handleAccountTap(row.account)}
                     title={row.account}
-                    className="flex-1 text-left text-sm text-gray-900 dark:text-gray-100 truncate"
+                    className="flex-1 min-w-0 min-h-[44px] text-left text-sm text-gray-900 dark:text-gray-100 truncate"
                   >
                     {shortName}
                   </button>
 
                   {/* Balance. A parent holding several commodities gets one
-                      line each, the way hledger prints it -- previously any
-                      parent with more than two was given no total at all,
-                      which left Assets and Equity looking empty while the
-                      single-currency trees showed theirs. */}
-                  <div className="shrink-0 ml-2 text-right max-w-[55%] flex flex-col items-end">
+                      line each, the way hledger prints it. */}
+                  <div className="shrink-0 ml-2 text-right max-w-[55%] flex flex-col items-end py-1">
                     {row.amounts.map((amount, i) => (
                       <span
                         key={`${amount.commodity}-${i}`}
-                        className={`text-sm font-mono truncate max-w-full ${
-                          parseFloat(amount.quantity) < 0 ? "text-red-500" : "text-green-500"
-                        }`}
+                        className={`text-sm font-mono truncate max-w-full ${amountTone(amount.quantity)}`}
                       >
-                        {fmtOne(amount.quantity, amount.commodity)}
+                        {formatAmount(amount.quantity, amount.commodity)}
                       </span>
                     ))}
                   </div>

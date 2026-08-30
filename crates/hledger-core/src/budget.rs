@@ -33,6 +33,11 @@ pub struct BudgetEntry {
     pub account: String,
     pub amount: Decimal,
     pub commodity: String,
+    /// True for a goal inferred for a posting written without an amount
+    /// (the balancing side of the rule), as hledger's budget report shows.
+    /// Totals and the chart count authored goals only.
+    #[serde(default)]
+    pub inferred: bool,
 }
 
 /// A row in a budget-vs-actual comparison report.
@@ -53,6 +58,11 @@ pub struct BudgetRow {
     /// clipped to the budget's own period.
     pub period_from: String,
     pub period_to: String,
+    /// The goal was inferred from a posting written without an amount (the
+    /// balancing side of the rule). hledger shows these rows; the totals
+    /// here do not include them.
+    #[serde(default)]
+    pub inferred: bool,
 }
 
 /// A data point for budget vs actual chart series.
@@ -91,13 +101,61 @@ pub fn extract_budgets_with_warnings(journal: &Journal) -> BudgetExtraction {
             };
 
             let mut entries = Vec::new();
+            let mut elided: Vec<&hledger_parser::ast::Posting> = Vec::new();
             for posting in &pt.postings {
                 if let Some(ref amt) = posting.amount {
                     entries.push(BudgetEntry {
                         account: posting.account.full.clone(),
                         amount: amt.quantity,
                         commodity: amt.commodity.clone(),
+                        inferred: false,
                     });
+                } else {
+                    elided.push(posting);
+                }
+            }
+
+            // A posting with no amount balances the rule, exactly as in a
+            // real transaction: `~ monthly / expenses:food $400 /
+            // assets:checking` gives checking a -$400 goal in hledger's
+            // budget report. One elided posting per commodity is inferred;
+            // more than one cannot be.
+            match elided.as_slice() {
+                [] => {}
+                [posting] => {
+                    let mut by_commodity: BTreeMap<String, Decimal> = BTreeMap::new();
+                    let mut overflowed = false;
+                    for entry in &entries {
+                        let slot = by_commodity.entry(entry.commodity.clone()).or_default();
+                        match slot.checked_add(entry.amount) {
+                            Some(sum) => *slot = sum,
+                            None => overflowed = true,
+                        }
+                    }
+                    if overflowed {
+                        warnings.push(format!(
+                            "line {}: budget amounts are too large to total; the elided posting '{}' gets no goal",
+                            pt.span.line, posting.account.full
+                        ));
+                    } else {
+                        for (commodity, sum) in by_commodity {
+                            if !sum.is_zero() {
+                                entries.push(BudgetEntry {
+                                    account: posting.account.full.clone(),
+                                    amount: -sum,
+                                    commodity,
+                                    inferred: true,
+                                });
+                            }
+                        }
+                    }
+                }
+                many => {
+                    warnings.push(format!(
+                        "line {}: periodic transaction leaves {} postings without amounts; only one can be inferred, so none of them gets a goal",
+                        pt.span.line,
+                        many.len()
+                    ));
                 }
             }
 
@@ -224,6 +282,8 @@ pub fn budget_comparison(
         amount: Decimal,
         from: NaiveDate,
         to: NaiveDate,
+        /// Every contributing entry was inferred.
+        inferred: bool,
     }
     let mut goals: BTreeMap<(String, String), Goal> = BTreeMap::new();
     let mut inactive = Vec::new();
@@ -235,7 +295,12 @@ pub fn budget_comparison(
                 line: budget.line,
                 period: budget.period.raw.clone(),
                 description: budget.description.clone(),
-                accounts: budget.entries.iter().map(|e| e.account.clone()).collect(),
+                accounts: budget
+                    .entries
+                    .iter()
+                    .filter(|e| !e.inferred)
+                    .map(|e| e.account.clone())
+                    .collect(),
                 starts: budget.period.start.map(|d| d.to_string()),
                 // `to` is exclusive in a period expression; report the last
                 // day the rule actually covers.
@@ -268,8 +333,22 @@ pub fn budget_comparison(
                     amount: Decimal::ZERO,
                     from: goal_from,
                     to: goal_to,
+                    inferred: true,
                 });
-            goal.amount += entry.amount * Decimal::from(occurrences);
+            goal.inferred &= entry.inferred;
+            let scaled = entry
+                .amount
+                .checked_mul(Decimal::from(occurrences))
+                .and_then(|g| goal.amount.checked_add(g));
+            match scaled {
+                Some(total) => goal.amount = total,
+                None => {
+                    // A goal that cannot be represented is left where it
+                    // was rather than crashing the report; the row will
+                    // read wrong, but the comparison of every other row
+                    // survives.
+                }
+            }
             // Several budgets can target one account; cover them all.
             goal.from = goal.from.min(goal_from);
             goal.to = goal.to.max(goal_to);
@@ -343,6 +422,7 @@ pub fn budget_comparison(
             is_income,
             period_from: goal.from.to_string(),
             period_to: goal.to.to_string(),
+            inferred: goal.inferred,
         });
     }
 
@@ -351,9 +431,18 @@ pub fn budget_comparison(
     // budget's spend twice — the classic "every row right, total wrong" bug.
     // Each posting is attributed to the most specific budgeted account that
     // covers it, so it lands in exactly one bucket.
+    //
+    // Inferred goals (the balancing side of a rule) are left out: they would
+    // net every commodity's total to zero, as hledger's own budget total
+    // does, which tells the user nothing.
+    let authored: BTreeMap<(String, String), Goal> = authored
+        .into_iter()
+        .filter(|(_, goal)| !goal.inferred)
+        .collect();
     let mut totals: BTreeMap<String, (Decimal, Decimal)> = BTreeMap::new();
     for ((_, commodity), goal) in &authored {
-        totals.entry(commodity.clone()).or_default().0 += goal.amount;
+        let slot = &mut totals.entry(commodity.clone()).or_default().0;
+        *slot = slot.checked_add(goal.amount).unwrap_or(*slot);
     }
     for txn in transactions {
         for posting in &txn.postings {
@@ -395,6 +484,10 @@ pub fn budget_comparison(
 /// Monthly budget-vs-actual chart series. Goals are occurrence-based: a
 /// yearly budget contributes only in the month containing its occurrence,
 /// not 12x across the year. Respects the requested date range.
+///
+/// Goals in a commodity that cannot be valued in `target_commodity` are
+/// left out of the line; see [`budget_summary_series_with_warnings`] to
+/// learn which ones.
 pub fn budget_summary_series(
     transactions: &[ResolvedTransaction],
     budgets: &[Budget],
@@ -403,8 +496,37 @@ pub fn budget_summary_series(
     date_from: Option<NaiveDate>,
     date_to: Option<NaiveDate>,
 ) -> Vec<BudgetSummaryPoint> {
+    budget_summary_series_with_warnings(
+        transactions,
+        budgets,
+        price_db,
+        target_commodity,
+        date_from,
+        date_to,
+    )
+    .points
+}
+
+/// A budget chart series plus what had to be left out of it.
+#[derive(Debug, Clone, Serialize)]
+pub struct BudgetSummary {
+    pub points: Vec<BudgetSummaryPoint>,
+    /// One message per (commodity, period) whose goal could not be valued in
+    /// the target commodity and so is missing from the budgeted line.
+    pub warnings: Vec<String>,
+}
+
+pub fn budget_summary_series_with_warnings(
+    transactions: &[ResolvedTransaction],
+    budgets: &[Budget],
+    price_db: &PriceDb,
+    target_commodity: &str,
+    date_from: Option<NaiveDate>,
+    date_to: Option<NaiveDate>,
+) -> BudgetSummary {
+    let mut warnings: Vec<String> = Vec::new();
     if transactions.is_empty() || budgets.is_empty() {
-        return vec![];
+        return BudgetSummary { points: vec![], warnings };
     }
 
     let first_date = date_from.unwrap_or_else(|| transactions.first().unwrap().date);
@@ -432,22 +554,33 @@ pub fn budget_summary_series(
                 continue;
             }
             for entry in &budget.entries {
-                if entry.amount < Decimal::ZERO {
+                if entry.amount < Decimal::ZERO || entry.inferred {
                     continue;
                 }
                 active_accounts.push(entry.account.as_str());
-                let goal = entry.amount * Decimal::from(occurrences);
                 let commodity = if entry.commodity.is_empty() {
                     target_commodity
                 } else {
                     &entry.commodity
                 };
-                if commodity == target_commodity {
-                    total_budget += goal;
-                } else if let Some(converted) =
-                    price_db.convert(goal, commodity, target_commodity, month_end)
-                {
-                    total_budget += converted;
+                let goal = entry.amount.checked_mul(Decimal::from(occurrences));
+                let valued = goal.and_then(|g| {
+                    if commodity == target_commodity {
+                        Some(g)
+                    } else {
+                        price_db.convert(g, commodity, target_commodity, month_end)
+                    }
+                });
+                match valued.and_then(|v| total_budget.checked_add(v)) {
+                    Some(sum) => total_budget = sum,
+                    None => warnings.push(format!(
+                        "{}: the {} goal for {} in {} could not be valued in {} and is missing from the budgeted total",
+                        current.format("%Y-%m"),
+                        entry.amount,
+                        entry.account,
+                        commodity,
+                        target_commodity
+                    )),
                 }
             }
         }
@@ -485,7 +618,7 @@ pub fn budget_summary_series(
         };
     }
 
-    points
+    BudgetSummary { points, warnings }
 }
 
 fn end_of_month(date: NaiveDate) -> NaiveDate {
@@ -500,11 +633,11 @@ fn end_of_month(date: NaiveDate) -> NaiveDate {
         .unwrap()
 }
 
-/// Get accounts that have budgets defined.
+/// Get accounts that have budgets defined (authored goals only).
 pub fn budget_accounts(budgets: &[Budget]) -> Vec<String> {
     let mut accounts: Vec<String> = budgets
         .iter()
-        .flat_map(|b| b.entries.iter().map(|e| e.account.clone()))
+        .flat_map(|b| b.entries.iter().filter(|e| !e.inferred).map(|e| e.account.clone()))
         .collect();
     accounts.sort();
     accounts.dedup();
@@ -541,9 +674,56 @@ mod tests {
 
         assert_eq!(budgets.len(), 1);
         assert_eq!(budgets[0].period.unit, PeriodUnit::Month);
-        assert_eq!(budgets[0].entries.len(), 2);
+        assert_eq!(budgets[0].entries.len(), 3);
         assert_eq!(budgets[0].entries[0].account, "expenses:food");
         assert_eq!(budgets[0].entries[0].amount, dec!(400.00));
+        assert!(!budgets[0].entries[0].inferred);
+        // The elided posting balances the rule, as hledger's budget report shows.
+        assert_eq!(budgets[0].entries[2].account, "income");
+        assert_eq!(budgets[0].entries[2].amount, dec!(-1600.00));
+        assert!(budgets[0].entries[2].inferred);
+    }
+
+    #[test]
+    fn elided_posting_gets_the_balancing_goal_like_hledger() {
+        // `hledger bal --budget -M` on this shows
+        // `assets:checking || $-10 [2% of $-400]` next to the food row.
+        let input = "~ monthly\n    expenses:food  $400\n    assets:checking\n\n\
+                     2024-01-05 x\n    expenses:food  $10\n    assets:checking\n";
+        let journal = parse(input).unwrap();
+        let budgets = extract_budgets(&journal);
+        let txns = resolve(input);
+        let report = budget_comparison(
+            &txns, &budgets, &db(), "$", Some(d(2024, 1, 1)), Some(d(2024, 1, 31)),
+        );
+        let checking = report.rows.iter().find(|r| r.account == "assets:checking").unwrap();
+        assert_eq!(checking.budget, "-400");
+        assert_eq!(checking.actual, "-10");
+        assert!(checking.inferred);
+        // The total is the authored goal, not hledger's net-to-zero.
+        assert_eq!(report.totals[0].budget, "400");
+
+        // Two elided postings cannot be inferred; the user is told.
+        let journal = parse("~ monthly\n    expenses:food  $400\n    assets:a\n    assets:b\n").unwrap();
+        let extraction = extract_budgets_with_warnings(&journal);
+        assert_eq!(extraction.budgets[0].entries.len(), 1);
+        assert_eq!(extraction.warnings.len(), 1);
+    }
+
+    #[test]
+    fn summary_series_reports_unvaluable_goals() {
+        let input = "~ monthly\n    expenses:food  100 EUR\n    assets:bank\n\n\
+                     2024-01-05 x\n    expenses:food  $10\n    assets:bank\n";
+        let journal = parse(input).unwrap();
+        let budgets = extract_budgets(&journal);
+        let txns = resolve(input);
+        let summary = budget_summary_series_with_warnings(
+            &txns, &budgets, &db(), "$", None, None,
+        );
+        assert_eq!(summary.points.len(), 1);
+        assert_eq!(summary.points[0].budgeted, "0");
+        assert_eq!(summary.warnings.len(), 1, "{:?}", summary.warnings);
+        assert!(summary.warnings[0].contains("EUR"));
     }
 
     #[test]
@@ -795,6 +975,7 @@ mod tests {
 
         let report =
             budget_vs_actual(&txns, &budgets, &db(), "$", Some(d(2024, 1, 1)), Some(d(2024, 1, 31)));
+        let report: Vec<_> = report.into_iter().filter(|r| !r.inferred).collect();
 
         assert_eq!(report.len(), 1);
         assert_eq!(report[0].account, "expenses:food");
@@ -831,6 +1012,7 @@ mod tests {
 
         let report =
             budget_vs_actual(&txns, &budgets, &db(), "$", Some(d(2024, 1, 1)), Some(d(2024, 1, 31)));
+        let report: Vec<_> = report.into_iter().filter(|r| !r.inferred).collect();
         assert_eq!(report.len(), 1);
         assert_eq!(report[0].budget, "250.00");
         assert_eq!(report[0].actual, "80.00");
@@ -920,7 +1102,8 @@ mod tests {
         let budgets = extract_budgets(&journal);
         assert_eq!(budgets.len(), 1, "Should find 1 budget");
         assert_eq!(budgets[0].period.unit, PeriodUnit::Month);
-        assert_eq!(budgets[0].entries.len(), 6, "Should have 6 budget entries");
+        let authored = budgets[0].entries.iter().filter(|e| !e.inferred).count();
+        assert_eq!(authored, 6, "Should have 6 authored budget entries");
 
         let txns = crate::balance::resolve_transactions(&journal).expect("resolve failed");
         let report = budget_vs_actual(

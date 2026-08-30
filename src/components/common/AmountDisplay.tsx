@@ -1,5 +1,4 @@
-import { formatAmount } from "../../utils/format";
-
+import { amountTone, formatAmount } from "../../utils/format";
 
 interface AmountDisplayProps {
   amount: string | null;
@@ -16,17 +15,12 @@ export function AmountDisplay({
     return <span className={`text-gray-400 ${className}`}>--</span>;
   }
 
-  const numericValue = parseFloat(amount);
-  const isNegative = numericValue < 0;
-  const colorClass = isNegative ? "text-negative" : "text-positive";
-
   // Through the shared formatter so this honours commodity precision and the
-  // hide-amounts setting, like every other amount in the app.
-  const displayAmount = formatAmount(amount, commodity ?? "");
-
+  // hide-amounts setting, like every other amount in the app. Zero is
+  // neutral: neither gain nor loss.
   return (
-    <span className={`font-mono tabular-nums ${colorClass} ${className}`}>
-      {displayAmount}
+    <span className={`font-mono tabular-nums ${amountTone(amount)} ${className}`}>
+      {formatAmount(amount, commodity ?? "")}
     </span>
   );
 }

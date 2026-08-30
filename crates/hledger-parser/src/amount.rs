@@ -29,11 +29,31 @@ impl AmountContext {
 
 /// Result of parsing a numeric quantity, retaining the display style seen in
 /// the source so rewrites can preserve it.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct ParsedQuantity {
     pub value: Decimal,
     pub decimal_mark: char,
     pub precision: u8,
+    /// Digit group mark seen in the source (`,` in `1,000.00`), if any.
+    pub digit_group_mark: Option<char>,
+    /// Digit group sizes, rightmost first (`[3]` for `1,000,000`, `[3, 2]`
+    /// for `1,00,000`). Empty when the number was written ungrouped.
+    pub digit_group_sizes: Vec<u8>,
+}
+
+impl ParsedQuantity {
+    /// The display style this quantity was written in, for a commodity on
+    /// the given side.
+    pub fn style(&self, side: Side, spaced: bool) -> AmountStyle {
+        AmountStyle {
+            commodity_side: side,
+            commodity_spaced: spaced,
+            decimal_mark: self.decimal_mark,
+            precision: self.precision,
+            digit_group_mark: self.digit_group_mark,
+            digit_group_sizes: self.digit_group_sizes.clone(),
+        }
+    }
 }
 
 /// Parse an amount string like "$100.00", "100.00 USD", "-€50", "1.234,56 EUR".
@@ -96,9 +116,11 @@ pub fn parse_amount_ctx(s: &str, ctx: &AmountContext) -> Result<PostingAmount, P
     // Bare number (no commodity): apply the D default commodity if set.
     let q = parse_quantity_with(s, ctx.decimal_mark)?;
     if let Some((commodity, style)) = &ctx.default_commodity {
-        let mut st = style.clone();
-        st.decimal_mark = q.decimal_mark;
-        st.precision = q.precision;
+        let mut st = q.style(style.commodity_side, style.commodity_spaced);
+        if st.digit_group_mark.is_none() {
+            st.digit_group_mark = style.digit_group_mark;
+            st.digit_group_sizes = style.digit_group_sizes.clone();
+        }
         return Ok(PostingAmount {
             quantity: q.value,
             commodity: commodity.clone(),
@@ -110,12 +132,7 @@ pub fn parse_amount_ctx(s: &str, ctx: &AmountContext) -> Result<PostingAmount, P
     Ok(PostingAmount {
         quantity: q.value,
         commodity: String::new(),
-        style: AmountStyle {
-            commodity_side: Side::Left,
-            commodity_spaced: false,
-            decimal_mark: q.decimal_mark,
-            precision: q.precision,
-        },
+        style: q.style(Side::Left, false),
         cost: None,
         multiplier: false,
     })
@@ -125,12 +142,7 @@ fn make_amount(q: ParsedQuantity, commodity: &str, side: Side, spaced: bool) -> 
     PostingAmount {
         quantity: q.value,
         commodity: commodity.to_string(),
-        style: AmountStyle {
-            commodity_side: side,
-            commodity_spaced: spaced,
-            decimal_mark: q.decimal_mark,
-            precision: q.precision,
-        },
+        style: q.style(side, spaced),
         cost: None,
         multiplier: false,
     }
@@ -204,14 +216,31 @@ fn try_right_commodity(s: &str, ctx: &AmountContext) -> Option<PostingAmount> {
     Some(make_amount(q, commodity_part, Side::Right, false))
 }
 
-fn is_currency_symbol(c: char) -> bool {
-    matches!(c, '$' | '€' | '£' | '¥' | '₹' | '₽' | '₿' | '₩' | '₫' | '₴' | '₸' | '₺' | '₦' | '₭')
+/// The single-character currency symbols recognised anywhere a number is
+/// read or written: the parser, the writer, and the CSV importer all share
+/// this one list so a symbol cannot be a commodity in one place and noise in
+/// another.
+pub fn is_currency_symbol(c: char) -> bool {
+    matches!(
+        c,
+        '$' | '€' | '£' | '¥' | '₹' | '₽' | '₿' | '₩' | '₫' | '₴' | '₸' | '₺' | '₦' | '₭' | '¢'
+            | '₡' | '₱' | '₲' | '₪' | '฿' | '₮' | '₵' | '₾' | '₼' | '֏'
+    )
+}
+
+/// True for a commodity that is exactly one currency symbol (`$`, `€`), which
+/// by convention is written on the left with no space.
+pub fn is_symbol_commodity(commodity: &str) -> bool {
+    let mut chars = commodity.chars();
+    matches!((chars.next(), chars.next()), (Some(c), None) if is_currency_symbol(c))
 }
 
 /// Parse a numeric quantity with hledger's decimal-mark semantics.
 ///
 /// With an explicit mark (from `decimal-mark` or a commodity style), that char
-/// is the decimal mark and the other of `.`/`,` is a digit group mark.
+/// is the decimal mark and the other of `.`/`,` is a digit group mark,
+/// whatever digits follow it: hledger 1.50 reads `1234.56 EUR` under
+/// `decimal-mark ,` as 123456 (groups of 4 and 2), not 1234.56.
 /// Without one, infer like hledger:
 /// - both `.` and `,` present: the rightmost is the decimal mark;
 /// - one kind present multiple times: digit group marks;
@@ -265,15 +294,51 @@ pub fn parse_quantity_with(
     }
 
     let mut cleaned = String::with_capacity(s.len());
+    // Positions (in digit count) of group marks, to recover the group sizes.
+    let mut digit_group_mark: Option<char> = None;
+    let mut group_digit_positions: Vec<usize> = Vec::new();
+    let mut digits_seen = 0usize;
+    let mut past_decimal = false;
     for c in s.chars() {
         match c {
             '.' | ',' | ' ' | '\u{a0}' | '\u{202f}' | '\'' => {
                 if Some(c) == mark {
                     cleaned.push('.');
+                    past_decimal = true;
+                } else if !past_decimal {
+                    // Digit group mark: dropped from the number, remembered
+                    // for the display style.
+                    if digit_group_mark.is_none() {
+                        digit_group_mark = Some(c);
+                    }
+                    group_digit_positions.push(digits_seen);
                 }
-                // else: digit group mark, drop it
             }
-            _ => cleaned.push(c),
+            _ => {
+                if c.is_ascii_digit() && !past_decimal {
+                    digits_seen += 1;
+                }
+                cleaned.push(c);
+            }
+        }
+    }
+    // Group sizes, rightmost first, like hledger's DigitGroupStyle.
+    let mut digit_group_sizes: Vec<u8> = Vec::new();
+    if digit_group_mark.is_some() {
+        let mut prev = digits_seen;
+        for &pos in group_digit_positions.iter().rev() {
+            let size = prev.saturating_sub(pos);
+            if size == 0 {
+                break;
+            }
+            let size = size.min(255) as u8;
+            if digit_group_sizes.last() != Some(&size) {
+                digit_group_sizes.push(size);
+            }
+            prev = pos;
+        }
+        if digit_group_sizes.is_empty() {
+            digit_group_mark = None;
         }
     }
 
@@ -300,6 +365,8 @@ pub fn parse_quantity_with(
         value,
         decimal_mark: mark.unwrap_or('.'),
         precision,
+        digit_group_mark,
+        digit_group_sizes,
     })
 }
 
@@ -459,6 +526,8 @@ mod tests {
                 commodity_spaced: false,
                 decimal_mark: '.',
                 precision: 2,
+                digit_group_mark: None,
+                digit_group_sizes: vec![],
             },
         ));
         let amt = parse_amount_ctx("25", &ctx).unwrap();
@@ -519,6 +588,31 @@ mod tests {
     fn parse_scientific_notation() {
         let amt = parse_amount("1E3 USD").unwrap();
         assert_eq!(amt.quantity, dec!(1000));
+    }
+
+    #[test]
+    fn digit_grouping_is_captured() {
+        let amt = parse_amount("$1,000,000.00").unwrap();
+        assert_eq!(amt.style.digit_group_mark, Some(','));
+        assert_eq!(amt.style.digit_group_sizes, vec![3]);
+
+        let amt = parse_amount("1,00,000.00 INR").unwrap();
+        assert_eq!(amt.style.digit_group_sizes, vec![3, 2]);
+
+        let amt = parse_amount("$1000.00").unwrap();
+        assert_eq!(amt.style.digit_group_mark, None);
+        assert!(amt.style.digit_group_sizes.is_empty());
+    }
+
+    #[test]
+    fn explicit_mark_makes_the_other_separator_a_group_mark() {
+        // Verified against hledger 1.50.3: under `decimal-mark ,`, `1234.56`
+        // is read as 123456 and `1.23` as 123.
+        let mut ctx = AmountContext::default();
+        ctx.decimal_mark = Some(',');
+        assert_eq!(parse_amount_ctx("1234.56 EUR", &ctx).unwrap().quantity, dec!(123456));
+        assert_eq!(parse_amount_ctx("1.23 EUR", &ctx).unwrap().quantity, dec!(123));
+        assert_eq!(parse_amount_ctx("1.234,56 EUR", &ctx).unwrap().quantity, dec!(1234.56));
     }
 
     #[test]

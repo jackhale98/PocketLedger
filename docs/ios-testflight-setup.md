@@ -109,14 +109,45 @@ Transporter app.
 
 ## Step 9: Trigger a Build
 
-Push a new version tag to trigger the iOS build workflow:
+Bump the version everywhere and tag in one go, then push the tag to trigger
+the iOS, Android and desktop build workflows:
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+scripts/bump-version.sh 0.2.21 --tag
+git push origin main v0.2.21
 ```
 
 Or trigger manually from the Actions tab using **workflow_dispatch**.
+
+## How the workflow builds
+
+`build-ios.yml` runs on `macos-26` with a pinned Xcode (`XCODE_VERSION`, 26.6 at
+the time of writing) and a pinned Rust (`RUST_VERSION`, mirrored in
+`rust-toolchain.toml`). App Store Connect requires the iOS 26 SDK, which only
+ships with Xcode 26; the `macos-15` image tops out at Xcode 16.x, so do not
+move the job back to `macos-15` even though older docs and the troubleshooting
+table below mention it. Bump `XCODE_VERSION` only to a version listed on the
+[macos-26 runner image](https://github.com/actions/runner-images/blob/main/images/macos/macos-26-Readme.md);
+the step fails with the available list if the pinned one is gone.
+
+What the workflow adds on top of `tauri ios init` / `tauri ios build`:
+
+| Item | Where | Why |
+|---|---|---|
+| `UIFileSharingEnabled`, `LSSupportsOpeningDocumentsInPlace` | `src-tauri/Info.ios.plist` (merged by tauri-cli at build time) | Journals visible and editable in place under Files → On My iPhone |
+| `ITSAppUsesNonExemptEncryption = false` | `src-tauri/Info.ios.plist` | Avoids "Missing Compliance" on every TestFlight build |
+| `CFBundleDocumentTypes` + `UTImportedTypeDeclarations` for `.journal` / `.hledger` / `.ledger` | `src-tauri/Info.ios.plist` | "Open in PocketHLedger" in the share sheet. **Follow-up:** the app does not yet handle the incoming file URL; it just launches. |
+| Assertion that those keys reached the built plist and that `PrivacyInfo.xcprivacy` is in the `.app` | "Assert Info.ios.plist keys" step | Fails loudly if a tauri-cli update stops merging the plist |
+| `PrivacyInfo.xcprivacy` | `src-tauri/PrivacyInfo.xcprivacy`, added to the Xcode target by `scripts/ci/patch-ios-project.py` | Required privacy manifest: no tracking, no collected data, FileTimestamp (C617.1) and UserDefaults (CA92.1) reasons |
+| `TARGETED_DEVICE_FAMILY = 1` (iPhone only) | `scripts/ci/patch-ios-project.py` + `xcodegen generate` | The UI is a fixed 390px phone layout; listing for iPad would get the app reviewed (and rejected) on a 10" screen. Remove once the layout is responsive. |
+| `--build-number ${{ github.run_number }}` | "Build iOS release" step | `CFBundleVersion` becomes `<version>.<run>`, so re-running a tag is a new build instead of a duplicate rejected by App Store Connect |
+| dSYM zip | artifact `ios-release-dSYMs` and attached to the GitHub release | Symbolicating TestFlight/App Store crash reports |
+
+The upload still uses `xcrun altool --upload-app`. Apple has deprecated it in
+favour of Transporter / `iTMSTransporter` and the App Store Connect API
+(`notarytool` is for notarisation, not App Store uploads). It keeps working
+with API-key auth, so it stays until it breaks; if it does, the `.ipa` is still
+uploaded as a workflow artifact and can be pushed with the Transporter app.
 
 ## Step 10: Verify the Build
 
@@ -132,7 +163,11 @@ Or trigger manually from the Actions tab using **workflow_dispatch**.
 | Error | Cause | Fix |
 |---|---|---|
 | `MAC verification failed during PKCS12 import` | .p12 without `-legacy` flag | Recreate with `openssl pkcs12 -export -legacy ...` |
-| `future Xcode project file format (77)` | Xcode < 16.3 | Use `runs-on: macos-15` |
+| `future Xcode project file format (77)` | Xcode < 16.3 | Historical; the job now pins Xcode 26.x on `macos-26` |
+| `Xcode_26.6.app not on this runner` | Runner image dropped that Xcode | Bump `XCODE_VERSION` in `build-ios.yml` to a listed version |
+| App Store Connect rejects the build as a duplicate | Same `CFBundleVersion` uploaded twice | Should not happen any more (`--build-number` uses the run number); re-run the workflow |
+| `Missing Compliance` in TestFlight | `ITSAppUsesNonExemptEncryption` missing | Check the "Assert Info.ios.plist keys" step; `src-tauri/Info.ios.plist` was not merged |
+| `Missing privacy manifest` email from Apple | `PrivacyInfo.xcprivacy` not in the bundle | Check the "Add privacy manifest" step output and the assertion step |
 | `No profiles for 'com.pockethledger.app' were found` | Bundle ID mismatch | Verify bundle ID matches `tauri.conf.json` `identifier` |
 | `Signing requires a development team` | Missing env var on init | Set `APPLE_DEVELOPMENT_TEAM` on both init and build steps |
 | `Library does not include required runtime symbols` | Missing mobile entry point | Ensure `#[cfg_attr(mobile, tauri::mobile_entry_point)]` on `run()` |

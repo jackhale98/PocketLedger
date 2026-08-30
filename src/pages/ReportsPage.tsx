@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import {
   LineChart, Line, BarChart, Bar, PieChart, Pie, Cell,
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
@@ -8,9 +8,12 @@ import * as api from "../api/commands";
 import { useSettingsStore } from "../store/settingsStore";
 import { useJournalStore } from "../store/journalStore";
 import { useNavStore, type ReportTab } from "../store/navStore";
+import { useReportsViewStore } from "../store/reportsViewStore";
 import { useBackHandler } from "../store/backStore";
-import { formatAmount } from "../utils/format";
-import { hasChildren, isHiddenUnder, toggleCollapsed, collapsibleAccounts } from "../utils/tree";
+import { useChartTheme } from "../hooks/useDarkMode";
+import { amountTone, decimalSign, formatAmount } from "../utils/format";
+import { sumQuantities } from "../utils/amount";
+import { isHiddenUnder, toggleCollapsed, parentAccounts } from "../utils/tree";
 import { DateFilter } from "../components/common/DateFilter";
 import { TransactionEditorSheet } from "../components/transactions/TransactionEditorSheet";
 import type {
@@ -35,13 +38,34 @@ function axisLabel(points: { date: string }[]): (d: string) => string {
     : (d: string) => d.slice(5);
 }
 
-function fmtAmt(amounts: { commodity: string; quantity: string }[]): string {
+/** Several commodities on one line. */
+function fmtEntries(amounts: AmountEntry[]): string {
   return amounts.map((a) => formatAmount(a.quantity, a.commodity)).join(", ");
 }
 
-function fmtBudgetAmt(value: string, commodity: string): string {
-  return formatAmount(value, commodity);
+/** Add up per-commodity totals exactly, keeping the decimals the backend
+ *  sent; a float sum printed with toString would read "0.30000000000000004"
+ *  or drop the trailing zero off "12.50". Zero totals are omitted. */
+function sumByCommodity(entries: AmountEntry[]): AmountEntry[] {
+  const byCommodity = new Map<string, string[]>();
+  for (const a of entries) {
+    const list = byCommodity.get(a.commodity) ?? [];
+    list.push(a.quantity);
+    byCommodity.set(a.commodity, list);
+  }
+  return [...byCommodity.entries()]
+    .map(([commodity, qs]) => ({ commodity, quantity: sumQuantities(qs) }))
+    .filter((a) => decimalSign(a.quantity) !== 0);
 }
+
+/** Only a "YYYY-MM" bucket can be turned into an income statement range;
+ *  daily and weekly buckets are labelled "MM-DD" and carry no year. */
+const MONTH_LABEL_RE = /^\d{4}-\d{2}$/;
+
+const BACK_BUTTON = "p-2 -ml-2 min-w-[44px] min-h-[44px] text-gray-600 dark:text-gray-300";
+const CHIP = "px-3 min-h-[44px] text-xs font-medium rounded";
+const chipTone = (active: boolean) =>
+  active ? "bg-blue-600 text-white" : "bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400";
 
 /** What period a statement covers, in the terms that statement uses.
  *  A balance sheet is a snapshot, so only its end date means anything —
@@ -67,13 +91,13 @@ function StatementView({ statement, subtitle, onBack }: { statement: FinancialSt
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
 
   const allRows = statement.sections.flatMap((s) => s.rows);
-  const allParents = collapsibleAccounts(allRows);
+  const allParents = useMemo(() => parentAccounts(allRows), [statement]); // eslint-disable-line react-hooks/exhaustive-deps
   const allCollapsed = allParents.size > 0 && allParents.size === collapsed.size;
 
   return (
     <div className="flex flex-col h-full">
       <div className="flex items-center gap-2 px-4 py-3 border-b border-gray-200 dark:border-gray-700">
-        <button onClick={onBack} className="p-2 -ml-2 text-gray-600 dark:text-gray-300">&larr;</button>
+        <button onClick={onBack} aria-label="Back" className={BACK_BUTTON}>&larr;</button>
         <div className="min-w-0 flex-1">
           <h2 className="text-base font-semibold text-gray-900 dark:text-gray-100 truncate">{statement.title}</h2>
           {subtitle && <div className="text-xs text-gray-500 dark:text-gray-400">{subtitle}</div>}
@@ -81,20 +105,22 @@ function StatementView({ statement, subtitle, onBack }: { statement: FinancialSt
         {allParents.size > 0 && (
           <button
             onClick={() => setCollapsed(allCollapsed ? new Set() : allParents)}
-            className="text-xs text-blue-600 dark:text-blue-400 shrink-0 px-2 py-1"
+            className="text-xs text-blue-600 dark:text-blue-400 shrink-0 px-2 min-h-[44px]"
           >
             {allCollapsed ? "Expand all" : "Collapse all"}
           </button>
         )}
       </div>
-      <div className="flex-1 overflow-y-auto overflow-x-hidden p-4 space-y-4">
+      <div className="flex-1 overflow-y-auto overflow-x-hidden p-4 space-y-4 selectable">
         {statement.sections.map((section, si) => {
           // Liabilities and equity are shown with their signs flipped, as
           // hledger does, so a positive number there is money owed rather than
           // money gained — colouring it green would read as good news.
           const positiveIsGood = ["Assets", "Income", "Cash Changes"].includes(section.title);
-          const tone = (q: number) =>
-            q < 0 ? "text-red-500" : positiveIsGood ? "text-green-500" : "text-gray-800 dark:text-gray-200";
+          const tone = (q: string) =>
+            decimalSign(q) < 0 ? "text-negative"
+              : decimalSign(q) > 0 && positiveIsGood ? "text-positive"
+              : "text-gray-800 dark:text-gray-200";
           return (
           <div key={si}>
             <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 uppercase tracking-wide mb-2">{section.title}</h3>
@@ -103,7 +129,7 @@ function StatementView({ statement, subtitle, onBack }: { statement: FinancialSt
                 {section.rows
                   .filter((row) => !isHiddenUnder(collapsed, row.account))
                   .map((row, ri) => {
-                    const parent = hasChildren(section.rows, row.account);
+                    const parent = allParents.has(row.account);
                     const isCollapsed = collapsed.has(row.account);
                     // One line per commodity. Joining them squeezed the
                     // account name out of the row entirely on a holding with
@@ -114,8 +140,8 @@ function StatementView({ statement, subtitle, onBack }: { statement: FinancialSt
                           <span className="text-gray-400 dark:text-gray-500">&middot;</span>
                         ) : (
                           row.amounts.map((a, ai) => (
-                            <div key={ai} className={tone(parseFloat(a.quantity))}>
-                              {fmtAmt([a])}
+                            <div key={ai} className={tone(a.quantity)}>
+                              {formatAmount(a.quantity, a.commodity)}
                             </div>
                           ))
                         )}
@@ -159,7 +185,7 @@ function StatementView({ statement, subtitle, onBack }: { statement: FinancialSt
             <div className="flex justify-between items-start gap-2 px-3 py-2 font-semibold text-sm text-gray-900 dark:text-gray-100">
               <span className="shrink-0">Total</span>
               <span className="font-mono text-right" style={{ fontVariantNumeric: "tabular-nums" }}>
-                {section.total.map((a, i) => <div key={i}>{fmtAmt([a])}</div>)}
+                {section.total.map((a, i) => <div key={i}>{formatAmount(a.quantity, a.commodity)}</div>)}
               </span>
             </div>
           </div>
@@ -168,7 +194,7 @@ function StatementView({ statement, subtitle, onBack }: { statement: FinancialSt
         <div className="border-t-2 border-gray-300 dark:border-gray-600 pt-2 flex justify-between items-start gap-2 font-bold text-sm text-gray-900 dark:text-gray-100">
           <span className="shrink-0">Net</span>
           <span className="font-mono text-right" style={{ fontVariantNumeric: "tabular-nums" }}>
-            {statement.net.map((a, i) => <div key={i}>{fmtAmt([a])}</div>)}
+            {statement.net.map((a, i) => <div key={i}>{formatAmount(a.quantity, a.commodity)}</div>)}
           </span>
         </div>
       </div>
@@ -238,7 +264,7 @@ function ReturnsSection({ account, dateFrom, dateTo, currency }: {
 
   const amt = (v: string) => formatAmount(v, report.commodity);
   const pct = (v: string | null) => (v === null ? "\u2014" : `${v}%`);
-  const tone = gained < 0 ? "text-red-500" : "text-green-500";
+  const tone = amountTone(report.pnl);
 
   return (
     <div>
@@ -253,7 +279,8 @@ function ReturnsSection({ account, dateFrom, dateTo, currency }: {
       </div>
       <button
         onClick={() => setShowFlows(!showFlows)}
-        className="mt-2 text-xs text-blue-600 dark:text-blue-400"
+        aria-expanded={showFlows}
+        className="mt-2 text-xs text-blue-600 dark:text-blue-400 min-h-[44px]"
       >
         {showFlows ? "Hide" : "Show"} cash flows and settings
       </button>
@@ -268,7 +295,12 @@ function ReturnsSection({ account, dateFrom, dateTo, currency }: {
               value={pnlQuery}
               placeholder="acct:income:gains"
               onChange={(e) => setPnlQuery(e.target.value)}
-              className="w-full min-w-0 px-3 py-2 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg text-sm font-mono text-gray-900 dark:text-gray-100"
+              aria-label="Gains query"
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
+              enterKeyHint="done"
+              className="w-full min-w-0 px-3 py-2 min-h-[44px] bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg text-sm font-mono text-gray-900 dark:text-gray-100"
             />
           </label>
           {report.flows.length === 0 ? (
@@ -280,7 +312,7 @@ function ReturnsSection({ account, dateFrom, dateTo, currency }: {
               {report.flows.map((f, i) => (
                 <div key={i} className="flex justify-between py-1.5 text-xs">
                   <span className="text-gray-500 dark:text-gray-400">{f.date}</span>
-                  <span className={`font-mono ${parseFloat(f.amount) < 0 ? "text-red-500" : "text-gray-800 dark:text-gray-200"}`}>
+                  <span className={`font-mono ${decimalSign(f.amount) < 0 ? "text-negative" : "text-gray-800 dark:text-gray-200"}`}>
                     {amt(f.amount)}
                   </span>
                 </div>
@@ -312,6 +344,7 @@ function AccountView({ accountList, account, onAccountChange, dateFrom, dateTo, 
   const [error, setError] = useState<string | null>(null);
   const [newestFirst, setNewestFirst] = useState(true);
   const loadSeq = useRef(0);
+  const chart = useChartTheme();
 
   const load = useCallback(async () => {
     const seq = ++loadSeq.current;
@@ -352,9 +385,11 @@ function AccountView({ accountList, account, onAccountChange, dateFrom, dateTo, 
 
   useEffect(() => { load(); }, [load]);
 
-  const displayRows = newestFirst ? [...rows].reverse() : rows;
-  const chartLabel = axisLabel(series);
-  const chartData = series.map((p) => ({ date: chartLabel(p.date), value: parseFloat(p.value) }));
+  const displayRows = useMemo(() => (newestFirst ? [...rows].reverse() : rows), [rows, newestFirst]);
+  const chartData = useMemo(() => {
+    const label = axisLabel(series);
+    return series.map((p) => ({ date: label(p.date), value: parseFloat(p.value) }));
+  }, [series]);
 
   if (editIndex !== null) {
     return (
@@ -371,7 +406,8 @@ function AccountView({ accountList, account, onAccountChange, dateFrom, dateTo, 
     <div className="space-y-3 min-w-0">
       <div className="flex gap-2 items-stretch">
         <select value={account} onChange={(e) => onAccountChange(e.target.value)}
-          className="flex-1 min-w-0 truncate px-3 py-2 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg text-sm text-gray-900 dark:text-gray-100">
+          aria-label="Account"
+          className="flex-1 min-w-0 truncate px-3 py-2 min-h-[44px] bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg text-sm text-gray-900 dark:text-gray-100">
           <option value="">Select an account...</option>
           {account && !accountList.includes(account) && <option value={account}>{account}</option>}
           {accountList.map((n) => <option key={n} value={n}>{n}</option>)}
@@ -379,7 +415,8 @@ function AccountView({ accountList, account, onAccountChange, dateFrom, dateTo, 
         <button
           onClick={() => setNewestFirst(!newestFirst)}
           title={newestFirst ? "Newest first" : "Oldest first"}
-          className="px-3 py-2 bg-gray-100 dark:bg-gray-800 rounded-lg text-xs font-medium text-gray-600 dark:text-gray-400 shrink-0 whitespace-nowrap"
+          aria-label={newestFirst ? "Sorted newest first; switch to oldest first" : "Sorted oldest first; switch to newest first"}
+          className="px-3 min-h-[44px] bg-gray-100 dark:bg-gray-800 rounded-lg text-xs font-medium text-gray-600 dark:text-gray-400 shrink-0 whitespace-nowrap"
         >
           {newestFirst ? "New \u2193" : "Old \u2191"}
         </button>
@@ -398,11 +435,11 @@ function AccountView({ accountList, account, onAccountChange, dateFrom, dateTo, 
           <div className="bg-gray-50 dark:bg-gray-800 rounded-lg p-2">
             <ResponsiveContainer width="100%" height={160}>
               <LineChart data={chartData}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#4b5563" />
-                <XAxis dataKey="date" tick={{ fontSize: 10, fill: "#9ca3af" }} />
-                <YAxis tick={{ fontSize: 10, fill: "#9ca3af" }} width={60} />
-                <Tooltip contentStyle={{ backgroundColor: "#1f2937", border: "none", borderRadius: 8, color: "#f3f4f6" }} />
-                <ReferenceLine y={0} stroke="#6b7280" />
+                <CartesianGrid strokeDasharray="3 3" stroke={chart.grid} />
+                <XAxis dataKey="date" tick={chart.tick} />
+                <YAxis tick={chart.tick} width={60} />
+                <Tooltip contentStyle={chart.tooltip} />
+                <ReferenceLine y={0} stroke={chart.zeroLine} />
                 <Line type="monotone" dataKey="value" stroke="#8b5cf6" strokeWidth={2} dot={false} />
               </LineChart>
             </ResponsiveContainer>
@@ -418,10 +455,10 @@ function AccountView({ accountList, account, onAccountChange, dateFrom, dateTo, 
         <div>
           <div className="flex items-center justify-between gap-2 mb-2 min-w-0">
             <h2 className="text-sm font-semibold text-gray-700 dark:text-gray-300 truncate">Change per period</h2>
-            <div className="flex gap-1 shrink-0">
+            <div className="flex gap-1 shrink-0" role="group" aria-label="Period">
               {TABLE_INTERVALS.map(([iv, label]) => (
-                <button key={iv} onClick={() => setInterval_(iv)}
-                  className={`px-2 py-1 text-xs font-medium rounded ${iv === interval ? "bg-blue-600 text-white" : "bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400"}`}>
+                <button key={iv} onClick={() => setInterval_(iv)} aria-pressed={iv === interval}
+                  className={`${CHIP} ${chipTone(iv === interval)}`}>
                   {label}
                 </button>
               ))}
@@ -475,8 +512,8 @@ function AccountView({ accountList, account, onAccountChange, dateFrom, dateTo, 
                   <div className="text-xs text-gray-500 dark:text-gray-400">{row.date}</div>
                 </div>
                 <div className="text-right ml-3 shrink-0">
-                  <div className={`text-sm font-mono ${parseFloat(row.amount[0]?.quantity ?? "0") < 0 ? "text-red-500" : "text-green-500"}`}>{fmtAmt(row.amount)}</div>
-                  <div className="text-xs text-gray-400 font-mono">{fmtAmt(row.runningTotal)}</div>
+                  <div className={`text-sm font-mono ${amountTone(row.amount[0]?.quantity)}`}>{fmtEntries(row.amount)}</div>
+                  <div className="text-xs text-gray-400 font-mono">{fmtEntries(row.runningTotal)}</div>
                 </div>
               </>
             );
@@ -486,7 +523,7 @@ function AccountView({ accountList, account, onAccountChange, dateFrom, dateTo, 
               <button
                 key={i}
                 onClick={() => setEditIndex(row.transactionIndex)}
-                className="w-full py-2.5 flex justify-between items-center gap-2 min-w-0 text-left active:bg-gray-50 dark:active:bg-gray-800"
+                className="w-full py-2.5 min-h-[44px] flex justify-between items-center gap-2 min-w-0 text-left active:bg-gray-50 dark:active:bg-gray-800"
               >
                 {body}
               </button>
@@ -502,10 +539,6 @@ function AccountView({ accountList, account, onAccountChange, dateFrom, dateTo, 
   );
 }
 
-function fmtCompactEntry(a: AmountEntry): string {
-  return formatAmount(a.quantity, a.commodity);
-}
-
 function BalanceCell({ amounts, bold }: { amounts: AmountEntry[]; bold?: boolean }) {
   return (
     <td className={`px-2 py-1.5 text-right font-mono whitespace-nowrap align-top ${bold ? "font-semibold" : ""}`} style={{ fontVariantNumeric: "tabular-nums" }}>
@@ -513,8 +546,8 @@ function BalanceCell({ amounts, bold }: { amounts: AmountEntry[]; bold?: boolean
         <span className="text-gray-300 dark:text-gray-600">&middot;</span>
       ) : (
         amounts.map((a, i) => (
-          <div key={i} className={parseFloat(a.quantity) < 0 ? "text-red-500" : "text-gray-800 dark:text-gray-200"}>
-            {fmtCompactEntry(a)}
+          <div key={i} className={decimalSign(a.quantity) < 0 ? "text-negative" : "text-gray-800 dark:text-gray-200"}>
+            {formatAmount(a.quantity, a.commodity)}
           </div>
         ))
       )}
@@ -575,18 +608,10 @@ function TableView({ dateFrom, dateTo, query, currency }: { dateFrom: string; da
   useEffect(() => { load(); }, [load]);
 
   // Grand total (Total column footer): sum of row totals per commodity.
-  const grandTotal: AmountEntry[] = (() => {
-    if (!report) return [];
-    const byCommodity = new Map<string, number>();
-    for (const row of report.rows) {
-      for (const a of row.total) {
-        byCommodity.set(a.commodity, (byCommodity.get(a.commodity) ?? 0) + parseFloat(a.quantity));
-      }
-    }
-    return [...byCommodity.entries()]
-      .filter(([, q]) => q !== 0)
-      .map(([commodity, q]) => ({ commodity, quantity: q.toString() }));
-  })();
+  const grandTotal = useMemo(
+    () => (report ? sumByCommodity(report.rows.flatMap((r) => r.total)) : []),
+    [report]
+  );
 
   const stickyCol = "sticky left-0 bg-white dark:bg-gray-900";
 
@@ -594,16 +619,17 @@ function TableView({ dateFrom, dateTo, query, currency }: { dateFrom: string; da
     <div className="space-y-3">
       {/* Interval + mode */}
       <div className="flex gap-2">
-        <div className="flex rounded-lg overflow-hidden border border-gray-300 dark:border-gray-600">
+        <div className="flex rounded-lg overflow-hidden border border-gray-300 dark:border-gray-600" role="group" aria-label="Period">
           {TABLE_INTERVALS.map(([val, label]) => (
-            <button key={val} onClick={() => setInterval_(val)}
-              className={`px-3 py-2 text-xs font-medium ${val === interval ? "bg-blue-600 text-white" : "bg-white dark:bg-gray-800 text-gray-600 dark:text-gray-400"}`}>
+            <button key={val} onClick={() => setInterval_(val)} aria-pressed={val === interval}
+              className={`px-3 min-h-[44px] text-xs font-medium ${val === interval ? "bg-blue-600 text-white" : "bg-white dark:bg-gray-800 text-gray-600 dark:text-gray-400"}`}>
               {label}
             </button>
           ))}
         </div>
         <select value={mode} onChange={(e) => setMode(e.target.value as BalanceAccumulationMode)}
-          className="flex-1 px-3 py-2 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg text-sm text-gray-900 dark:text-gray-100">
+          aria-label="Accumulation"
+          className="flex-1 min-w-0 px-3 min-h-[44px] bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg text-sm text-gray-900 dark:text-gray-100">
           <option value="periodic">Periodic</option>
           <option value="cumulative">Cumulative</option>
           <option value="historical">Historical</option>
@@ -613,7 +639,8 @@ function TableView({ dateFrom, dateTo, query, currency }: { dateFrom: string; da
       {/* Account group: an income-statement or balance-sheet shaped view of
           the same table, rather than a separate report. */}
       <select value={group} onChange={(e) => setGroup(e.target.value)}
-        className="w-full min-w-0 truncate px-3 py-2 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg text-sm text-gray-900 dark:text-gray-100">
+        aria-label="Account group"
+        className="w-full min-w-0 truncate px-3 min-h-[44px] bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg text-sm text-gray-900 dark:text-gray-100">
         {ACCOUNT_GROUPS.map(([val, label]) => (
           <option key={val} value={val}>{label}</option>
         ))}
@@ -621,16 +648,16 @@ function TableView({ dateFrom, dateTo, query, currency }: { dateFrom: string; da
 
       {/* Depth + forecast */}
       <div className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-1" role="group" aria-label="Depth">
           <span className="text-xs text-gray-500 dark:text-gray-400 mr-1">Depth</span>
           {TABLE_DEPTHS.map((d) => (
-            <button key={d ?? "all"} onClick={() => setDepth(d)}
-              className={`px-2.5 py-1.5 text-xs font-medium rounded ${d === depth ? "bg-blue-600 text-white" : "bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400"}`}>
+            <button key={d ?? "all"} onClick={() => setDepth(d)} aria-pressed={d === depth}
+              className={`${CHIP} ${chipTone(d === depth)}`}>
               {d === null ? "All" : d}
             </button>
           ))}
         </div>
-        <label className="flex items-center gap-1.5 text-xs text-gray-600 dark:text-gray-400 shrink-0">
+        <label className="flex items-center gap-1.5 text-xs text-gray-600 dark:text-gray-400 shrink-0 min-h-[44px]">
           <input type="checkbox" checked={forecast} onChange={(e) => setForecast(e.target.checked)} className="accent-blue-600" />
           Forecast
         </label>
@@ -697,6 +724,7 @@ function BudgetView({ dateFrom, dateTo, query, currency }: { dateFrom: string; d
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const loadSeq = useRef(0);
+  const chartTheme = useChartTheme();
 
   const load = useCallback(async () => {
     const seq = ++loadSeq.current;
@@ -731,6 +759,15 @@ function BudgetView({ dateFrom, dateTo, query, currency }: { dateFrom: string; d
 
   useEffect(() => { load(); }, [load]);
 
+  const chartData = useMemo(
+    () => budgetChart.map((p) => ({
+      period: p.period,
+      budgeted: parseFloat(p.budgeted),
+      actual: parseFloat(p.actual),
+    })),
+    [budgetChart]
+  );
+
   if (loading) {
     return <div className="text-sm text-gray-500 text-center py-8">Loading...</div>;
   }
@@ -739,7 +776,7 @@ function BudgetView({ dateFrom, dateTo, query, currency }: { dateFrom: string; d
     return (
       <div className="space-y-2 py-4">
         <div className="text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/30 px-3 py-2 rounded-lg">{error}</div>
-        <button onClick={load} className="w-full py-2 text-sm text-blue-600 font-medium">Retry</button>
+        <button onClick={load} className="w-full min-h-[44px] text-sm text-blue-600 font-medium">Retry</button>
       </div>
     );
   }
@@ -819,12 +856,6 @@ function BudgetView({ dateFrom, dateTo, query, currency }: { dateFrom: string; d
   const mainTotal = commodityTotals[0];
   const extraCommodities = commodityTotals.length - 1;
 
-  const chartData = budgetChart.map((p) => ({
-    period: p.period,
-    budgeted: parseFloat(p.budgeted),
-    actual: parseFloat(p.actual),
-  }));
-
   return (
     <div className="space-y-4">
       {inactiveNotice}
@@ -836,19 +867,19 @@ function BudgetView({ dateFrom, dateTo, query, currency }: { dateFrom: string; d
             <div className="bg-gray-50 dark:bg-gray-800 rounded-lg p-3 text-center">
               <div className="text-xs text-gray-500 dark:text-gray-400">Budgeted</div>
               <div className="text-sm font-semibold text-gray-900 dark:text-gray-100 font-mono">
-                {fmtBudgetAmt(mainTotal[1].text.budget, mainTotal[0])}
+                {formatAmount(mainTotal[1].text.budget, mainTotal[0])}
               </div>
             </div>
             <div className="bg-gray-50 dark:bg-gray-800 rounded-lg p-3 text-center">
               <div className="text-xs text-gray-500 dark:text-gray-400">Spent</div>
               <div className="text-sm font-semibold text-gray-900 dark:text-gray-100 font-mono">
-                {fmtBudgetAmt(mainTotal[1].text.actual, mainTotal[0])}
+                {formatAmount(mainTotal[1].text.actual, mainTotal[0])}
               </div>
             </div>
             <div className="bg-gray-50 dark:bg-gray-800 rounded-lg p-3 text-center">
               <div className="text-xs text-gray-500 dark:text-gray-400">Remaining</div>
-              <div className={`text-sm font-semibold font-mono ${parseFloat(mainTotal[1].text.remaining) >= 0 ? "text-green-500" : "text-red-500"}`}>
-                {fmtBudgetAmt(mainTotal[1].text.remaining, mainTotal[0])}
+              <div className={`text-sm font-semibold font-mono ${amountTone(mainTotal[1].text.remaining)}`}>
+                {formatAmount(mainTotal[1].text.remaining, mainTotal[0])}
               </div>
             </div>
           </div>
@@ -880,8 +911,8 @@ function BudgetView({ dateFrom, dateTo, query, currency }: { dateFrom: string; d
                       </span>
                     )}
                   </span>
-                  <span className={`shrink-0 ml-2 text-xs font-mono ${row.overBudget ? "text-red-500" : "text-green-500"}`}>
-                    {fmtBudgetAmt(row.actual, row.commodity)} / {fmtBudgetAmt(row.budget, row.commodity)}
+                  <span className={`shrink-0 ml-2 text-xs font-mono ${row.overBudget ? "text-negative" : "text-positive"}`}>
+                    {formatAmount(row.actual, row.commodity)} / {formatAmount(row.budget, row.commodity)}
                   </span>
                 </div>
                 {/* Progress bar */}
@@ -893,8 +924,8 @@ function BudgetView({ dateFrom, dateTo, query, currency }: { dateFrom: string; d
                 </div>
                 <div className="flex justify-between mt-0.5">
                   <span className="text-xs text-gray-400">{row.percentage}</span>
-                  <span className={`text-xs ${parseFloat(row.difference) >= 0 ? "text-green-500" : "text-red-500"}`}>
-                    {parseFloat(row.difference) >= 0 ? "+" : ""}{fmtBudgetAmt(row.difference, row.commodity)} left
+                  <span className={`text-xs ${amountTone(row.difference)}`}>
+                    {decimalSign(row.difference) < 0 ? "" : "+"}{formatAmount(row.difference, row.commodity)} left
                   </span>
                 </div>
               </div>
@@ -910,10 +941,10 @@ function BudgetView({ dateFrom, dateTo, query, currency }: { dateFrom: string; d
           <div className="bg-gray-50 dark:bg-gray-800 rounded-lg p-2">
             <ResponsiveContainer width="100%" height={200}>
               <BarChart data={chartData}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#4b5563" />
-                <XAxis dataKey="period" tick={{ fontSize: 10, fill: "#9ca3af" }} />
-                <YAxis tick={{ fontSize: 10, fill: "#9ca3af" }} width={60} />
-                <Tooltip contentStyle={{ backgroundColor: "#1f2937", border: "none", borderRadius: 8, color: "#f3f4f6" }} />
+                <CartesianGrid strokeDasharray="3 3" stroke={chartTheme.grid} />
+                <XAxis dataKey="period" tick={chartTheme.tick} />
+                <YAxis tick={chartTheme.tick} width={60} />
+                <Tooltip contentStyle={chartTheme.tooltip} />
                 <Legend wrapperStyle={{ fontSize: 11 }} />
                 <Bar dataKey="budgeted" fill="#6366f1" name="Budget" radius={[2,2,0,0]} />
                 <Bar dataKey="actual" fill="#f59e0b" name="Actual" radius={[2,2,0,0]} />
@@ -938,6 +969,7 @@ function CommoditiesView({ onBack }: { onBack: () => void }) {
   useBackHandler(true, onBack);
   const [series, setSeries] = useState<PriceSeries[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const chart = useChartTheme();
 
   useEffect(() => {
     api.commodityPrices().then(setSeries).catch((e) =>
@@ -948,7 +980,7 @@ function CommoditiesView({ onBack }: { onBack: () => void }) {
   return (
     <div className="flex flex-col h-full">
       <div className="flex items-center gap-2 px-4 py-3 border-b border-gray-200 dark:border-gray-700">
-        <button onClick={onBack} className="p-2 -ml-2 text-gray-600 dark:text-gray-300">&larr;</button>
+        <button onClick={onBack} aria-label="Back" className={BACK_BUTTON}>&larr;</button>
         <h2 className="text-base font-semibold text-gray-900 dark:text-gray-100">Commodities</h2>
       </div>
       <div className="flex-1 overflow-y-auto overflow-x-hidden p-4 space-y-5">
@@ -978,17 +1010,17 @@ function CommoditiesView({ onBack }: { onBack: () => void }) {
                   {s.base} / {s.quote}
                 </h3>
                 <span className="text-xs font-mono text-gray-500 dark:text-gray-400 min-w-0 truncate">
-                  {latest && `${fmtAmt([{ commodity: s.quote, quantity: latest.rate }])} on ${latest.date}`}
+                  {latest && `${formatAmount(latest.rate, s.quote)} on ${latest.date}`}
                 </span>
               </div>
               {data.length > 1 ? (
                 <div className="bg-gray-50 dark:bg-gray-800 rounded-lg p-2">
                   <ResponsiveContainer width="100%" height={140}>
                     <LineChart data={data}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#4b5563" />
-                      <XAxis dataKey="date" tick={{ fontSize: 10, fill: "#9ca3af" }} />
-                      <YAxis tick={{ fontSize: 10, fill: "#9ca3af" }} width={56} domain={["auto", "auto"]} />
-                      <Tooltip contentStyle={{ backgroundColor: "#1f2937", border: "none", borderRadius: 8, color: "#f3f4f6" }} />
+                      <CartesianGrid strokeDasharray="3 3" stroke={chart.grid} />
+                      <XAxis dataKey="date" tick={chart.tick} />
+                      <YAxis tick={chart.tick} width={56} domain={["auto", "auto"]} />
+                      <Tooltip contentStyle={chart.tooltip} />
                       <Line type="monotone" dataKey="rate" stroke="#3b82f6" strokeWidth={2} dot={false} />
                     </LineChart>
                   </ResponsiveContainer>
@@ -1011,6 +1043,7 @@ function StatisticsView({ params, onBack }: { params: ReportParams; onBack: () =
   useBackHandler(true, onBack);
   const [stats, setStats] = useState<JournalStatistics | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const chart = useChartTheme();
 
   useEffect(() => {
     api.journalStatistics(params).then(setStats).catch((e) =>
@@ -1030,7 +1063,7 @@ function StatisticsView({ params, onBack }: { params: ReportParams; onBack: () =
   return (
     <div className="flex flex-col h-full">
       <div className="flex items-center gap-2 px-4 py-3 border-b border-gray-200 dark:border-gray-700">
-        <button onClick={onBack} className="p-2 -ml-2 text-gray-600 dark:text-gray-300">&larr;</button>
+        <button onClick={onBack} aria-label="Back" className={BACK_BUTTON}>&larr;</button>
         <h2 className="text-base font-semibold text-gray-900 dark:text-gray-100">Statistics</h2>
       </div>
       <div className="flex-1 overflow-y-auto overflow-x-hidden p-4 space-y-4">
@@ -1062,10 +1095,10 @@ function StatisticsView({ params, onBack }: { params: ReportParams; onBack: () =
                 <div className="bg-gray-50 dark:bg-gray-800 rounded-lg p-2">
                   <ResponsiveContainer width="100%" height={140}>
                     <BarChart data={stats.activity.map((a) => ({ period: a.period, postings: a.postings }))}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#4b5563" />
-                      <XAxis dataKey="period" tick={{ fontSize: 10, fill: "#9ca3af" }} />
-                      <YAxis tick={{ fontSize: 10, fill: "#9ca3af" }} width={40} />
-                      <Tooltip contentStyle={{ backgroundColor: "#1f2937", border: "none", borderRadius: 8, color: "#f3f4f6" }} />
+                      <CartesianGrid strokeDasharray="3 3" stroke={chart.grid} />
+                      <XAxis dataKey="period" tick={chart.tick} />
+                      <YAxis tick={chart.tick} width={40} />
+                      <Tooltip contentStyle={chart.tooltip} />
                       <Bar dataKey="postings" fill="#3b82f6" radius={[2, 2, 0, 0]} />
                     </BarChart>
                   </ResponsiveContainer>
@@ -1116,6 +1149,7 @@ function ForecastView({ accountList, query, currency }: { accountList: string[];
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const loadSeq = useRef(0);
+  const chart = useChartTheme();
 
   const load = useCallback(async () => {
     const seq = ++loadSeq.current;
@@ -1147,16 +1181,17 @@ function ForecastView({ accountList, query, currency }: { accountList: string[];
   const controls = (
     <div className="space-y-2">
       <select value={account} onChange={(e) => setAccount(e.target.value)}
+        aria-label="Account"
         className="w-full min-w-0 truncate px-3 py-2 min-h-[48px] bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg text-sm text-gray-900 dark:text-gray-100">
         <option value="">All assets</option>
         {accountList.map((n) => <option key={n} value={n}>{n}</option>)}
       </select>
       <div className="flex items-center gap-2">
         <span className="text-xs text-gray-500 dark:text-gray-400 shrink-0">Look ahead</span>
-        <div className="flex gap-1.5 flex-1 min-w-0">
+        <div className="flex gap-1.5 flex-1 min-w-0" role="group" aria-label="Look ahead">
           {HORIZON_OPTIONS.map(([m, label]) => (
-            <button key={m} onClick={() => setMonths(m)}
-              className={`flex-1 py-2 text-xs font-medium rounded-lg ${m === months ? "bg-blue-600 text-white" : "bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400"}`}>
+            <button key={m} onClick={() => setMonths(m)} aria-pressed={m === months}
+              className={`flex-1 min-h-[44px] text-xs font-medium rounded-lg ${chipTone(m === months)}`}>
               {label}
             </button>
           ))}
@@ -1170,7 +1205,7 @@ function ForecastView({ accountList, query, currency }: { accountList: string[];
       <div className="space-y-3">
         {controls}
         <div className="text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/30 px-3 py-2 rounded-lg break-words">{error}</div>
-        <button onClick={load} className="w-full py-2 text-sm text-blue-600 font-medium">Retry</button>
+        <button onClick={load} className="w-full min-h-[44px] text-sm text-blue-600 font-medium">Retry</button>
       </div>
     );
   }
@@ -1243,7 +1278,7 @@ function ForecastView({ accountList, query, currency }: { accountList: string[];
             You run out of money on {shortfall.date}
           </div>
           <div className="text-sm text-red-600 dark:text-red-400 font-mono">
-            Projected balance {fmtBudgetAmt(shortfall.balance, commodity)}
+            Projected balance {formatAmount(shortfall.balance, commodity)}
           </div>
           <div className="text-xs text-red-600/80 dark:text-red-400/80 break-words">
             after &ldquo;{shortfall.description}&rdquo;
@@ -1254,8 +1289,8 @@ function ForecastView({ accountList, query, currency }: { accountList: string[];
       {!shortfall && last && (
         <div className="bg-gray-50 dark:bg-gray-800 rounded-lg p-3 text-center">
           <div className="text-xs text-gray-500 dark:text-gray-400">Projected balance by {last.period}</div>
-          <div className={`text-lg font-semibold font-mono ${parseFloat(last.closing) < 0 ? "text-red-500" : "text-green-500"}`}>
-            {fmtBudgetAmt(last.closing, commodity)}
+          <div className={`text-lg font-semibold font-mono ${amountTone(last.closing)}`}>
+            {formatAmount(last.closing, commodity)}
           </div>
         </div>
       )}
@@ -1266,12 +1301,12 @@ function ForecastView({ accountList, query, currency }: { accountList: string[];
           <div className="bg-gray-50 dark:bg-gray-800 rounded-lg p-2">
             <ResponsiveContainer width="100%" height={200}>
               <LineChart data={chartData}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#4b5563" />
-                <XAxis dataKey="period" tick={{ fontSize: 10, fill: "#9ca3af" }} />
-                <YAxis tick={{ fontSize: 10, fill: "#9ca3af" }} width={60} />
-                <Tooltip contentStyle={{ backgroundColor: "#1f2937", border: "none", borderRadius: 8, color: "#f3f4f6" }} />
+                <CartesianGrid strokeDasharray="3 3" stroke={chart.grid} />
+                <XAxis dataKey="period" tick={chart.tick} />
+                <YAxis tick={chart.tick} width={60} />
+                <Tooltip contentStyle={chart.tooltip} />
                 <Legend wrapperStyle={{ fontSize: 11 }} />
-                <ReferenceLine y={0} stroke="#6b7280" />
+                <ReferenceLine y={0} stroke={chart.zeroLine} />
                 {hasCutoff && <ReferenceLine x={cutoff ?? undefined} stroke="#f59e0b" strokeDasharray="4 4" />}
                 <Line type="monotone" dataKey="actual" name="Actual" stroke="#3b82f6" strokeWidth={2} dot={false} connectNulls={false} />
                 <Line type="monotone" dataKey="projected" name="Projected" stroke="#8b5cf6" strokeWidth={2} strokeDasharray="5 4" dot={false} connectNulls={false} />
@@ -1308,8 +1343,8 @@ function ForecastView({ accountList, query, currency }: { accountList: string[];
                     <div className="text-xs text-gray-500 dark:text-gray-400">{txn.date}</div>
                   </div>
                   {posting && posting.amount !== null && (
-                    <div className={`text-sm font-mono shrink-0 ${parseFloat(posting.amount) < 0 ? "text-red-500" : "text-green-500"}`}>
-                      {fmtCompactEntry({ commodity: posting.commodity ?? "", quantity: posting.amount })}
+                    <div className={`text-sm font-mono shrink-0 ${amountTone(posting.amount)}`}>
+                      {formatAmount(posting.amount, posting.commodity ?? "")}
                     </div>
                   )}
                 </div>
@@ -1322,55 +1357,117 @@ function ForecastView({ accountList, query, currency }: { accountList: string[];
   );
 }
 
+/** The query box keeps its own draft and only pushes settled text into the
+ *  store, so every keystroke doesn't re-run five reports. */
+function QueryFilter({ query, onChange, onClear }: { query: string; onChange: (q: string) => void; onClear: () => void }) {
+  const [draft, setDraft] = useState(query);
+  const latest = useRef(onChange);
+  latest.current = onChange;
+
+  // Adopt outside changes (Clear, another journal) without a round trip.
+  useEffect(() => { setDraft(query); }, [query]);
+
+  useEffect(() => {
+    if (draft === query) return;
+    const t = setTimeout(() => latest.current(draft), 300);
+    return () => clearTimeout(t);
+  }, [draft, query]);
+
+  return (
+    <div className="flex gap-2 items-center min-w-0">
+      <input
+        type="text"
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        placeholder="acct:expenses cur:EUR not:rent"
+        aria-label="Report query"
+        autoFocus={!query}
+        autoCapitalize="none"
+        autoCorrect="off"
+        spellCheck={false}
+        enterKeyHint="search"
+        className="flex-1 min-w-0 px-3 py-2 min-h-[44px] bg-gray-100 dark:bg-gray-800 rounded-lg text-sm text-gray-900 dark:text-gray-100 placeholder-gray-500 dark:placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
+      />
+      <button
+        onClick={() => { setDraft(""); onClear(); }}
+        className="text-xs text-gray-500 dark:text-gray-400 shrink-0 px-2 min-h-[44px]"
+      >
+        Clear
+      </button>
+    </div>
+  );
+}
+
 export function ReportsPage() {
   const { defaultCurrency } = useSettingsStore();
   const refreshJournal = useJournalStore((s) => s.refresh);
+  const loadGeneration = useJournalStore((s) => s.loadGeneration);
   const navIntent = useNavStore((s) => s.intent);
   const clearNavIntent = useNavStore((s) => s.clearIntent);
   const navigate = useNavStore((s) => s.navigate);
   const goBack = useNavStore((s) => s.goBack);
   const canGoBack = useNavStore((s) => s.history.length > 0);
-  const [tab, setTab] = useState<ReportTab>("overview");
-  const [registerAccount, setRegisterAccount] = useState("");
+  // Which report, account, dates and query live in a store so switching
+  // bottom tabs and coming back lands where the user left off.
+  const tab = useReportsViewStore((s) => s.tab);
+  const setTab = useReportsViewStore((s) => s.setTab);
+  const registerAccount = useReportsViewStore((s) => s.registerAccount);
+  const setRegisterAccount = useReportsViewStore((s) => s.setRegisterAccount);
+  const dateFrom = useReportsViewStore((s) => s.dateFrom);
+  const dateTo = useReportsViewStore((s) => s.dateTo);
+  const setDates = useReportsViewStore((s) => s.setDates);
+  // One query for every tab. The backend applies it to all reports, so
+  // leaving it per-tab meant a filter silently stopped applying when the
+  // user switched views. Already debounced by QueryFilter.
+  const query = useReportsViewStore((s) => s.query);
+  const setQuery = useReportsViewStore((s) => s.setQuery);
+  const showQuery = useReportsViewStore((s) => s.showQuery);
+  const setShowQuery = useReportsViewStore((s) => s.setShowQuery);
+  const forecast = useReportsViewStore((s) => s.forecast);
+  const setForecast = useReportsViewStore((s) => s.setForecast);
+  const chartInterval = useReportsViewStore((s) => s.chartInterval);
+  const setChartInterval = useReportsViewStore((s) => s.setChartInterval);
   // Period a statement was opened for, when it differs from the page filter.
   const [statementRange, setStatementRange] = useState<{ from: string; to: string } | null>(null);
   const [drillView, setDrillView] = useState<DrillView>(null);
   const [statement, setStatement] = useState<FinancialStatement | null>(null);
+  const [openingStatement, setOpeningStatement] = useState<DrillView>(null);
   const [netWorth, setNetWorth] = useState<TimeSeriesPoint[]>([]);
   const [incomeExpense, setIncomeExpense] = useState<IncomeExpensePoint[]>([]);
   const [expenseBreakdown, setExpenseBreakdown] = useState<PieSlice[]>([]);
   const [loading, setLoading] = useState(true);
-  const [dateFrom, setDateFrom] = useState("");
-  const [dateTo, setDateTo] = useState("");
-  // One query for every tab. The backend applies it to all reports, so
-  // leaving it per-tab meant a filter silently stopped applying when the
-  // user switched views.
-  const [query, setQuery] = useState("");
-  const [debouncedQuery, setDebouncedQuery] = useState("");
-  const [showQuery, setShowQuery] = useState(false);
   const [accountList, setAccountList] = useState<string[]>([]);
   const [expensePrefix, setExpensePrefix] = useState<string | null>(null);
   const [expensePath, setExpensePath] = useState<string[]>([]);
   const [pageError, setPageError] = useState<string | null>(null);
   const [drillHint, setDrillHint] = useState<string | null>(null);
   const [valuation, setValuation] = useState<api.ValuationInfo | null>(null);
-  const [forecast, setForecast] = useState(false);
-  // "" lets each chart size its buckets from the range; the rest pin it.
-  const [chartInterval, setChartInterval] = useState("");
   const dashboardSeq = useRef(0);
   const drillSeq = useRef(0);
-
-  useEffect(() => {
-    const t = setTimeout(() => setDebouncedQuery(query), 300);
-    return () => clearTimeout(t);
-  }, [query]);
+  const statementSeq = useRef(0);
+  const chart = useChartTheme();
 
   const makeParams = useCallback((): ReportParams => ({
     targetCommodity: defaultCurrency,
     dateFrom: dateFrom || null,
     dateTo: dateTo || null,
-    query: debouncedQuery.trim() || null,
-  }), [defaultCurrency, dateFrom, dateTo, debouncedQuery]);
+    query: query.trim() || null,
+  }), [defaultCurrency, dateFrom, dateTo, query]);
+
+  // The account list serves the Account and Forecast pickers and doesn't
+  // depend on the filters, so it is fetched once per journal load rather
+  // than with every dashboard refresh.
+  useEffect(() => {
+    let live = true;
+    api.listAccountsWithBalances()
+      .then((accounts) => {
+        if (live) setAccountList(accounts.map((a: BalanceRow) => a.account).sort());
+      })
+      .catch((err) => {
+        if (live) setPageError(err instanceof Error ? err.message : String(err));
+      });
+    return () => { live = false; };
+  }, [loadGeneration]);
 
   const loadDashboard = useCallback(async () => {
     const seq = ++dashboardSeq.current;
@@ -1379,11 +1476,10 @@ export function ReportsPage() {
     const params = makeParams();
     const chartParams: ReportParams = forecast ? { ...params, forecast: true } : params;
     try {
-      const [nw, ie, eb, accounts, vi] = await Promise.all([
+      const [nw, ie, eb, vi] = await Promise.all([
         api.netWorthSeries(chartParams, chartInterval || undefined),
         api.incomeExpenseChart(chartParams, chartInterval || undefined),
         api.expenseBreakdownChart(params, null),
-        api.listAccountsWithBalances(),
         api.valuationInfo(params),
       ]);
       if (seq !== dashboardSeq.current) return;
@@ -1394,16 +1490,26 @@ export function ReportsPage() {
       setExpensePath([]);
       setDrillHint(null);
       setValuation(vi);
-      setAccountList(accounts.map((a: BalanceRow) => a.account).sort());
     } catch (err) {
       if (seq !== dashboardSeq.current) return;
       setPageError(err instanceof Error ? err.message : String(err));
     } finally {
       if (seq === dashboardSeq.current) setLoading(false);
     }
-  }, [makeParams, forecast, chartInterval]);
+    // loadGeneration is a trigger: the journal changed, so the charts must.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [makeParams, forecast, chartInterval, loadGeneration]);
 
-  useEffect(() => { loadDashboard(); }, [loadDashboard]);
+  // Only the Overview draws these; the other tabs fetch their own reports.
+  // The dashboard is marked stale and reloaded when the user comes back.
+  const dashboardStale = useRef(true);
+  useEffect(() => { dashboardStale.current = true; }, [loadDashboard]);
+  useEffect(() => {
+    if (tab === "overview" && dashboardStale.current) {
+      dashboardStale.current = false;
+      loadDashboard();
+    }
+  }, [tab, loadDashboard]);
 
   const drillIntoExpense = async (category: string) => {
     const seq = ++drillSeq.current;
@@ -1446,12 +1552,48 @@ export function ReportsPage() {
     }
   };
 
+  const setRegisterFor = (account: string) => {
+    navigate("reports", { kind: "register", account }, { tab: "reports", reportTab: tab });
+  };
+
+  const openStatement = async (type: DrillView, range?: { from: string; to: string }) => {
+    if (!type) return;
+    if (type === "commodities" || type === "statistics") {
+      setDrillView(type);
+      return;
+    }
+    // Two quick taps must not open the first statement over the second.
+    const seq = ++statementSeq.current;
+    setOpeningStatement(type);
+    const params = range
+      ? { ...makeParams(), dateFrom: range.from, dateTo: range.to }
+      : makeParams();
+    try {
+      const data = type === "balance-sheet" ? await api.balanceSheetReport(params)
+        : type === "income-statement" ? await api.incomeStatementReport(params)
+        : await api.cashFlowReport(params);
+      if (seq !== statementSeq.current) return;
+      setStatement(data);
+      // Always record the window, not just an override, so the statement can
+      // say what it covers. Without that, a filtered statement is
+      // indistinguishable from an unfiltered one.
+      setStatementRange(range ?? { from: dateFrom, to: dateTo });
+      setDrillView(type);
+    } catch (err) {
+      if (seq !== statementSeq.current) return;
+      setPageError(err instanceof Error ? err.message : String(err));
+    } finally {
+      if (seq === statementSeq.current) setOpeningStatement(null);
+    }
+  };
+
   useEffect(() => {
     if (!navIntent) return;
     if (navIntent.kind === "register") {
       setRegisterAccount(navIntent.account);
-      if (navIntent.dateFrom !== undefined) setDateFrom(navIntent.dateFrom);
-      if (navIntent.dateTo !== undefined) setDateTo(navIntent.dateTo);
+      if (navIntent.dateFrom !== undefined || navIntent.dateTo !== undefined) {
+        setDates(navIntent.dateFrom ?? dateFrom, navIntent.dateTo ?? dateTo);
+      }
       setDrillView(null);
       setTab("register");
     } else if (navIntent.kind === "report-tab") {
@@ -1466,37 +1608,10 @@ export function ReportsPage() {
       openStatement("income-statement", range);
     }
     clearNavIntent();
-    // openStatement is recreated each render; re-running on it would loop.
+    // openStatement and the current dates are read, not depended on: the
+    // intent is the trigger, and re-running on them would loop.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [navIntent, clearNavIntent]);
-
-  const setRegisterFor = (account: string) => {
-    navigate("reports", { kind: "register", account }, { tab: "reports", reportTab: tab });
-  };
-
-  const openStatement = async (type: DrillView, range?: { from: string; to: string }) => {
-    if (!type) return;
-    if (type === "commodities" || type === "statistics") {
-      setDrillView(type);
-      return;
-    }
-    const params = range
-      ? { ...makeParams(), dateFrom: range.from, dateTo: range.to }
-      : makeParams();
-    try {
-      const data = type === "balance-sheet" ? await api.balanceSheetReport(params)
-        : type === "income-statement" ? await api.incomeStatementReport(params)
-        : await api.cashFlowReport(params);
-      setStatement(data);
-      // Always record the window, not just an override, so the statement can
-      // say what it covers. Without that, a filtered statement is
-      // indistinguishable from an unfiltered one.
-      setStatementRange(range ?? { from: dateFrom, to: dateTo });
-      setDrillView(type);
-    } catch (err) {
-      setPageError(err instanceof Error ? err.message : String(err));
-    }
-  };
 
   if (drillView === "commodities") {
     return <CommoditiesView onBack={() => setDrillView(null)} />;
@@ -1515,27 +1630,85 @@ export function ReportsPage() {
     );
   }
 
-  const nwLabel = axisLabel(netWorth);
-  const nwData = netWorth.map((p) => ({ date: nwLabel(p.date), value: parseFloat(p.value) }));
-  const ieData = incomeExpense.map((p) => ({ period: p.period, income: parseFloat(p.income), expenses: parseFloat(p.expenses) }));
-  const pieData = expenseBreakdown.map((s) => ({ name: s.name, value: parseFloat(s.value) }));
-  const pieTotal = pieData.reduce((sum, d) => sum + d.value, 0);
+  return (
+    <ReportsBody
+      {...{
+        tab, setTab, canGoBack, goBack, dateFrom, dateTo, setDates, query, setQuery, showQuery, setShowQuery,
+        forecast, setForecast, chartInterval, setChartInterval, pageError, setPageError, valuation,
+        defaultCurrency, accountList, registerAccount, setRegisterAccount, refreshJournal, loadDashboard,
+        loading, openStatement, openingStatement, netWorth, incomeExpense, expenseBreakdown, expensePath,
+        expensePrefix, expenseBreadcrumbBack, drillIntoExpense, drillHint, setRegisterFor, chart,
+      }}
+    />
+  );
+}
+
+/** The dashboard proper, split out so its chart data memoises on the series
+ *  rather than being rebuilt on every keystroke in the page's controls. */
+function ReportsBody(p: {
+  tab: ReportTab; setTab: (t: ReportTab) => void;
+  canGoBack: boolean; goBack: () => void;
+  dateFrom: string; dateTo: string; setDates: (f: string, t: string) => void;
+  query: string; setQuery: (q: string) => void;
+  showQuery: boolean; setShowQuery: (b: boolean) => void;
+  forecast: boolean; setForecast: (b: boolean) => void;
+  chartInterval: string; setChartInterval: (i: string) => void;
+  pageError: string | null; setPageError: (e: string | null) => void;
+  valuation: api.ValuationInfo | null;
+  defaultCurrency: string; accountList: string[];
+  registerAccount: string; setRegisterAccount: (a: string) => void;
+  refreshJournal: () => void; loadDashboard: () => void;
+  loading: boolean;
+  openStatement: (type: DrillView, range?: { from: string; to: string }) => void;
+  openingStatement: DrillView;
+  netWorth: TimeSeriesPoint[]; incomeExpense: IncomeExpensePoint[]; expenseBreakdown: PieSlice[];
+  expensePath: string[]; expensePrefix: string | null;
+  expenseBreadcrumbBack: (i: number) => void; drillIntoExpense: (c: string) => void;
+  drillHint: string | null; setRegisterFor: (a: string) => void;
+  chart: ReturnType<typeof useChartTheme>;
+}) {
+  const {
+    tab, setTab, canGoBack, goBack, dateFrom, dateTo, setDates, query, setQuery, showQuery, setShowQuery,
+    forecast, setForecast, chartInterval, setChartInterval, pageError, setPageError, valuation,
+    defaultCurrency, accountList, registerAccount, setRegisterAccount, refreshJournal, loadDashboard,
+    loading, openStatement, openingStatement, netWorth, incomeExpense, expenseBreakdown, expensePath,
+    expensePrefix, expenseBreadcrumbBack, drillIntoExpense, drillHint, setRegisterFor, chart,
+  } = p;
+
+  const nwData = useMemo(() => {
+    const label = axisLabel(netWorth);
+    return netWorth.map((pt) => ({ date: label(pt.date), value: parseFloat(pt.value) }));
+  }, [netWorth]);
+  const ieData = useMemo(
+    () => incomeExpense.map((pt) => ({ period: pt.period, income: parseFloat(pt.income), expenses: parseFloat(pt.expenses) })),
+    [incomeExpense]
+  );
+  // The chart needs numbers; the list beside it prints the backend's exact
+  // strings, and the total is summed exactly so it agrees with them.
+  const pieData = useMemo(
+    () => expenseBreakdown.map((sl) => ({ name: sl.name, value: parseFloat(sl.value), text: sl.value })),
+    [expenseBreakdown]
+  );
+  const pieTotalText = useMemo(() => sumQuantities(expenseBreakdown.map((sl) => sl.value)), [expenseBreakdown]);
+  const pieTotal = useMemo(() => pieData.reduce((sum, d) => sum + d.value, 0), [pieData]);
+  // Bars are tappable only when their label names a month; see MONTH_LABEL_RE.
+  const monthlyBars = ieData.length > 0 && ieData.every((pt) => MONTH_LABEL_RE.test(pt.period));
 
   return (
     <div className="flex flex-col h-full">
       <div className="px-4 py-3 border-b border-gray-200 dark:border-gray-700 space-y-2">
         <div className="flex items-center gap-2 min-w-0">
           {canGoBack && (
-            <button onClick={goBack} className="p-1 -ml-1 text-blue-600 dark:text-blue-400 text-sm shrink-0">
+            <button onClick={goBack} aria-label="Back" className="px-1 -ml-1 min-h-[44px] -my-2 text-blue-600 dark:text-blue-400 text-sm shrink-0">
               &larr; Back
             </button>
           )}
           <h1 className="text-lg font-semibold text-gray-900 dark:text-gray-100 truncate">Reports</h1>
         </div>
-        <div className="flex gap-1">
+        <div className="flex gap-1" role="tablist" aria-label="Report">
           {([["overview", "Overview"], ["table", "Table"], ["register", "Account"], ["budget", "Budget"], ["forecast", "Forecast"]] as [ReportTab, string][]).map(([t, label]) => (
-            <button key={t} onClick={() => setTab(t)}
-              className={`flex-1 min-w-0 truncate py-2 text-sm font-medium rounded-lg ${t === tab ? "bg-blue-600 text-white" : "bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400"}`}>
+            <button key={t} onClick={() => setTab(t)} role="tab" aria-selected={t === tab}
+              className={`flex-1 min-w-0 truncate min-h-[44px] px-1 text-sm font-medium rounded-lg ${chipTone(t === tab)}`}>
               {label}
             </button>
           ))}
@@ -1543,43 +1716,28 @@ export function ReportsPage() {
         {/* The Forecast tab has its own horizon control; a second date filter
             would clip the projection and contradict it. */}
         {tab !== "forecast" && (
-          <DateFilter dateFrom={dateFrom} dateTo={dateTo} onChange={(f, t) => { setDateFrom(f); setDateTo(t); }} />
+          <DateFilter dateFrom={dateFrom} dateTo={dateTo} onChange={setDates} />
         )}
         {showQuery || query ? (
-          <div className="flex gap-2 items-center min-w-0">
-            <input
-              type="text"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="acct:expenses cur:EUR not:rent"
-              autoFocus={showQuery && !query}
-              className="flex-1 min-w-0 px-3 py-2 bg-gray-100 dark:bg-gray-800 rounded-lg text-sm text-gray-900 dark:text-gray-100 placeholder-gray-500 dark:placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
-            />
-            <button
-              onClick={() => { setQuery(""); setShowQuery(false); }}
-              className="text-xs text-gray-500 dark:text-gray-400 shrink-0 px-2 py-1"
-            >
-              Clear
-            </button>
-          </div>
+          <QueryFilter query={query} onChange={setQuery} onClear={() => { setQuery(""); setShowQuery(false); }} />
         ) : (
           <button
             onClick={() => setShowQuery(true)}
-            className="self-start text-xs text-blue-600 dark:text-blue-400 py-1"
+            className="self-start text-xs text-blue-600 dark:text-blue-400 min-h-[44px] -my-2 pr-2"
           >
             Filter&hellip;
           </button>
         )}
         {tab === "overview" && (
           <div className="flex items-center justify-between gap-2 min-w-0">
-            <label className="flex items-center gap-1.5 text-xs text-gray-600 dark:text-gray-400 shrink-0">
+            <label className="flex items-center gap-1.5 text-xs text-gray-600 dark:text-gray-400 shrink-0 min-h-[44px]">
               <input type="checkbox" checked={forecast} onChange={(e) => setForecast(e.target.checked)} className="accent-blue-600" />
               Forecast
             </label>
-            <div className="flex gap-1 shrink-0">
+            <div className="flex gap-1 shrink-0" role="group" aria-label="Chart interval">
               {([["", "Auto"], ["daily", "D"], ["weekly", "W"], ["monthly", "M"]] as [string, string][]).map(([val, label]) => (
-                <button key={val || "auto"} onClick={() => setChartInterval(val)}
-                  className={`px-2 py-1 text-xs font-medium rounded ${val === chartInterval ? "bg-blue-600 text-white" : "bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400"}`}>
+                <button key={val || "auto"} onClick={() => setChartInterval(val)} aria-pressed={val === chartInterval}
+                  className={`${CHIP} ${chipTone(val === chartInterval)}`}>
                   {label}
                 </button>
               ))}
@@ -1592,7 +1750,7 @@ export function ReportsPage() {
         {pageError && (
           <div className="mx-4 mt-3 flex items-center justify-between text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/30 px-3 py-2 rounded-lg">
             <span className="min-w-0 break-words">{pageError}</span>
-            <button onClick={() => setPageError(null)} className="text-xs text-red-500 ml-2 shrink-0">Dismiss</button>
+            <button onClick={() => setPageError(null)} className="text-xs text-red-500 ml-2 shrink-0 min-h-[44px] px-2 -my-2 -mr-2">Dismiss</button>
           </div>
         )}
         {valuation && valuation.unconvertible.length > 0 && tab === "overview" && (
@@ -1604,13 +1762,13 @@ export function ReportsPage() {
           </div>
         )}
         {tab === "budget" ? (
-          <div className="p-4"><BudgetView dateFrom={dateFrom} dateTo={dateTo} query={debouncedQuery} currency={defaultCurrency} /></div>
+          <div className="p-4"><BudgetView dateFrom={dateFrom} dateTo={dateTo} query={query} currency={defaultCurrency} /></div>
         ) : tab === "forecast" ? (
-          <div className="p-4"><ForecastView accountList={accountList} query={debouncedQuery} currency={defaultCurrency} /></div>
+          <div className="p-4"><ForecastView accountList={accountList} query={query} currency={defaultCurrency} /></div>
         ) : tab === "table" ? (
-          <div className="p-4"><TableView dateFrom={dateFrom} dateTo={dateTo} query={debouncedQuery} currency={defaultCurrency} /></div>
+          <div className="p-4"><TableView dateFrom={dateFrom} dateTo={dateTo} query={query} currency={defaultCurrency} /></div>
         ) : tab === "register" ? (
-          <div className="p-4"><AccountView accountList={accountList} account={registerAccount} onAccountChange={setRegisterAccount} dateFrom={dateFrom} dateTo={dateTo} query={debouncedQuery} currency={defaultCurrency} onChanged={() => { refreshJournal(); loadDashboard(); }} /></div>
+          <div className="p-4"><AccountView accountList={accountList} account={registerAccount} onAccountChange={setRegisterAccount} dateFrom={dateFrom} dateTo={dateTo} query={query} currency={defaultCurrency} onChanged={() => { refreshJournal(); loadDashboard(); }} /></div>
         ) : loading ? (
           <div className="flex items-center justify-center h-32 text-gray-500 text-sm">Loading...</div>
         ) : (
@@ -1618,8 +1776,10 @@ export function ReportsPage() {
             {/* Statement links */}
             <div className="grid grid-cols-3 gap-2">
               {([["balance-sheet","Balance Sheet"],["income-statement","Income Stmt"],["cash-flow","Cash Flow"],["commodities","Commodities"],["statistics","Statistics"]] as [DrillView,string][]).map(([type,label]) => (
-                <button key={type} onClick={() => openStatement(type)}
-                  className="py-3 bg-gray-50 dark:bg-gray-800 rounded-lg text-sm font-medium text-gray-700 dark:text-gray-300 active:bg-gray-100 dark:active:bg-gray-700">{label}</button>
+                <button key={type} onClick={() => openStatement(type)} disabled={openingStatement !== null} aria-busy={openingStatement === type}
+                  className="py-3 min-h-[44px] bg-gray-50 dark:bg-gray-800 rounded-lg text-sm font-medium text-gray-700 dark:text-gray-300 active:bg-gray-100 dark:active:bg-gray-700 disabled:opacity-60">
+                  {openingStatement === type ? "Loading..." : label}
+                </button>
               ))}
             </div>
 
@@ -1630,10 +1790,10 @@ export function ReportsPage() {
                 <div className="bg-gray-50 dark:bg-gray-800 rounded-lg p-2">
                   <ResponsiveContainer width="100%" height={180}>
                     <LineChart data={nwData}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#4b5563" />
-                      <XAxis dataKey="date" tick={{ fontSize: 10, fill: "#9ca3af" }} />
-                      <YAxis tick={{ fontSize: 10, fill: "#9ca3af" }} width={60} />
-                      <Tooltip contentStyle={{ backgroundColor: "#1f2937", border: "none", borderRadius: 8, color: "#f3f4f6" }} />
+                      <CartesianGrid strokeDasharray="3 3" stroke={chart.grid} />
+                      <XAxis dataKey="date" tick={chart.tick} />
+                      <YAxis tick={chart.tick} width={60} />
+                      <Tooltip contentStyle={chart.tooltip} />
                       <Line type="monotone" dataKey="value" stroke="#3b82f6" strokeWidth={2} dot={false} />
                     </LineChart>
                   </ResponsiveContainer>
@@ -1651,25 +1811,25 @@ export function ReportsPage() {
                     <BarChart
                       data={ieData}
                       stackOffset="sign"
-                      style={{ cursor: "pointer" }}
-                      onClick={(e) => {
+                      style={monthlyBars ? { cursor: "pointer" } : undefined}
+                      onClick={monthlyBars ? (e) => {
                         const period = e?.activeLabel;
-                        if (typeof period === "string" && period)
+                        if (typeof period === "string" && MONTH_LABEL_RE.test(period))
                           openStatement("income-statement", monthRange(period));
-                      }}
+                      } : undefined}
                     >
-                      <CartesianGrid strokeDasharray="3 3" stroke="#4b5563" />
-                      <XAxis dataKey="period" tick={{ fontSize: 10, fill: "#9ca3af" }} />
-                      <YAxis tick={{ fontSize: 10, fill: "#9ca3af" }} width={60} />
-                      <Tooltip contentStyle={{ backgroundColor: "#1f2937", border: "none", borderRadius: 8, color: "#f3f4f6" }} />
+                      <CartesianGrid strokeDasharray="3 3" stroke={chart.grid} />
+                      <XAxis dataKey="period" tick={chart.tick} />
+                      <YAxis tick={chart.tick} width={60} />
+                      <Tooltip contentStyle={chart.tooltip} />
                       <Legend wrapperStyle={{ fontSize: 11 }} />
-                      <ReferenceLine y={0} stroke="#6b7280" />
+                      <ReferenceLine y={0} stroke={chart.zeroLine} />
                       <Bar dataKey="income" fill="#22c55e" name="Income" stackId="s" radius={[2,2,0,0]} />
                       <Bar dataKey="expenses" fill="#ef4444" name="Expenses" stackId="s" radius={[0,0,2,2]} />
                     </BarChart>
                   </ResponsiveContainer>
                 </div>
-                <p className="text-xs text-gray-400 dark:text-gray-500 mt-1 text-center">Tap a month for its income statement</p>
+                {monthlyBars && <p className="text-xs text-gray-400 dark:text-gray-500 mt-1 text-center">Tap a month for its income statement</p>}
                 {forecast && <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">includes forecast from periodic transactions</p>}
               </div>
             )}
@@ -1680,12 +1840,12 @@ export function ReportsPage() {
                 <h2 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-2">Expense Breakdown</h2>
                 {expensePath.length > 0 && (
                   <div className="flex items-center gap-1 mb-2 text-xs flex-wrap">
-                    <button onClick={() => expenseBreadcrumbBack(-1)} className="text-blue-500">All</button>
+                    <button onClick={() => expenseBreadcrumbBack(-1)} className="text-blue-500 min-h-[44px] px-1">All</button>
                     {expensePath.map((part, i) => (
                       <span key={i} className="flex items-center gap-1">
                         <span className="text-gray-400">/</span>
-                        <button onClick={() => expenseBreadcrumbBack(i)}
-                          className={i === expensePath.length - 1 ? "text-gray-700 dark:text-gray-300 font-medium" : "text-blue-500"}>{part}</button>
+                        <button onClick={() => expenseBreadcrumbBack(i)} aria-current={i === expensePath.length - 1 ? "location" : undefined}
+                          className={`min-h-[44px] px-1 ${i === expensePath.length - 1 ? "text-gray-700 dark:text-gray-300 font-medium" : "text-blue-500"}`}>{part}</button>
                       </span>
                     ))}
                   </div>
@@ -1697,8 +1857,8 @@ export function ReportsPage() {
                         onClick={(_, index) => drillIntoExpense(pieData[index].name)} style={{ cursor: "pointer" }}>
                         {pieData.map((_, i) => <Cell key={i} fill={COLORS[i % COLORS.length]} />)}
                       </Pie>
-                      <Tooltip contentStyle={{ backgroundColor: "#1f2937", border: "none", borderRadius: 8, color: "#f3f4f6" }}
-                        formatter={(value) => Number(value).toLocaleString(undefined, { minimumFractionDigits: 2 })} />
+                      <Tooltip contentStyle={chart.tooltip}
+                        formatter={(value, _name, item) => formatAmount(String((item?.payload as { text?: string } | undefined)?.text ?? value), defaultCurrency)} />
                     </PieChart>
                   </ResponsiveContainer>
                   <div className="mt-2 divide-y divide-gray-200 dark:divide-gray-700 min-w-0">
@@ -1714,13 +1874,13 @@ export function ReportsPage() {
                           disabled={isAggregate}
                           onClick={() => setRegisterFor(account)}
                           title={isAggregate ? "Aggregate of smaller categories" : `Show ${account} transactions`}
-                          className="w-full py-2 flex items-center gap-2 min-w-0 text-left disabled:opacity-60"
+                          className="w-full py-2 min-h-[44px] flex items-center gap-2 min-w-0 text-left disabled:opacity-60"
                         >
                           <span className="w-2.5 h-2.5 rounded-sm shrink-0" style={{ backgroundColor: COLORS[i % COLORS.length] }} />
                           <span className="flex-1 min-w-0 truncate text-sm text-gray-800 dark:text-gray-200">{item.name}</span>
                           <span className="text-xs text-gray-400 shrink-0 w-9 text-right">{pct}%</span>
                           <span className="text-sm font-mono shrink-0 text-gray-800 dark:text-gray-200">
-                            {fmtBudgetAmt(String(item.value), defaultCurrency)}
+                            {formatAmount(item.text, defaultCurrency)}
                           </span>
                         </button>
                       );
@@ -1729,7 +1889,7 @@ export function ReportsPage() {
                       <span className="w-2.5 shrink-0" />
                       <span className="flex-1 min-w-0 text-sm text-gray-900 dark:text-gray-100">Total</span>
                       <span className="text-sm font-mono shrink-0 text-gray-900 dark:text-gray-100">
-                        {fmtBudgetAmt(String(pieTotal), defaultCurrency)}
+                        {formatAmount(pieTotalText, defaultCurrency)}
                       </span>
                     </div>
                   </div>
@@ -1739,8 +1899,8 @@ export function ReportsPage() {
               </div>
             )}
 
-            {/* Account Growth */}
-            {nwData.length === 0 && ieData.length === 0 && pieData.length === 0 && (
+            {/* Empty, as opposed to failed: an error already explains itself. */}
+            {!pageError && nwData.length === 0 && ieData.length === 0 && pieData.length === 0 && (
               <div className="text-center text-gray-500 text-sm py-8">Add transactions to see reports</div>
             )}
           </div>

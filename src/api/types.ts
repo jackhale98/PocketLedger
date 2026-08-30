@@ -25,8 +25,11 @@ export interface TransactionSummary {
 /** Mirrors the Rust PostingSummary struct */
 export interface PostingSummary {
   account: string;
+  /** First amount, kept for callers that show one figure */
   amount: string | null;
   commodity: string | null;
+  /** Every amount on the posting; more than one for multi-commodity postings */
+  amounts?: AmountEntry[];
   comment: string | null;
 }
 
@@ -351,6 +354,8 @@ export interface ForecastRule {
   description: string;
   /** Source line of the rule; use for replace/delete */
   line: number;
+  /** Index into listJournalFiles() of the file holding the rule */
+  fileIndex: number;
   postings: ForecastPosting[];
   /** Set when the period expression can't be honored; the rule generates nothing */
   error: string | null;

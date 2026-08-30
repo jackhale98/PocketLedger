@@ -45,6 +45,10 @@ pub struct ResolvedTransaction {
     pub description: String,
     pub comment: Option<String>,
     pub postings: Vec<ResolvedPosting>,
+    /// True when the transaction could not be balanced and was kept as
+    /// written (lenient mode). Its amounts are what the file says; postings
+    /// with no amount are zero. A warning carries the detail.
+    pub unbalanced: bool,
 }
 
 /// A non-fatal problem discovered while resolving: shown to the user, never
@@ -62,14 +66,62 @@ pub struct ResolveResult {
     pub warnings: Vec<ResolveWarning>,
 }
 
+/// How to treat a transaction that cannot be balanced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolveOptions {
+    /// `true`: an unbalanced transaction (or one with two elided amounts) is
+    /// a hard error, like hledger — right for validating an edit before it
+    /// is written. `false`: it becomes a warning and the transaction is kept
+    /// as written and marked [`ResolvedTransaction::unbalanced`], so a
+    /// journal with one bad entry still opens in the editor.
+    pub strict: bool,
+}
+
+impl Default for ResolveOptions {
+    fn default() -> Self {
+        Self { strict: true }
+    }
+}
+
+impl ResolveOptions {
+    pub const STRICT: ResolveOptions = ResolveOptions { strict: true };
+    pub const LENIENT: ResolveOptions = ResolveOptions { strict: false };
+}
+
 /// Process a journal's transactions: apply auto posting rules, infer missing
 /// amounts (including balance assignments), validate balancing per hledger's
-/// rules, and check balance assertions in date order.
+/// rules, and check balance assertions in date order. Strict: an unbalanced
+/// transaction is an error.
 pub fn resolve_transactions(journal: &Journal) -> Result<Vec<ResolvedTransaction>, LedgerError> {
     resolve_journal(journal).map(|r| r.transactions)
 }
 
+/// Strict resolution (see [`ResolveOptions`]).
 pub fn resolve_journal(journal: &Journal) -> Result<ResolveResult, LedgerError> {
+    resolve_journal_with(journal, ResolveOptions::STRICT)
+}
+
+/// Lenient resolution: never fails on the journal's content. Unbalanced
+/// transactions are kept as written, marked, and reported as warnings.
+pub fn resolve_journal_lenient(journal: &Journal) -> ResolveResult {
+    match resolve_journal_with(journal, ResolveOptions::LENIENT) {
+        Ok(result) => result,
+        // Lenient mode converts every content problem to a warning; this
+        // arm is unreachable but keeps the signature honest.
+        Err(e) => ResolveResult {
+            transactions: Vec::new(),
+            warnings: vec![ResolveWarning {
+                line: 0,
+                message: e.to_string(),
+            }],
+        },
+    }
+}
+
+pub fn resolve_journal_with(
+    journal: &Journal,
+    opts: ResolveOptions,
+) -> Result<ResolveResult, LedgerError> {
     let mut warnings: Vec<ResolveWarning> = Vec::new();
 
     let transactions: Vec<&Transaction> = journal
@@ -90,93 +142,155 @@ pub fn resolve_journal(journal: &Journal) -> Result<ResolveResult, LedgerError> 
         })
         .collect();
 
-    // Sort by date first (stable: parse order preserved within a date) so that
-    // balance assignments and assertions see running balances in date order.
+    // Sort by date first (stable: parse order preserved within a date).
     let mut order: Vec<usize> = (0..transactions.len()).collect();
     order.sort_by_key(|&i| transactions[i].date);
 
-    let mut resolved: Vec<ResolvedTransaction> = Vec::new();
+    // Balance assignments and assertions see running balances in *posting*
+    // date order, like hledger: a posting tagged `date:2024-01-20` inside a
+    // 2024-01-10 transaction does not count towards an assertion dated
+    // 2024-01-15. Every posting is streamed by (posting date, transaction
+    // date order, posting order), and a transaction is resolved when its
+    // first posting comes up.
+    let mut stream: Vec<(NaiveDate, usize, usize)> = Vec::new();
+    for (pos, &idx) in order.iter().enumerate() {
+        let txn = transactions[idx];
+        for (p_idx, posting) in txn.postings.iter().enumerate() {
+            stream.push((posting.date.unwrap_or(txn.date), pos, p_idx));
+        }
+    }
+    stream.sort();
+
+    let mut resolved: Vec<Option<ResolvedTransaction>> = vec![None; order.len()];
     // Running balance per account (exclusive of subaccounts).
     let mut running: BTreeMap<String, MixedAmount> = BTreeMap::new();
 
-    for &idx in &order {
+    let resolve_at = |pos: usize,
+                          running: &mut BTreeMap<String, MixedAmount>,
+                          warnings: &mut Vec<ResolveWarning>|
+     -> Result<ResolvedTransaction, LedgerError> {
+        let idx = order[pos];
         let txn = transactions[idx];
-        let mut resolved_txn = resolve_transaction(txn, idx, &running)?;
+        let mut resolved_txn = match resolve_transaction(txn, idx, running) {
+            Ok(r) => r,
+            Err(e) if !opts.strict => {
+                warnings.push(ResolveWarning {
+                    line: txn.span.line,
+                    message: e.to_string(),
+                });
+                unbalanced_as_written(txn, idx)
+            }
+            Err(e) => return Err(e),
+        };
 
         // Apply auto posting rules (after inference, like hledger --auto).
         for rule in &auto_rules {
-            apply_auto_rule(rule, txn, &mut resolved_txn, &mut warnings);
+            apply_auto_rule(rule, txn, &mut resolved_txn, warnings);
         }
 
-        // Update running balances and check assertions in posting order.
-        for (p_idx, posting) in resolved_txn.postings.iter().enumerate() {
+        // Generated postings carry no assertions; they join the running
+        // balances as soon as the transaction exists.
+        for posting in resolved_txn.postings.iter().filter(|p| p.generated) {
             let balance = running
                 .entry(posting.account.full.clone())
                 .or_insert_with(MixedAmount::zero);
-            balance.add_mixed(&posting.amount);
+            if let Err(e) = balance.try_add_mixed(&posting.amount) {
+                warnings.push(ResolveWarning {
+                    line: txn.span.line,
+                    message: format!("{} (running balance of {})", e, posting.account.full),
+                });
+            }
+        }
+        Ok(resolved_txn)
+    };
 
-            // Assertion checking needs the AST posting (skip generated ones).
-            let Some(ast_posting) = txn.postings.get(p_idx) else {
-                continue;
-            };
-            if let Some(ref assertion) = ast_posting.balance_assertion {
-                let actual = if assertion.inclusive {
-                    // Include subaccounts.
-                    let prefix = format!("{}:", posting.account.full);
-                    let mut total = running
-                        .get(&posting.account.full)
-                        .cloned()
-                        .unwrap_or_default();
-                    for (acct, amt) in running.iter() {
-                        if acct.starts_with(&prefix) {
-                            total.add_mixed(amt);
-                        }
-                    }
-                    total
-                } else {
-                    running
-                        .get(&posting.account.full)
-                        .cloned()
-                        .unwrap_or_default()
-                };
+    for &(_, pos, p_idx) in &stream {
+        if resolved[pos].is_none() {
+            resolved[pos] = Some(resolve_at(pos, &mut running, &mut warnings)?);
+        }
+        let txn = transactions[order[pos]];
+        let resolved_txn = resolved[pos].as_ref().expect("resolved above");
+        let Some(posting) = resolved_txn.postings.get(p_idx) else {
+            continue;
+        };
+        let ast_posting = &txn.postings[p_idx];
+        let line = ast_posting.span.line.max(txn.span.line);
 
-                let got = actual.get(&assertion.commodity);
-                let tolerance = tolerance_for_precision(assertion.style.precision);
-                if (got - assertion.quantity).abs() > tolerance {
+        let balance = running
+            .entry(posting.account.full.clone())
+            .or_insert_with(MixedAmount::zero);
+        if let Err(e) = balance.try_add_mixed(&posting.amount) {
+            warnings.push(ResolveWarning {
+                line,
+                message: format!("{} (running balance of {})", e, posting.account.full),
+            });
+        }
+
+        let Some(assertion) = &ast_posting.balance_assertion else {
+            continue;
+        };
+        let actual = if assertion.inclusive {
+            // Include subaccounts.
+            let prefix = format!("{}:", posting.account.full);
+            let mut total = running
+                .get(&posting.account.full)
+                .cloned()
+                .unwrap_or_default();
+            for (acct, amt) in running.iter() {
+                if acct.starts_with(&prefix) {
+                    total.add_mixed(amt);
+                }
+            }
+            total
+        } else {
+            running
+                .get(&posting.account.full)
+                .cloned()
+                .unwrap_or_default()
+        };
+
+        // hledger compares assertions exactly (1.50.3: `$100.404` against
+        // `= $100.40` fails even with a two-decimal commodity directive),
+        // not at the precision the assertion happens to be written in.
+        let got = actual.get(&assertion.commodity);
+        if got != assertion.quantity {
+            warnings.push(ResolveWarning {
+                line,
+                message: format!(
+                    "Balance assertion failed: {} expected {} {}, got {} {}",
+                    posting.account.full,
+                    assertion.quantity,
+                    assertion.commodity,
+                    got,
+                    assertion.commodity,
+                ),
+            });
+        } else if assertion.strong {
+            // `==` also asserts no other commodities are present.
+            for (commodity, qty) in &actual.amounts {
+                if commodity != &assertion.commodity && !qty.is_zero() {
                     warnings.push(ResolveWarning {
-                        line: ast_posting.span.line.max(txn.span.line),
+                        line,
                         message: format!(
-                            "Balance assertion failed: {} expected {} {}, got {} {}",
-                            posting.account.full,
-                            assertion.quantity,
-                            assertion.commodity,
-                            got,
-                            assertion.commodity,
+                            "Strong assertion failed: {} also holds {} {}",
+                            posting.account.full, qty, commodity,
                         ),
                     });
-                } else if assertion.strong {
-                    // `==` also asserts no other commodities are present.
-                    for (commodity, qty) in &actual.amounts {
-                        if commodity != &assertion.commodity && !qty.is_zero() {
-                            warnings.push(ResolveWarning {
-                                line: ast_posting.span.line.max(txn.span.line),
-                                message: format!(
-                                    "Strong assertion failed: {} also holds {} {}",
-                                    posting.account.full, qty, commodity,
-                                ),
-                            });
-                            break;
-                        }
-                    }
+                    break;
                 }
             }
         }
+    }
 
-        resolved.push(resolved_txn);
+    // Transactions without postings never entered the stream.
+    for pos in 0..order.len() {
+        if resolved[pos].is_none() {
+            resolved[pos] = Some(resolve_at(pos, &mut running, &mut warnings)?);
+        }
     }
 
     Ok(ResolveResult {
-        transactions: resolved,
+        transactions: resolved.into_iter().map(|t| t.expect("all resolved")).collect(),
         warnings,
     })
 }
@@ -191,12 +305,25 @@ fn tolerance_for_precision(precision: u8) -> Decimal {
     t
 }
 
+fn overflow(what: impl std::fmt::Display) -> LedgerError {
+    LedgerError::Overflow {
+        message: what.to_string(),
+    }
+}
+
 /// Balancing contribution of a posting: the cost side when a cost is present.
-fn balancing_amount(posting: &Posting) -> Option<MixedAmount> {
-    let amt = posting.amount.as_ref()?;
+fn balancing_amount(posting: &Posting) -> Result<Option<MixedAmount>, LedgerError> {
+    let Some(amt) = posting.amount.as_ref() else {
+        return Ok(None);
+    };
     let quantity = amt.quantity;
-    Some(match &amt.cost {
-        Some(Cost::UnitCost(c)) => MixedAmount::single(&c.commodity, quantity * c.quantity),
+    Ok(Some(match &amt.cost {
+        Some(Cost::UnitCost(c)) => {
+            let total = quantity
+                .checked_mul(c.quantity)
+                .ok_or_else(|| overflow(format!("{} {} @ {} {}", quantity, amt.commodity, c.quantity, c.commodity)))?;
+            MixedAmount::single(&c.commodity, total)
+        }
         Some(Cost::TotalCost(c)) => {
             let cost_total = if quantity.is_sign_negative() {
                 -c.quantity
@@ -206,7 +333,47 @@ fn balancing_amount(posting: &Posting) -> Option<MixedAmount> {
             MixedAmount::single(&c.commodity, cost_total)
         }
         None => MixedAmount::single(&amt.commodity, quantity),
-    })
+    }))
+}
+
+/// A transaction kept exactly as written because it could not be balanced:
+/// explicit amounts stand, elided ones are zero. Only reached in lenient
+/// mode, after the problem has been reported.
+fn unbalanced_as_written(txn: &Transaction, index: usize) -> ResolvedTransaction {
+    let postings = txn
+        .postings
+        .iter()
+        .map(|posting| {
+            let amount = posting
+                .amount
+                .as_ref()
+                .map(|a| MixedAmount::single(&a.commodity, a.quantity))
+                .unwrap_or_default();
+            ResolvedPosting {
+                account: posting.account.clone(),
+                amount,
+                status: effective_status(txn.status, posting.status),
+                date: posting.date.unwrap_or(txn.date),
+                description: txn.description.clone(),
+                transaction_index: index,
+                comment: posting.comment.as_ref().map(|c| c.text.clone()),
+                is_virtual: posting.is_virtual,
+                virtual_balanced: posting.virtual_balanced,
+                generated: false,
+                cost: balancing_amount(posting).ok().flatten(),
+            }
+        })
+        .collect();
+    ResolvedTransaction {
+        date: txn.date,
+        secondary_date: txn.secondary_date,
+        status: txn.status,
+        code: txn.code.clone(),
+        description: txn.description.clone(),
+        comment: txn.comment.as_ref().map(|c| c.text.clone()),
+        postings,
+        unbalanced: true,
+    }
 }
 
 /// Resolve a single transaction: compute balance assignments, infer missing
@@ -239,21 +406,26 @@ fn resolve_transaction(
     // from running balances.
     let mut amounts: Vec<Option<MixedAmount>> = Vec::with_capacity(txn.postings.len());
     for posting in &txn.postings {
-        if posting.amount.is_some() {
-            amounts.push(Some(MixedAmount::single(
-                &posting.amount.as_ref().unwrap().commodity,
-                posting.amount.as_ref().unwrap().quantity,
-            )));
+        if let Some(amt) = &posting.amount {
+            amounts.push(Some(MixedAmount::single(&amt.commodity, amt.quantity)));
         } else if let Some(assertion) = &posting.balance_assertion {
             // Balance assignment: amount = asserted balance - current balance.
-            let current = running
-                .get(&posting.account.full)
-                .map(|m| m.get(&assertion.commodity))
-                .unwrap_or(Decimal::ZERO);
-            amounts.push(Some(MixedAmount::single(
-                &assertion.commodity,
-                assertion.quantity - current,
-            )));
+            let current = running.get(&posting.account.full).cloned().unwrap_or_default();
+            let delta = assertion
+                .quantity
+                .checked_sub(current.get(&assertion.commodity))
+                .ok_or_else(|| overflow(format!("balance assignment on {}", posting.account.full)))?;
+            let mut amount = MixedAmount::single(&assertion.commodity, delta);
+            if assertion.strong {
+                // `==` assignment: hledger sets the whole balance, so every
+                // other commodity the account holds is zeroed here.
+                for (commodity, qty) in &current.amounts {
+                    if commodity != &assertion.commodity {
+                        amount.try_add(commodity, -*qty)?;
+                    }
+                }
+            }
+            amounts.push(Some(amount));
         } else {
             amounts.push(None);
         }
@@ -301,10 +473,13 @@ fn resolve_transaction(
                 };
                 let prec = max_precision.entry(commodity_of_balance(posting)).or_insert(0);
                 *prec = (*prec).max(this_prec);
-                sum.add_mixed(&balancing_amount(posting).unwrap());
+                let contribution = balancing_amount(posting)?.expect("posting has an amount");
+                sum.try_add_mixed(&contribution)
+                    .map_err(|_| overflow(format!("line {}: the postings' sum", txn.span.line)))?;
             } else if let Some(m) = &amounts[i] {
                 // Balance assignment resolved above.
-                sum.add_mixed(m);
+                sum.try_add_mixed(m)
+                    .map_err(|_| overflow(format!("line {}: the postings' sum", txn.span.line)))?;
             }
         }
 
@@ -361,11 +536,9 @@ fn resolve_transaction(
         }
     }
 
-    let resolved_postings = txn
-        .postings
-        .iter()
-        .zip(amounts.into_iter())
-        .map(|(posting, amount)| ResolvedPosting {
+    let mut resolved_postings = Vec::with_capacity(txn.postings.len());
+    for (posting, amount) in txn.postings.iter().zip(amounts.into_iter()) {
+        resolved_postings.push(ResolvedPosting {
             account: posting.account.clone(),
             amount: amount.unwrap_or_default(),
             status: effective_status(txn.status, posting.status),
@@ -376,9 +549,9 @@ fn resolve_transaction(
             is_virtual: posting.is_virtual,
             virtual_balanced: posting.virtual_balanced,
             generated: false,
-            cost: balancing_amount(posting),
-        })
-        .collect();
+            cost: balancing_amount(posting)?,
+        });
+    }
 
     Ok(ResolvedTransaction {
         date: txn.date,
@@ -388,6 +561,7 @@ fn resolve_transaction(
         description: txn.description.clone(),
         comment: txn.comment.as_ref().map(|c| c.text.clone()),
         postings: resolved_postings,
+        unbalanced: false,
     })
 }
 
@@ -457,7 +631,9 @@ fn apply_auto_rule(
 
     let mut generated: Vec<ResolvedPosting> = Vec::new();
     for posting in &resolved.postings {
-        if posting.generated || posting.is_virtual {
+        // hledger matches virtual postings too (`= expenses:food` fires on
+        // `(expenses:food) $7`); only postings a rule generated are skipped.
+        if posting.generated {
             continue;
         }
         if !patterns.iter().any(|re| re.is_match(&posting.account.full)) {
@@ -473,11 +649,19 @@ fn apply_auto_rule(
             let amount = match &rule_posting.amount {
                 Some(rule_amt) if rule_amt.multiplier => {
                     // Scale the matched posting's amount(s).
-                    let mut m = MixedAmount::zero();
-                    for (commodity, qty) in &posting.amount.amounts {
-                        m.add(commodity, qty * rule_amt.quantity);
+                    match posting.amount.try_scale(rule_amt.quantity) {
+                        Ok(m) => m,
+                        Err(e) => {
+                            warnings.push(ResolveWarning {
+                                line: rule.span.line,
+                                message: format!(
+                                    "auto posting rule '{}' not applied to '{}': {}",
+                                    rule.query, ast_txn.description, e
+                                ),
+                            });
+                            return;
+                        }
                     }
-                    m
                 }
                 Some(rule_amt) => MixedAmount::single(&rule_amt.commodity, rule_amt.quantity),
                 None => {
@@ -823,5 +1007,104 @@ mod tests {
             "2024-01-15 T\n    a  $33.33\n    b  $33.33\n    c  $33.34\n    d  $-100.00\n",
         );
         assert_eq!(txns.len(), 1);
+    }
+
+    #[test]
+    fn assertions_follow_posting_dates() {
+        // hledger 1.50.3: the $10 posting dated 01-20 is not in x's balance
+        // when the 01-15 assertion is checked, so `= $5` holds and `= $15`
+        // fails.
+        let ok = parse_full(
+            "2024-01-10 a\n    x  $10 ; date:2024-01-20\n    y\n\n\
+             2024-01-15 b\n    x  $5 = $5\n    y\n",
+        );
+        assert!(ok.warnings.is_empty(), "warnings: {:?}", ok.warnings);
+        let bad = parse_full(
+            "2024-01-10 a\n    x  $10 ; date:2024-01-20\n    y\n\n\
+             2024-01-15 b\n    x  $5 = $15\n    y\n",
+        );
+        assert_eq!(bad.warnings.len(), 1, "warnings: {:?}", bad.warnings);
+        // Output order is still transaction date order.
+        assert_eq!(bad.transactions[0].description, "a");
+    }
+
+    #[test]
+    fn assertions_are_compared_exactly() {
+        // hledger: `$0 = $100` against $100.40 fails, whatever the precision
+        // the assertion is written in.
+        let r = parse_full("2024-01-01 x\n    a  $100.40\n    b\n\n2024-01-02 y\n    a  $0 = $100\n    b\n");
+        assert_eq!(r.warnings.len(), 1);
+        let r = parse_full("2024-01-01 x\n    a  $100.404\n    b\n\n2024-01-02 y\n    a  $0 = $100.40\n    b\n");
+        assert_eq!(r.warnings.len(), 1);
+        let r = parse_full("2024-01-01 x\n    a  $100.404\n    b\n\n2024-01-02 y\n    a  $0 = $100.404\n    b\n");
+        assert!(r.warnings.is_empty());
+    }
+
+    #[test]
+    fn strong_assignment_zeroes_other_commodities() {
+        // hledger: after `x  == $20`, x holds only $20 (bal x shows no EUR).
+        let r = parse_full(
+            "2024-01-01 a\n    x  $10\n    y\n\n\
+             2024-01-02 b\n    x  5 EUR\n    y\n\n\
+             2024-01-03 c\n    x  == $20\n    y\n",
+        );
+        assert!(r.warnings.is_empty(), "warnings: {:?}", r.warnings);
+        let tree = build_account_tree(&r.transactions);
+        assert_eq!(tree.accounts["x"].balance.get("$"), dec!(20));
+        assert_eq!(tree.accounts["x"].balance.get("EUR"), dec!(0));
+        // The assignment posting itself carried the +$10 and the -5 EUR.
+        let p = &r.transactions[2].postings[0];
+        assert_eq!(p.amount.get("$"), dec!(10));
+        assert_eq!(p.amount.get("EUR"), dec!(-5));
+    }
+
+    #[test]
+    fn auto_rules_match_virtual_postings() {
+        // hledger print --auto: `= expenses:food` fires on `(expenses:food) $7`.
+        let txns = parse_and_resolve(
+            "= expenses:food\n    (budget:food)  *-1\n\n2024-01-01 x\n    (expenses:food)  $7\n",
+        );
+        assert_eq!(txns[0].postings.len(), 2);
+        assert_eq!(txns[0].postings[1].account.full, "budget:food");
+        assert_eq!(txns[0].postings[1].amount.get("$"), dec!(-7));
+    }
+
+    #[test]
+    fn lenient_mode_keeps_unbalanced_transactions_with_a_warning() {
+        let journal = parse(
+            "2024-01-15 Bad\n    expenses:food  $50.00\n    assets:checking  $-40.00\n\n\
+             2024-01-16 Good\n    expenses:food  $1\n    assets:checking\n",
+        )
+        .unwrap();
+        // Strict (the default) still refuses, so edit validation keeps working.
+        assert!(resolve_journal(&journal).is_err());
+
+        let result = resolve_journal_lenient(&journal);
+        assert_eq!(result.transactions.len(), 2);
+        assert!(result.transactions[0].unbalanced);
+        assert!(!result.transactions[1].unbalanced);
+        assert_eq!(result.transactions[0].postings[1].amount.get("$"), dec!(-40));
+        assert_eq!(result.warnings.len(), 1);
+        assert_eq!(result.warnings[0].line, 1);
+        assert!(result.warnings[0].message.contains("Unbalanced"), "{}", result.warnings[0].message);
+    }
+
+    #[test]
+    fn overflow_warns_instead_of_panicking() {
+        let text = "2024-01-01 a\n    x  79228162514264337593543950335 FOO\n    y\n\n\
+                    2024-01-02 b\n    x  79228162514264337593543950335 FOO\n    y\n";
+        let journal = parse(text).unwrap();
+        let result = resolve_journal_lenient(&journal);
+        assert_eq!(result.transactions.len(), 2);
+        assert!(
+            result.warnings.iter().any(|w| w.message.contains("too large")),
+            "warnings: {:?}",
+            result.warnings
+        );
+        // Strict resolution reports the same problem without panicking.
+        let strict = resolve_journal(&journal).unwrap();
+        assert!(!strict.warnings.is_empty());
+        // And a Ledger can still be built over it.
+        assert!(crate::ledger::Ledger::from_journal(&journal).is_ok());
     }
 }

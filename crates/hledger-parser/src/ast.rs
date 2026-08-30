@@ -101,6 +101,15 @@ pub struct AmountStyle {
     pub commodity_spaced: bool,
     pub decimal_mark: char,
     pub precision: u8,
+    /// Digit group mark as written (`,` in `$1,000.00`); `None` when the
+    /// amount was written ungrouped. Preserved so rewrites do not regroup
+    /// or ungroup a journal that is kept under version control.
+    #[serde(default)]
+    pub digit_group_mark: Option<char>,
+    /// Digit group sizes, rightmost first: `[3]` for `1,000,000`, `[3, 2]`
+    /// for Indian `1,00,000`. The last size repeats for higher groups.
+    #[serde(default)]
+    pub digit_group_sizes: Vec<u8>,
 }
 
 impl Default for AmountStyle {
@@ -110,6 +119,22 @@ impl Default for AmountStyle {
             commodity_spaced: false,
             decimal_mark: '.',
             precision: 2,
+            digit_group_mark: None,
+            digit_group_sizes: Vec::new(),
+        }
+    }
+}
+
+impl AmountStyle {
+    /// Merge another observed style of the same commodity into this one the
+    /// way hledger builds a commodity's canonical style: the first-seen side,
+    /// spacing and decimal mark win; precision is the maximum seen; digit
+    /// grouping is taken from the first amount that had any.
+    pub fn absorb(&mut self, other: &AmountStyle) {
+        self.precision = self.precision.max(other.precision);
+        if self.digit_group_mark.is_none() && other.digit_group_mark.is_some() {
+            self.digit_group_mark = other.digit_group_mark;
+            self.digit_group_sizes = other.digit_group_sizes.clone();
         }
     }
 }

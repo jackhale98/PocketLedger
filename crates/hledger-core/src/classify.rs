@@ -19,15 +19,18 @@ pub enum AccountType {
 }
 
 impl AccountType {
-    fn from_tag(value: &str) -> Option<Self> {
-        match value.trim() {
-            "A" | "a" => Some(Self::Asset),
-            "L" | "l" => Some(Self::Liability),
-            "E" | "e" => Some(Self::Equity),
-            "R" | "r" => Some(Self::Revenue),
-            "X" | "x" => Some(Self::Expense),
-            "C" | "c" => Some(Self::Cash),
-            "V" | "v" => Some(Self::Conversion),
+    /// The codes hledger 1.50 accepts in a `type:` tag, case-insensitively:
+    /// "A, L, E, R, X, C, V, Asset, Liability, Equity, Revenue, Expense,
+    /// Cash, Conversion" (its own error message). Plurals are rejected.
+    pub fn from_tag(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "a" | "asset" => Some(Self::Asset),
+            "l" | "liability" => Some(Self::Liability),
+            "e" | "equity" => Some(Self::Equity),
+            "r" | "revenue" => Some(Self::Revenue),
+            "x" | "expense" => Some(Self::Expense),
+            "c" | "cash" => Some(Self::Cash),
+            "v" | "conversion" => Some(Self::Conversion),
             _ => None,
         }
     }
@@ -58,6 +61,15 @@ pub fn retain_postings_of_types(
             (!kept.postings.is_empty()).then_some(kept)
         })
         .collect()
+}
+
+fn cash_name_regex() -> &'static regex::Regex {
+    use std::sync::OnceLock;
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(r"(?i)^assets?(:.+)?:(cash|bank|che(ck|que)(ing)?|savings?|current)(:|$)")
+            .expect("static regex")
+    })
 }
 
 #[derive(Debug, Clone, Default)]
@@ -111,8 +123,11 @@ impl AccountClassifier {
     }
 
     /// True if the account should appear on the cash-flow statement: declared
-    /// Cash type, or an asset whose name suggests liquidity (hledger's
-    /// fallback: cash|bank|checking|savings).
+    /// Cash type, or an asset whose name matches hledger's fallback regex
+    /// `^assets?(:.+)?:(cash|bank|che(ck|que)(ing)?|savings?|current)(:|$)`
+    /// (verified with `hledger accounts --types` 1.50.3: `assets:wallet` and
+    /// `assets:bankruptcy` are plain assets, `assets:investments:cash` and
+    /// `asset:bank` are cash).
     pub fn is_cash(&self, account: &str) -> bool {
         // A declared type anywhere in the ancestry decides.
         let mut current = account;
@@ -128,10 +143,7 @@ impl AccountClassifier {
         if self.classify(account) != AccountType::Asset {
             return false;
         }
-        let lower = account.to_lowercase();
-        ["cash", "bank", "checking", "savings", "wallet"]
-            .iter()
-            .any(|kw| lower.contains(kw))
+        cash_name_regex().is_match(account)
     }
 
     /// True if there are any explicit declarations (used to decide whether
@@ -215,12 +227,48 @@ mod tests {
     }
 
     #[test]
+    fn full_word_type_tags_are_accepted_case_insensitively() {
+        // `hledger accounts --types` 1.50.3 on these declarations.
+        let journal = parse(concat!(
+            "account vault  ; type: Asset\n",
+            "account loan  ; type: LIABILITY\n",
+            "account owner  ; type: equity\n",
+            "account sales  ; type: Revenue\n",
+            "account rent  ; type:Expense\n",
+            "account till  ; type: Cash\n",
+            "account fx  ; type: Conversion\n",
+            "account plural  ; type: Assets\n",
+        ))
+        .unwrap();
+        let c = AccountClassifier::from_journal(&journal);
+        assert_eq!(c.classify("vault"), AccountType::Asset);
+        assert_eq!(c.classify("loan"), AccountType::Liability);
+        assert_eq!(c.classify("owner"), AccountType::Equity);
+        assert_eq!(c.classify("sales"), AccountType::Revenue);
+        assert_eq!(c.classify("rent"), AccountType::Expense);
+        assert_eq!(c.classify("till"), AccountType::Cash);
+        assert_eq!(c.classify("fx"), AccountType::Conversion);
+        // hledger rejects "Assets" outright; we ignore the declaration.
+        assert_eq!(c.classify("plural"), AccountType::Unknown);
+    }
+
+    #[test]
     fn cash_detection() {
         let c = AccountClassifier::default();
         assert!(c.is_cash("assets:bank:checking"));
         assert!(c.is_cash("assets:cash"));
         assert!(!c.is_cash("assets:investments:etrade"));
         assert!(!c.is_cash("expenses:food"));
+        // hledger's fallback regex, checked with `accounts --types`.
+        assert!(c.is_cash("assets:cheque"));
+        assert!(c.is_cash("assets:current"));
+        assert!(c.is_cash("assets:saving"));
+        assert!(c.is_cash("assets:investments:cash"));
+        assert!(c.is_cash("asset:bank"));
+        assert!(c.is_cash("Assets:Bank:Foo"));
+        assert!(!c.is_cash("assets:wallet"));
+        assert!(!c.is_cash("assets:bankruptcy"));
+        assert!(!c.is_cash("assets"));
 
         let journal = parse("account assets:broker:sweep  ; type:C\n").unwrap();
         let c = AccountClassifier::from_journal(&journal);

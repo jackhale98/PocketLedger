@@ -208,6 +208,10 @@ pub struct ForecastRule {
     pub description: String,
     /// Source line of the `~` rule; pass back to replace or delete it.
     pub line: usize,
+    /// Which of the journal's files the rule lives in (0 = main file). Line
+    /// numbers alone are ambiguous once includes are involved; pass this back
+    /// together with `line`.
+    pub file_index: usize,
     pub postings: Vec<ForecastPosting>,
     /// Set when the period expression can't be honored; the rule generates
     /// nothing and the message says why.
@@ -227,8 +231,15 @@ pub struct ForecastPosting {
 /// included with an `error` rather than dropped, so the UI can offer to fix
 /// them instead of silently losing them.
 pub fn extract_rules(journal: &Journal) -> Vec<ForecastRule> {
+    extract_rules_with_files(journal, &[])
+}
+
+/// As [`extract_rules`], with `item_files` mapping each journal item to the
+/// index of the file it came from (parallel to `journal.items`). Items
+/// beyond the slice are attributed to file 0.
+pub fn extract_rules_with_files(journal: &Journal, item_files: &[usize]) -> Vec<ForecastRule> {
     let mut rules = Vec::new();
-    for item in &journal.items {
+    for (item_idx, item) in journal.items.iter().enumerate() {
         let JournalItem::PeriodicTransaction(pt) = item else {
             continue;
         };
@@ -242,6 +253,7 @@ pub fn extract_rules(journal: &Journal) -> Vec<ForecastRule> {
             period: pt.period.clone(),
             description: pt.description.clone(),
             line: pt.span.line,
+            file_index: item_files.get(item_idx).copied().unwrap_or(0),
             postings: pt
                 .postings
                 .iter()

@@ -1,0 +1,24 @@
+; Comma as decimal mark, with P price lines for the same commodity.
+; hledger reads 3,50 EUR as 3.50 -- a P line says nothing about number style.
+decimal-mark ,
+
+commodity 1.000,00 EUR
+
+P 2024-01-01 EUR $1,10
+P 2024-02-01 EUR $1,12
+
+2024-01-02 Coffee
+    expenses:food                   3,50 EUR
+    assets:bank
+
+2024-01-03 Rent
+    expenses:rent               1.234,56 EUR
+    assets:bank
+
+2024-01-04 Salary
+    assets:bank                 2.000,00 EUR
+    income:salary
+
+2024-01-05 Small change
+    expenses:misc                   0,75 EUR
+    assets:cash

@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import * as api from "../../api/commands";
-import { formatAmount } from "../../utils/format";
+import { amountTone, formatAmount } from "../../utils/format";
 import type { CsvPreviewTransaction } from "../../api/types";
 import { useBackHandler } from "../../store/backStore";
 
@@ -96,8 +96,6 @@ export function CsvImportFlow({ onDone }: { onDone: () => void }) {
     }
   };
 
-  const fmtAmt = formatAmount;
-
   // Stashed copies are prefixed with a numeric nonce; show the original name.
   const fileName = (path: string) => {
     const base = path.split("/").pop()?.split("\\").pop() ?? path;
@@ -120,7 +118,8 @@ export function CsvImportFlow({ onDone }: { onDone: () => void }) {
             if (step === "preview") setStep("pick-files");
             else onDone();
           }}
-          className="p-2 -ml-2 text-gray-600 dark:text-gray-300"
+          aria-label="Back"
+          className="p-2 -ml-2 min-w-[44px] min-h-[44px] text-gray-600 dark:text-gray-300"
         >
           &larr;
         </button>
@@ -165,7 +164,7 @@ export function CsvImportFlow({ onDone }: { onDone: () => void }) {
             <button
               onClick={handlePreview}
               disabled={!csvPath || !rulesPath || loading}
-              className="w-full py-3 bg-blue-600 text-white rounded-lg text-sm font-medium disabled:opacity-50"
+              className="w-full py-3 min-h-[48px] bg-blue-600 text-white rounded-lg text-sm font-medium disabled:opacity-50"
             >
               {loading ? "Reading..." : "Preview Import"}
             </button>
@@ -178,7 +177,7 @@ export function CsvImportFlow({ onDone }: { onDone: () => void }) {
               <div className="text-sm text-gray-600 dark:text-gray-400">
                 {previewTxns.length} transactions from {rowsProcessed} rows
               </div>
-              <button onClick={toggleAll} className="text-xs text-blue-600 dark:text-blue-400 font-medium">
+              <button onClick={toggleAll} className="text-xs text-blue-600 dark:text-blue-400 font-medium min-h-[44px] px-2 -mr-2">
                 {selected.size === previewTxns.length ? "Deselect All" : "Select All"}
               </button>
             </div>
@@ -202,7 +201,9 @@ export function CsvImportFlow({ onDone }: { onDone: () => void }) {
                 <button
                   key={i}
                   onClick={() => toggleSelect(i)}
-                  className="w-full py-2.5 flex items-start gap-3 text-left"
+                  role="checkbox"
+                  aria-checked={selected.has(i)}
+                  className="w-full py-2.5 min-h-[44px] flex items-start gap-3 text-left"
                 >
                   <div className={`w-5 h-5 mt-0.5 rounded border-2 shrink-0 flex items-center justify-center ${
                     selected.has(i)
@@ -224,10 +225,8 @@ export function CsvImportFlow({ onDone }: { onDone: () => void }) {
                         )}
                         <span className="truncate" title={txn.description}>{txn.description}</span>
                       </span>
-                      <span className={`text-sm font-mono shrink-0 ml-2 ${
-                        parseFloat(txn.amount) < 0 ? "text-red-500" : "text-green-500"
-                      }`}>
-                        {fmtAmt(txn.amount, txn.commodity)}
+                      <span className={`text-sm font-mono shrink-0 ml-2 ${amountTone(txn.amount)}`}>
+                        {formatAmount(txn.amount, txn.commodity)}
                       </span>
                     </div>
                     <div className="text-xs text-gray-500 dark:text-gray-400">

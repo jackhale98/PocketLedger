@@ -1,11 +1,13 @@
 import { useState, useEffect } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
+import { getVersion } from "@tauri-apps/api/app";
 import { useSettingsStore, type Theme } from "../store/settingsStore";
 import { useJournalStore } from "../store/journalStore";
 import { ReconciliationFlow } from "../components/reconciliation/ReconciliationFlow";
 import { RecurringEditor } from "../components/recurring/RecurringEditor";
 import { CsvImportFlow } from "../components/csv/CsvImportFlow";
 import { MobileJournalPicker } from "../components/common/MobileJournalPicker";
+import { TransactionEditorSheet } from "../components/transactions/TransactionEditorSheet";
 import { getPlatformInfo } from "../utils/platform";
 import { useBackHandler } from "../store/backStore";
 
@@ -29,7 +31,7 @@ const THEME_OPTIONS: { value: Theme; label: string }[] = [
 ];
 
 export function MorePage() {
-  const { defaultCurrency, setDefaultCurrency, theme, setTheme, setLastJournalPath, incognito, setIncognito } = useSettingsStore();
+  const { defaultCurrency, setDefaultCurrency, theme, setTheme, setLastJournalPath, incognito, setIncognito, inferMarketPrices, setInferMarketPrices } = useSettingsStore();
   const { refresh, summary, switchJournal, openJournal, currentPath } = useJournalStore();
   const [customCurrency, setCustomCurrency] = useState("");
   const [showCustom, setShowCustom] = useState(false);
@@ -40,12 +42,18 @@ export function MorePage() {
   useBackHandler(showJournalPicker, () => setShowJournalPicker(false));
   const [isMobile, setIsMobile] = useState(false);
   const [storageDir, setStorageDir] = useState("");
+  // Transaction opened from the reconciliation checklist's Edit button. The
+  // editor sheet sits over the flow, which keeps its session while it waits.
+  const [editIndex, setEditIndex] = useState<number | null>(null);
+  const [version, setVersion] = useState<string | null>(null);
 
   useEffect(() => {
     getPlatformInfo().then((info) => {
       setIsMobile(info.isMobile);
       setStorageDir(info.storageDir);
     });
+    // Outside Tauri (a browser dev preview) there is no app to ask.
+    getVersion().then(setVersion).catch(() => setVersion(null));
   }, []);
 
   const handleCustomSubmit = async () => {
@@ -97,7 +105,8 @@ export function MorePage() {
         <div className="flex items-center gap-2 px-4 py-3 border-b border-gray-200 dark:border-gray-700">
           <button
             onClick={() => setShowJournalPicker(false)}
-            className="p-2 -ml-2 text-gray-600 dark:text-gray-300"
+            aria-label="Back"
+            className="p-2 -ml-2 min-w-[44px] min-h-[44px] text-gray-600 dark:text-gray-300"
           >
             &larr;
           </button>
@@ -122,13 +131,29 @@ export function MorePage() {
   }
 
   if (showReconciliation) {
+    // The flow stays mounted (hidden) under the editor so its checklist and
+    // backend session survive the edit; remounting would restart at setup
+    // with the old session still open.
     return (
-      <ReconciliationFlow
-        onDone={() => {
-          setShowReconciliation(false);
-          refresh();
-        }}
-      />
+      <div className="h-full">
+        <div hidden={editIndex !== null} className="h-full">
+          <ReconciliationFlow
+            onDone={() => {
+              setShowReconciliation(false);
+              refresh();
+            }}
+            onEditTransaction={setEditIndex}
+          />
+        </div>
+        {editIndex !== null && (
+          <TransactionEditorSheet
+            index={editIndex}
+            defaultCurrency={defaultCurrency}
+            onClose={() => setEditIndex(null)}
+            onChanged={refresh}
+          />
+        )}
+      </div>
     );
   }
 
@@ -230,6 +255,7 @@ export function MorePage() {
               <button
                 key={opt.value}
                 onClick={() => setTheme(opt.value)}
+                aria-pressed={theme === opt.value}
                 className={`flex-1 py-2.5 text-sm rounded-lg border min-h-[44px] ${
                   theme === opt.value
                     ? "border-blue-500 bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400 font-medium"
@@ -251,6 +277,8 @@ export function MorePage() {
           </h2>
           <button
             onClick={() => setIncognito(!incognito)}
+            role="switch"
+            aria-checked={incognito}
             className="w-full px-4 py-3 bg-gray-50 dark:bg-gray-800 rounded-lg text-sm text-left text-gray-900 dark:text-gray-100 active:bg-gray-100 dark:active:bg-gray-700 min-h-[48px] flex items-center justify-between gap-2"
           >
             <div className="min-w-0">
@@ -260,6 +288,7 @@ export function MorePage() {
               </div>
             </div>
             <span
+              aria-hidden="true"
               className={`shrink-0 w-11 h-6 rounded-full transition-colors ${
                 incognito ? "bg-blue-600" : "bg-gray-300 dark:bg-gray-600"
               }`}
@@ -267,6 +296,40 @@ export function MorePage() {
               <span
                 className={`block w-5 h-5 mt-0.5 rounded-full bg-white transition-transform ${
                   incognito ? "translate-x-[22px]" : "translate-x-0.5"
+                }`}
+              />
+            </span>
+          </button>
+        </div>
+
+        <div className="h-2 bg-gray-100 dark:bg-gray-800" />
+
+        {/* Valuation */}
+        <div className="px-4 py-4">
+          <h2 className="text-sm font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wide mb-3">
+            Valuation
+          </h2>
+          <button
+            onClick={() => setInferMarketPrices(!inferMarketPrices)}
+            role="switch"
+            aria-checked={inferMarketPrices}
+            className="w-full px-4 py-3 bg-gray-50 dark:bg-gray-800 rounded-lg text-sm text-left text-gray-900 dark:text-gray-100 active:bg-gray-100 dark:active:bg-gray-700 min-h-[48px] flex items-center justify-between gap-2"
+          >
+            <div className="min-w-0">
+              <div className="font-medium">Infer prices from costs</div>
+              <div className="text-xs text-gray-500 dark:text-gray-400">
+                Use @ costs as market prices, like hledger --infer-market-prices. Off matches the CLI's defaults.
+              </div>
+            </div>
+            <span
+              aria-hidden="true"
+              className={`shrink-0 w-11 h-6 rounded-full transition-colors ${
+                inferMarketPrices ? "bg-blue-600" : "bg-gray-300 dark:bg-gray-600"
+              }`}
+            >
+              <span
+                className={`block w-5 h-5 mt-0.5 rounded-full bg-white transition-transform ${
+                  inferMarketPrices ? "translate-x-[22px]" : "translate-x-0.5"
                 }`}
               />
             </span>
@@ -327,13 +390,19 @@ export function MorePage() {
                   value={customCurrency}
                   onChange={(e) => setCustomCurrency(e.target.value)}
                   placeholder="e.g. NOK, PLN, BRL"
-                  className="flex-1 px-3 py-2 border border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 rounded-lg text-sm"
+                  aria-label="Custom currency"
+                  autoCapitalize="characters"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  enterKeyHint="done"
+                  onKeyDown={(e) => e.key === "Enter" && handleCustomSubmit()}
+                  className="flex-1 min-w-0 px-3 py-2 min-h-[44px] border border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 rounded-lg text-sm"
                   autoFocus
                 />
-                <button onClick={handleCustomSubmit} className="px-4 py-2 bg-blue-600 text-white text-sm rounded-lg font-medium">
+                <button onClick={handleCustomSubmit} className="px-4 min-h-[44px] bg-blue-600 text-white text-sm rounded-lg font-medium">
                   Set
                 </button>
-                <button onClick={() => { setShowCustom(false); setCustomCurrency(""); }} className="px-3 py-2 text-gray-500 text-sm">
+                <button onClick={() => { setShowCustom(false); setCustomCurrency(""); }} className="px-3 min-h-[44px] text-gray-500 text-sm">
                   Cancel
                 </button>
               </div>
@@ -348,7 +417,7 @@ export function MorePage() {
           <h2 className="text-sm font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wide mb-3">
             Current File
           </h2>
-          <div className="text-sm text-gray-600 dark:text-gray-400 space-y-1">
+          <div className="text-sm text-gray-600 dark:text-gray-400 space-y-1 selectable">
             <p className="font-mono text-xs break-all">{summary?.fileName ?? "No file loaded"}</p>
             {summary && (
               <p className="text-xs text-gray-500 dark:text-gray-400">
@@ -409,7 +478,7 @@ export function MorePage() {
             About
           </h2>
           <div className="text-sm text-gray-600 dark:text-gray-400 space-y-1">
-            <p>PocketHLedger v0.2.9</p>
+            <p>PocketHLedger{version ? ` v${version}` : ""}</p>
             <p className="text-xs text-gray-400 dark:text-gray-500">
               Plain text accounting in your pocket
             </p>

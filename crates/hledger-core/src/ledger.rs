@@ -5,7 +5,9 @@ use serde::Serialize;
 use hledger_parser::ast::{Journal, Status};
 
 use crate::account::AccountTree;
-use crate::balance::{build_account_tree, resolve_journal, ResolvedTransaction, ResolveWarning};
+use crate::balance::{
+    build_account_tree, resolve_journal_with, ResolveOptions, ResolvedTransaction, ResolveWarning,
+};
 use crate::classify::AccountClassifier;
 use crate::styles::CommodityStyles;
 use crate::error::LedgerError;
@@ -51,12 +53,52 @@ pub struct PostingViewRef<'a> {
     pub amount: &'a crate::amount::MixedAmount,
 }
 
+/// How a [`Ledger`] is built from a journal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LedgerOptions {
+    /// Strict: an unbalanced transaction is an error (right for validating
+    /// an edit). Lenient: it is kept, marked and warned about, so the file
+    /// still opens.
+    pub resolve: ResolveOptions,
+    /// Use transaction costs (`@`, `@@`) as market prices, like hledger's
+    /// `--infer-market-prices`. hledger's default is `false`.
+    pub infer_market_prices_from_costs: bool,
+}
+
+impl Default for LedgerOptions {
+    fn default() -> Self {
+        Self {
+            resolve: ResolveOptions::STRICT,
+            infer_market_prices_from_costs: true,
+        }
+    }
+}
+
 impl Ledger {
-    /// Create a Ledger from a parsed Journal.
+    /// Create a Ledger from a parsed Journal: strict resolution, costs used
+    /// as market prices (the historical behaviour of this crate).
     pub fn from_journal(journal: &Journal) -> Result<Self, LedgerError> {
-        let result = resolve_journal(journal)?;
+        Self::from_journal_with(journal, LedgerOptions::default())
+    }
+
+    /// Create a Ledger that never refuses a journal for an unbalanced
+    /// transaction: it is kept as written and reported in
+    /// [`warnings`](Self::warnings). Use this to *open* a file, and
+    /// [`from_journal`](Self::from_journal) to *validate* an edit.
+    pub fn from_journal_lenient(journal: &Journal) -> Result<Self, LedgerError> {
+        Self::from_journal_with(
+            journal,
+            LedgerOptions {
+                resolve: ResolveOptions::LENIENT,
+                ..LedgerOptions::default()
+            },
+        )
+    }
+
+    pub fn from_journal_with(journal: &Journal, options: LedgerOptions) -> Result<Self, LedgerError> {
+        let result = resolve_journal_with(journal, options.resolve)?;
         let account_tree = build_account_tree(&result.transactions);
-        let price_db = PriceDb::from_journal(journal);
+        let price_db = PriceDb::from_journal_with(journal, options.infer_market_prices_from_costs);
         let classifier = AccountClassifier::from_journal(journal);
         let styles = CommodityStyles::from_journal(journal);
 

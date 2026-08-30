@@ -19,9 +19,30 @@ body {
   overflow: hidden;
 }
 
-.dark body,
-body.dark {
+.dark body {
   color-scheme: dark;
+}
+
+/* Tap-and-hold on a button or list row must not pop the iOS callout or start
+ * selecting text; readable content (detail views, notes, inputs) opts back in
+ * with .selectable or by being a form control. */
+button,
+[role="button"],
+nav,
+.no-callout {
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+input,
+textarea,
+select,
+.selectable,
+.selectable * {
+  -webkit-user-select: text;
+  user-select: text;
+  -webkit-touch-callout: default;
 }
 
 #root {
@@ -76,6 +97,20 @@ input[type="datetime-local"] {
 .date-field {
   min-width: 0;
   flex: 1 1 0%;
+}
+
+/* Amount tones. Zero is neither; see amountTone() in utils/format.ts. */
+.text-positive {
+  color: #16a34a;
+}
+.dark .text-positive {
+  color: #4ade80;
+}
+.text-negative {
+  color: #dc2626;
+}
+.dark .text-negative {
+  color: #f87171;
 }
 
 /* Incognito: the formatter masks amount text, but chart axis labels, tooltips

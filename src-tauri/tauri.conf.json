@@ -1,5 +1,5 @@
 {
-  "$schema": "https://raw.githubusercontent.com/nicegui/Tauri/tauri-v2/crates/tauri-config-schema/schema.json",
+  "$schema": "https://schema.tauri.app/config/2",
   "productName": "PocketHLedger",
   "version": "0.2.20",
   "identifier": "com.pockethledger.app",
@@ -11,6 +11,9 @@
   },
   "app": {
     "withGlobalTauri": false,
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: asset: http://asset.localhost; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost"
+    },
     "windows": [
       {
         "title": "PocketHLedger",
@@ -33,6 +36,9 @@
     ],
     "iOS": {
       "minimumSystemVersion": "16.0"
+    },
+    "android": {
+      "minSdkVersion": 24
     }
   }
 }

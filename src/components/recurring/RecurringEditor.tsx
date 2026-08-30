@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect } from "react";
 import { Autocomplete } from "../common/Autocomplete";
+import { SignToggle } from "../common/SignToggle";
 import { useSettingsStore } from "../../store/settingsStore";
 import * as api from "../../api/commands";
 import { normalizeAmountInput } from "../../utils/amount";
@@ -40,6 +41,8 @@ export function RecurringEditor({ onDone }: { onDone: () => void }) {
   const [files, setFiles] = useState<JournalFileInfo[]>([]);
   const [fileIndex, setFileIndex] = useState(0);
   const [deletingLine, setDeletingLine] = useState<number | null>(null);
+  /** Rule awaiting a second tap to confirm deletion. */
+  const [confirmDeleteLine, setConfirmDeleteLine] = useState<number | null>(null);
 
   const loadRules = useCallback(async () => {
     try {
@@ -88,9 +91,10 @@ export function RecurringEditor({ onDone }: { onDone: () => void }) {
   };
 
   const handleDelete = async (rule: ForecastRule) => {
+    setConfirmDeleteLine(null);
     try {
       setDeletingLine(rule.line);
-      await api.deleteForecastRule(rule.line);
+      await api.deleteForecastRule(rule.line, rule.fileIndex);
       await loadRules();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -193,9 +197,11 @@ export function RecurringEditor({ onDone }: { onDone: () => void }) {
     return formatAmount(amount, commodity);
   };
 
-  // Mirrors the arrows below: back leaves the form first, then the list.
+  // Mirrors the arrows below: back dismisses a pending confirmation, then
+  // leaves the form, then the list.
   useBackHandler(true, () => {
-    if (editing) setEditing(false);
+    if (confirmDeleteLine !== null) setConfirmDeleteLine(null);
+    else if (editing) setEditing(false);
     else onDone();
   });
 
@@ -204,7 +210,7 @@ export function RecurringEditor({ onDone }: { onDone: () => void }) {
     return (
       <div className="flex flex-col h-full">
         <div className="flex items-center gap-2 px-4 py-3 border-b border-gray-200 dark:border-gray-700">
-          <button onClick={onDone} className="p-2 -ml-2 text-gray-600 dark:text-gray-300">
+          <button onClick={onDone} aria-label="Back" className="p-2 -ml-2 min-w-[44px] min-h-[44px] text-gray-600 dark:text-gray-300">
             &larr;
           </button>
           <h2 className="text-base font-semibold text-gray-900 dark:text-gray-100">Recurring Rules</h2>
@@ -254,28 +260,51 @@ export function RecurringEditor({ onDone }: { onDone: () => void }) {
                       </div>
                       <div className="text-xs text-gray-500 dark:text-gray-400 break-words">{rule.period}</div>
                     </div>
-                    <div className="flex gap-3 shrink-0">
+                    <div className="flex shrink-0 -my-2 -mr-2">
                       <button
                         onClick={() => loadFromExisting(rule)}
-                        className="text-xs text-blue-600 dark:text-blue-400 font-medium"
+                        className="text-xs text-blue-600 dark:text-blue-400 font-medium min-h-[44px] min-w-[44px] px-2"
                       >
                         Edit
                       </button>
                       <button
                         onClick={() => loadFromExisting(rule, true)}
-                        className="text-xs text-blue-600 dark:text-blue-400 font-medium"
+                        className="text-xs text-blue-600 dark:text-blue-400 font-medium min-h-[44px] min-w-[44px] px-2"
                       >
                         Copy
                       </button>
                       <button
-                        onClick={() => handleDelete(rule)}
+                        onClick={() => setConfirmDeleteLine(confirmDeleteLine === rule.line ? null : rule.line)}
                         disabled={deletingLine === rule.line}
-                        className="text-xs text-red-600 dark:text-red-400 font-medium disabled:opacity-50"
+                        aria-expanded={confirmDeleteLine === rule.line}
+                        className="text-xs text-red-600 dark:text-red-400 font-medium min-h-[44px] min-w-[44px] px-2 disabled:opacity-50"
                       >
                         {deletingLine === rule.line ? "Deleting..." : "Delete"}
                       </button>
                     </div>
                   </div>
+                  {confirmDeleteLine === rule.line && (
+                    <div className="space-y-2">
+                      <p className="text-xs text-red-600 dark:text-red-400">
+                        This removes the rule from your journal file.
+                      </p>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => setConfirmDeleteLine(null)}
+                          className="flex-1 min-h-[44px] text-sm font-medium text-gray-600 dark:text-gray-400 rounded-lg border border-gray-300 dark:border-gray-600"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          onClick={() => handleDelete(rule)}
+                          disabled={deletingLine === rule.line}
+                          className="flex-1 min-h-[44px] text-sm font-medium text-white bg-red-600 rounded-lg active:bg-red-700 disabled:opacity-50"
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </div>
+                  )}
                   {rule.error && (
                     <div className="text-xs text-amber-800 dark:text-amber-300 break-words">
                       &#9888; Generates nothing: {rule.error}
@@ -313,7 +342,7 @@ export function RecurringEditor({ onDone }: { onDone: () => void }) {
   return (
     <div className="flex flex-col h-full">
       <div className="flex items-center gap-2 px-4 py-3 border-b border-gray-200 dark:border-gray-700">
-        <button onClick={() => setEditing(false)} className="p-2 -ml-2 text-gray-600 dark:text-gray-300">
+        <button onClick={() => setEditing(false)} aria-label="Back" className="p-2 -ml-2 min-w-[44px] min-h-[44px] text-gray-600 dark:text-gray-300">
           &larr;
         </button>
         <h2 className="text-base font-semibold text-gray-900 dark:text-gray-100">
@@ -351,6 +380,11 @@ export function RecurringEditor({ onDone }: { onDone: () => void }) {
             value={description}
             onChange={(e) => setDescription(e.target.value)}
             placeholder="e.g. Rent"
+            aria-label="Description"
+            autoCapitalize="sentences"
+            autoCorrect="off"
+            spellCheck={false}
+            enterKeyHint="next"
             className="w-full min-h-[48px] px-3 py-2 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg text-sm text-gray-900 dark:text-gray-100"
           />
         </div>
@@ -365,7 +399,8 @@ export function RecurringEditor({ onDone }: { onDone: () => void }) {
               <button
                 key={opt.value}
                 onClick={() => setPeriod(opt.value)}
-                className={`py-2 px-3 text-xs font-medium rounded-lg ${
+                aria-pressed={period === opt.value}
+                className={`py-2 px-3 min-h-[44px] text-xs font-medium rounded-lg ${
                   period === opt.value
                     ? "bg-blue-600 text-white"
                     : "bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400"
@@ -380,6 +415,11 @@ export function RecurringEditor({ onDone }: { onDone: () => void }) {
             value={period}
             onChange={(e) => setPeriod(e.target.value)}
             placeholder="monthly from 2026-01"
+            aria-label="Period expression"
+            autoCapitalize="none"
+            autoCorrect="off"
+            spellCheck={false}
+            enterKeyHint="next"
             className="w-full min-h-[48px] px-3 py-2 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg text-sm font-mono text-gray-900 dark:text-gray-100"
           />
           <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">
@@ -401,30 +441,42 @@ export function RecurringEditor({ onDone }: { onDone: () => void }) {
                 onChange={(v) => updateLine(i, "account", v)}
                 onSuggest={suggestAccounts}
                 placeholder="Account (e.g. expenses:rent)"
+                aria-label={`Posting ${i + 1} account`}
                 className="w-full"
               />
-              <div className="flex gap-2">
+              <div className="flex gap-2 min-w-0">
                 <input
                   type="text"
                   inputMode="decimal"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  enterKeyHint="next"
+                  aria-label={`Posting ${i + 1} amount`}
                   value={line.amount}
                   onChange={(e) => updateLine(i, "amount", e.target.value)}
                   placeholder="Amount (blank = balance)"
-                  className="flex-1 min-w-0 px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-sm text-gray-900 dark:text-gray-100"
+                  className="flex-1 min-w-0 px-3 py-2 min-h-[44px] bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-sm text-gray-900 dark:text-gray-100"
                 />
+                <SignToggle value={line.amount} onChange={(v) => updateLine(i, "amount", v)} />
                 <input
                   type="text"
                   value={line.commodity}
                   onChange={(e) => updateLine(i, "commodity", e.target.value)}
                   placeholder="$"
-                  className="w-16 shrink-0 px-3 py-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-sm text-gray-900 dark:text-gray-100 text-center"
+                  aria-label={`Posting ${i + 1} commodity`}
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  className="w-14 shrink-0 px-1 py-2 min-h-[44px] text-center bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg text-sm text-gray-900 dark:text-gray-100 text-center"
                 />
                 {lines.length > 1 && (
                   <button
                     onClick={() => removeLine(i)}
-                    className="px-3 py-2 shrink-0 text-red-500 text-sm font-medium"
+                    aria-label={`Remove posting ${i + 1}`}
+                    className="px-2 shrink-0 min-h-[44px] min-w-[44px] text-red-500 text-lg font-medium"
                   >
-                    Remove
+                    &times;
                   </button>
                 )}
               </div>

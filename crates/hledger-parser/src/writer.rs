@@ -7,6 +7,9 @@ pub struct WriterConfig {
     pub indent: usize,
     /// Minimum width for account names (right-padded with spaces).
     pub account_width: usize,
+    /// Line terminator: "\n", or "\r\n" for a file that already uses CRLF.
+    /// Mixing the two inside one file is what makes a git diff unreadable.
+    pub line_ending: String,
 }
 
 impl Default for WriterConfig {
@@ -14,11 +17,22 @@ impl Default for WriterConfig {
         Self {
             indent: 4,
             account_width: 36,
+            line_ending: "\n".to_string(),
         }
     }
 }
 
-/// Infer a WriterConfig from existing journal text by examining indentation patterns.
+/// The line terminator a text uses: CRLF if any line ends that way.
+pub fn detect_line_ending(text: &str) -> &'static str {
+    if text.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    }
+}
+
+/// Infer a WriterConfig from existing journal text: its indentation and line
+/// terminator.
 pub fn infer_config(text: &str) -> WriterConfig {
     let mut indent = 4usize;
 
@@ -34,6 +48,7 @@ pub fn infer_config(text: &str) -> WriterConfig {
     WriterConfig {
         indent,
         account_width: 36,
+        line_ending: detect_line_ending(text).to_string(),
     }
 }
 
@@ -70,12 +85,12 @@ pub fn write_transaction(txn: &Transaction, config: &WriterConfig) -> String {
 
     // Inline comment; extra lines become indented comment lines below.
     let extra_txn_comment_lines = push_inline_comment(&mut out, txn.comment.as_ref(), " ; ");
-    out.push('\n');
+    out.push_str(&config.line_ending);
     for line in extra_txn_comment_lines {
         push_indent(&mut out, config.indent);
         out.push_str("; ");
         out.push_str(&line);
-        out.push('\n');
+        out.push_str(&config.line_ending);
     }
 
     // Postings
@@ -145,7 +160,7 @@ fn write_posting(out: &mut String, posting: &Posting, config: &WriterConfig) {
 
         if amt.multiplier {
             out.push('*');
-            out.push_str(&format_decimal(amt.quantity, amt.style.precision));
+            out.push_str(&format_decimal(amt.quantity, &amt.style));
         } else {
             out.push_str(&format_amount(amt));
         }
@@ -189,12 +204,12 @@ fn write_posting(out: &mut String, posting: &Posting, config: &WriterConfig) {
 
     // Inline comment; extra lines become their own comment lines.
     let extra = push_inline_comment(out, posting.comment.as_ref(), "  ; ");
-    out.push('\n');
+    out.push_str(&config.line_ending);
     for line in extra {
         push_indent(out, config.indent);
         out.push_str("; ");
         out.push_str(&line);
-        out.push('\n');
+        out.push_str(&config.line_ending);
     }
 }
 
@@ -209,13 +224,14 @@ fn format_cost_amount(cost: &CostAmount) -> String {
 }
 
 /// Build a sensible default style for a commodity (symbols left, codes right).
+/// Prefer the journal's own style when one is known — see
+/// `ParseContext::style_for` — and fall back to this for a new commodity.
 pub fn default_style_for(commodity: &str) -> AmountStyle {
     if is_symbol(commodity) {
         AmountStyle {
             commodity_side: Side::Left,
             commodity_spaced: false,
-            decimal_mark: '.',
-            precision: 2,
+            ..AmountStyle::default()
         }
     } else if commodity.is_empty() {
         AmountStyle::default()
@@ -223,10 +239,20 @@ pub fn default_style_for(commodity: &str) -> AmountStyle {
         AmountStyle {
             commodity_side: Side::Right,
             commodity_spaced: true,
-            decimal_mark: '.',
-            precision: 2,
+            ..AmountStyle::default()
         }
     }
+}
+
+/// Format an amount (quantity + commodity) in the given style, exactly as a
+/// posting line would carry it. Public so the application can render an
+/// amount for display or for a new posting in the journal's own style.
+pub fn format_amount_in_style(
+    quantity: rust_decimal::Decimal,
+    commodity: &str,
+    style: &AmountStyle,
+) -> String {
+    format_simple_amount(quantity, commodity, style)
 }
 
 /// Format a quantity with commodity.
@@ -235,7 +261,7 @@ fn format_simple_amount(
     commodity: &str,
     style: &AmountStyle,
 ) -> String {
-    let num_str = format_decimal(quantity, style.precision);
+    let num_str = format_decimal(quantity, style);
 
     // Commodity names containing spaces or digits must be quoted to re-parse.
     let needs_quotes = commodity
@@ -269,28 +295,68 @@ fn format_simple_amount(
     }
 }
 
-/// Format a Decimal to a string with a fixed number of decimal places.
-/// The value is never rounded away: if it has more decimals than `precision`,
-/// the full value is written (destroying precision on disk is data loss).
-fn format_decimal(value: rust_decimal::Decimal, precision: u8) -> String {
+/// Format a Decimal in a style: its decimal mark, digit grouping, and at
+/// least its precision. The value is never rounded away: if it has more
+/// decimals than the style's precision, the full value is written
+/// (destroying precision on disk is data loss).
+///
+/// Writing '.' regardless of the style, as this used to, turned `1234,56
+/// EUR` under `decimal-mark ,` into `1234.56 EUR`, which the same journal
+/// then read back as 123456.
+pub fn format_decimal(value: rust_decimal::Decimal, style: &AmountStyle) -> String {
     let actual_scale = value.normalize().scale();
-    let precision = (precision as u32).max(actual_scale);
+    let precision = (style.precision as u32).max(actual_scale);
+
+    let plain = value.normalize().to_string();
+    let (sign, unsigned) = match plain.strip_prefix('-') {
+        Some(rest) => ("-", rest),
+        None => ("", plain.as_str()),
+    };
+    let (int_part, frac_part) = match unsigned.split_once('.') {
+        Some((i, f)) => (i, f),
+        None => (unsigned, ""),
+    };
+
+    let int_part = match style.digit_group_mark {
+        Some(mark) if !style.digit_group_sizes.is_empty() => {
+            group_digits(int_part, mark, &style.digit_group_sizes)
+        }
+        _ => int_part.to_string(),
+    };
 
     if precision == 0 {
-        return value.normalize().to_string();
+        return format!("{}{}", sign, int_part);
     }
+    let mut frac = frac_part.to_string();
+    while frac.len() < precision as usize {
+        frac.push('0');
+    }
+    format!("{}{}{}{}", sign, int_part, style.decimal_mark, frac)
+}
 
-    let s = value.normalize().to_string();
-    if let Some(dot_pos) = s.find('.') {
-        let decimals = s.len() - dot_pos - 1;
-        if decimals < precision as usize {
-            format!("{}{}", s, "0".repeat(precision as usize - decimals))
-        } else {
-            s
+/// Insert group marks into an integer digit string. Sizes are rightmost
+/// first; the last one repeats (hledger's DigitGroupStyle).
+fn group_digits(digits: &str, mark: char, sizes: &[u8]) -> String {
+    let chars: Vec<char> = digits.chars().collect();
+    let mut groups: Vec<String> = Vec::new();
+    let mut end = chars.len();
+    let mut size_idx = 0;
+    while end > 0 {
+        let size = sizes
+            .get(size_idx)
+            .or(sizes.last())
+            .copied()
+            .unwrap_or(3)
+            .max(1) as usize;
+        let start = end.saturating_sub(size);
+        groups.push(chars[start..end].iter().collect());
+        end = start;
+        if size_idx + 1 < sizes.len() {
+            size_idx += 1;
         }
-    } else {
-        format!("{}.{}", s, "0".repeat(precision as usize))
     }
+    groups.reverse();
+    groups.join(&mark.to_string())
 }
 
 /// Write a periodic transaction (budget) to hledger format.
@@ -327,7 +393,7 @@ pub fn write_periodic_transaction_full(
         out.push_str("  ");
         out.push_str(description);
     }
-    out.push('\n');
+    out.push_str(&config.line_ending);
 
     for (account, quantity, commodity) in postings {
         push_indent(&mut out, config.indent);
@@ -335,7 +401,7 @@ pub fn write_periodic_transaction_full(
 
         let Some(quantity) = quantity else {
             // Elided amount: nothing after the account name.
-            out.push('\n');
+            out.push_str(&config.line_ending);
             continue;
         };
 
@@ -349,7 +415,7 @@ pub fn write_periodic_transaction_full(
 
         let style = default_style_for(commodity);
         out.push_str(&format_simple_amount(*quantity, commodity, &style));
-        out.push('\n');
+        out.push_str(&config.line_ending);
     }
 
     out
@@ -417,6 +483,7 @@ pub fn delete_from_journal(original: &str, span: &SourceSpan) -> Result<String, 
         return Err("stale delete: span does not fall on character boundaries".to_string());
     }
 
+    let eol = detect_line_ending(original);
     let mut result = String::new();
     // Also remove the blank line(s) preceding the transaction so deletes in
     // the middle of a file don't accumulate double blanks.
@@ -427,13 +494,13 @@ pub fn delete_from_journal(original: &str, span: &SourceSpan) -> Result<String, 
         result.push_str(trimmed_before);
     } else {
         result.push_str(trimmed_before);
-        result.push('\n');
+        result.push_str(eol);
     }
 
     let remaining = &original[span.end..];
     let trimmed = remaining.trim_start_matches(|c| c == '\n' || c == '\r');
     if !trimmed.is_empty() && !result.is_empty() {
-        result.push('\n');
+        result.push_str(eol);
     }
     result.push_str(trimmed);
 
@@ -441,11 +508,7 @@ pub fn delete_from_journal(original: &str, span: &SourceSpan) -> Result<String, 
 }
 
 fn is_symbol(commodity: &str) -> bool {
-    let c = commodity.chars().next().unwrap_or('x');
-    matches!(
-        c,
-        '$' | '€' | '£' | '¥' | '₹' | '₽' | '₿' | '₩' | '₫' | '₴' | '₸' | '₺' | '₦' | '₭'
-    ) && commodity.chars().count() == 1
+    crate::amount::is_symbol_commodity(commodity)
 }
 
 #[cfg(test)]
@@ -612,6 +675,7 @@ mod tests {
                 commodity_spaced: false,
                 decimal_mark: '.',
                 precision: 4,
+                ..AmountStyle::default()
             },
         }));
 
@@ -776,13 +840,118 @@ mod tests {
         );
     }
 
+    fn style(precision: u8) -> AmountStyle {
+        AmountStyle { precision, ..AmountStyle::default() }
+    }
+
     #[test]
     fn format_decimal_precision() {
-        assert_eq!(format_decimal(dec!(100), 2), "100.00");
-        assert_eq!(format_decimal(dec!(100.5), 2), "100.50");
+        assert_eq!(format_decimal(dec!(100), &style(2)), "100.00");
+        assert_eq!(format_decimal(dec!(100.5), &style(2)), "100.50");
         // More real decimals than the style: keep them (no silent rounding).
-        assert_eq!(format_decimal(dec!(100.123), 2), "100.123");
-        assert_eq!(format_decimal(dec!(100), 0), "100");
+        assert_eq!(format_decimal(dec!(100.123), &style(2)), "100.123");
+        assert_eq!(format_decimal(dec!(100), &style(0)), "100");
+    }
+
+    #[test]
+    fn format_decimal_follows_the_style_mark_and_grouping() {
+        let comma = AmountStyle { decimal_mark: ',', precision: 2, ..AmountStyle::default() };
+        assert_eq!(format_decimal(dec!(1234.56), &comma), "1234,56");
+        assert_eq!(format_decimal(dec!(-0.5), &comma), "-0,50");
+
+        let grouped = AmountStyle {
+            digit_group_mark: Some(','),
+            digit_group_sizes: vec![3],
+            precision: 2,
+            ..AmountStyle::default()
+        };
+        assert_eq!(format_decimal(dec!(1000), &grouped), "1,000.00");
+        assert_eq!(format_decimal(dec!(-1234567.5), &grouped), "-1,234,567.50");
+        assert_eq!(format_decimal(dec!(999), &grouped), "999.00");
+
+        let indian = AmountStyle {
+            digit_group_mark: Some(','),
+            digit_group_sizes: vec![3, 2],
+            precision: 2,
+            ..AmountStyle::default()
+        };
+        assert_eq!(format_decimal(dec!(10000000), &indian), "1,00,00,000.00");
+
+        let european = AmountStyle {
+            decimal_mark: ',',
+            digit_group_mark: Some('.'),
+            digit_group_sizes: vec![3],
+            precision: 2,
+            ..AmountStyle::default()
+        };
+        assert_eq!(format_decimal(dec!(1234.5), &european), "1.234,50");
+    }
+
+    #[test]
+    fn comma_mark_journal_round_trips_through_the_writer() {
+        // Parse -> write -> parse must give the same Decimal under
+        // `decimal-mark ,`; writing '.' turned 1234,56 into 123456.
+        let text = "decimal-mark ,
+
+2024-01-15 Rent
+    expenses:rent   1.234,56 EUR
+    assets:bank
+";
+        let (journal, _) = crate::parse_with_context_result(text, &Default::default()).unwrap();
+        let txn = match &journal.items[2] {
+            JournalItem::Transaction(t) => t,
+            other => panic!("expected transaction, got {:?}", other),
+        };
+        let written = write_transaction(txn, &WriterConfig::default());
+        assert!(written.contains("1.234,56 EUR"), "written: {}", written);
+
+        let reparsed = crate::parse(&format!("decimal-mark ,
+{}", written)).unwrap();
+        let again = match &reparsed.items[1] {
+            JournalItem::Transaction(t) => t,
+            other => panic!("expected transaction, got {:?}", other),
+        };
+        assert_eq!(again.postings[0].amount.as_ref().unwrap().quantity, dec!(1234.56));
+    }
+
+    #[test]
+    fn grouped_amounts_stay_grouped_and_whole_shares_stay_whole() {
+        let text = "2024-01-01 x
+    a  $1,000.00
+    b
+
+2024-01-02 y
+    a  10 AAPL
+    b
+";
+        let journal = crate::parse(text).unwrap();
+        let mut out = String::new();
+        for item in &journal.items {
+            if let JournalItem::Transaction(t) = item {
+                out.push_str(&write_transaction(t, &WriterConfig::default()));
+            }
+        }
+        assert!(out.contains("$1,000.00"), "out: {}", out);
+        assert!(out.contains("10 AAPL"), "out: {}", out);
+        assert!(!out.contains("10.00 AAPL"), "out: {}", out);
+    }
+
+    #[test]
+    fn crlf_files_are_written_with_crlf() {
+        let text = "2024-01-01 x\r\n    a  $1.00\r\n    b\r\n";
+        let config = infer_config(text);
+        assert_eq!(config.line_ending, "\r\n");
+        let journal = crate::parse(text).unwrap();
+        let JournalItem::Transaction(t) = &journal.items[0] else { panic!() };
+        let out = write_transaction(t, &config);
+        assert_eq!(out.matches("\r\n").count(), 3, "out: {:?}", out);
+        assert!(!out.replace("\r\n", "").contains('\n'));
+
+        // And LF files stay LF.
+        assert_eq!(infer_config("2024-01-01 x\n    a  $1\n").line_ending, "\n");
+
+        let deleted = delete_from_journal(text, &t.span).unwrap();
+        assert!(!deleted.contains('\n'), "deleted: {:?}", deleted);
     }
 
     #[test]

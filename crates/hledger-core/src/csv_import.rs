@@ -7,7 +7,7 @@ use rust_decimal::Decimal;
 use serde::Serialize;
 
 use hledger_parser::ast::{
-    AccountName, AmountStyle, BalanceAssertion, Comment, Posting, PostingAmount, Side, SourceSpan,
+    AccountName, AmountStyle, BalanceAssertion, Comment, Posting, PostingAmount, SourceSpan,
     Status, Transaction,
 };
 use hledger_parser::csv_rules::{CsvRules, IfBlock};
@@ -23,8 +23,18 @@ pub struct CsvImportResult {
 
 /// Convert CSV text into transactions using the given rules.
 pub fn convert_csv(csv_text: &str, rules: &CsvRules) -> Result<CsvImportResult, String> {
+    // The csv crate takes a single byte; `as u8` silently truncated `§` to
+    // a different character and split rows on garbage (and a non-ASCII
+    // byte in the 0x80..0xFF range corrupts UTF-8 fields).
+    if !rules.separator.is_ascii() {
+        return Err(format!(
+            "separator '{}' is not supported: the field separator must be a single ASCII character",
+            rules.separator
+        ));
+    }
+    let delimiter = rules.separator as u8;
     let mut reader = csv::ReaderBuilder::new()
-        .delimiter(rules.separator as u8)
+        .delimiter(delimiter)
         .flexible(true)
         .has_headers(false)
         .from_reader(Cursor::new(csv_text));
@@ -243,13 +253,22 @@ fn convert_row(
 
     // Parse the primary (first posting) amount:
     // amount1 takes precedence, then amount, then amount-in/amount-out.
-    let amount = resolve_primary_amount(rules, &resolve_nonempty)?;
-    let commodity = rules.currency.clone().unwrap_or_default();
+    let primary = resolve_primary_amount(rules, &resolve_nonempty)?;
+    let amount = primary.quantity;
+    // A `currency` rule wins; otherwise a commodity written in the cell
+    // (`12 EUR`, `€12`) is kept, as hledger does.
+    let (commodity, style) = match (rules.currency.clone(), primary.commodity) {
+        (Some(c), _) => {
+            let style = amount_style_for(&c);
+            (c, style)
+        }
+        (None, Some((c, style))) => (c, style),
+        (None, None) => (String::new(), amount_style_for("")),
+    };
 
     // Comment
     let comment = resolve_nonempty("comment");
 
-    let style = amount_style_for(&commodity);
     let make_amount = |qty: Decimal| PostingAmount {
         quantity: qty,
         commodity: commodity.clone(),
@@ -337,78 +356,86 @@ fn convert_row(
 }
 
 fn amount_style_for(commodity: &str) -> AmountStyle {
-    let is_symbol = commodity.len() == 1
-        && "$\u{20AC}\u{00A3}\u{00A5}\u{20B9}\u{20BD}\u{20BF}".contains(commodity);
-    if is_symbol {
-        AmountStyle { commodity_side: Side::Left, commodity_spaced: false, decimal_mark: '.', precision: 2 }
-    } else if commodity.is_empty() {
-        AmountStyle::default()
-    } else {
-        AmountStyle { commodity_side: Side::Right, commodity_spaced: true, decimal_mark: '.', precision: 2 }
+    hledger_parser::writer::default_style_for(commodity)
+}
+
+/// An amount read from a CSV cell: the number, and the commodity and style
+/// the cell carried, if any (`12 EUR`, `€12`).
+#[derive(Debug, Clone)]
+struct CsvAmount {
+    quantity: Decimal,
+    commodity: Option<(String, AmountStyle)>,
+}
+
+impl CsvAmount {
+    fn map(self, f: impl FnOnce(Decimal) -> Decimal) -> Self {
+        Self {
+            quantity: f(self.quantity),
+            commodity: self.commodity,
+        }
     }
 }
 
 fn resolve_primary_amount(
     rules: &CsvRules,
     resolve_nonempty: &dyn Fn(&str) -> Option<String>,
-) -> Result<Decimal, String> {
+) -> Result<CsvAmount, String> {
     // Modern style: amount1 is the first posting's amount.
     if let Some(amt_str) = resolve_nonempty("amount1") {
-        return parse_amount_str(&amt_str, rules);
+        return parse_amount_cell(&amt_str, rules);
     }
 
     // Old style: "amount" is the (first posting's) transaction amount.
     if let Some(amt_str) = resolve_nonempty("amount") {
-        return parse_amount_str(&amt_str, rules);
+        return parse_amount_cell(&amt_str, rules);
     }
 
     // amount-in / amount-out pair
     if let Some(in_str) = resolve_nonempty("amount-in") {
-        return Ok(parse_amount_str(&in_str, rules)?.abs());
+        return Ok(parse_amount_cell(&in_str, rules)?.map(|q| q.abs()));
     }
     if let Some(out_str) = resolve_nonempty("amount-out") {
-        return Ok(-(parse_amount_str(&out_str, rules)?.abs()));
+        return Ok(parse_amount_cell(&out_str, rules)?.map(|q| -q.abs()));
     }
 
     Err("No amount field found".to_string())
 }
 
 fn parse_amount_str(s: &str, rules: &CsvRules) -> Result<Decimal, String> {
+    parse_amount_cell(s, rules).map(|a| a.quantity)
+}
+
+/// Read an amount cell the way hledger's CSV reader does: with the journal
+/// amount parser, under the rules' `decimal-mark`. So `1.234,56` is
+/// 1234.56 (hledger infers the rightmost separator), `12 EUR` and `€12`
+/// carry their commodity, and `(12.34)` is negative.
+fn parse_amount_cell(s: &str, rules: &CsvRules) -> Result<CsvAmount, String> {
     let trimmed = s.trim();
 
     // Parenthesized amounts are negative: (12.34) => -12.34
     let (inner, parenthesized) = if trimmed.starts_with('(') && trimmed.ends_with(')') && trimmed.len() >= 2 {
-        (&trimmed[1..trimmed.len() - 1], true)
+        (trimmed[1..trimmed.len() - 1].trim(), true)
     } else {
         (trimmed, false)
     };
-
-    // Strip currency symbols and whitespace
-    let cleaned: String = inner
-        .chars()
-        .filter(|c| c.is_ascii_digit() || *c == '-' || *c == '+' || *c == '.' || *c == ',')
-        .collect();
-
-    if cleaned.is_empty() {
+    if inner.is_empty() {
         return Err("Empty amount".to_string());
     }
 
-    // Handle decimal mark
-    let normalized = match rules.decimal_mark {
-        Some(',') => {
-            // European: periods are thousands separators, comma is decimal
-            cleaned.replace('.', "").replace(',', ".")
-        }
-        _ => {
-            // Standard: commas are thousands separators, period is decimal
-            cleaned.replace(',', "")
-        }
+    let ctx = hledger_parser::AmountContext {
+        decimal_mark: rules.decimal_mark,
+        ..Default::default()
     };
-
-    let qty = Decimal::from_str_exact(&normalized)
+    let amt = hledger_parser::parse_amount_ctx(inner, &ctx)
         .map_err(|e| format!("Invalid amount '{}': {}", s, e))?;
 
-    Ok(if parenthesized { -qty.abs() } else { qty })
+    let quantity = if parenthesized { -amt.quantity.abs() } else { amt.quantity };
+    let commodity = if amt.commodity.is_empty() {
+        None
+    } else {
+        Some((amt.commodity, amt.style))
+    };
+    Ok(CsvAmount { quantity, commodity })
 }
 
 fn parse_csv_date(date_str: &str, date_format: Option<&str>) -> Result<NaiveDate, String> {
@@ -531,6 +558,51 @@ pub fn mark_probable_duplicates(candidates: &[Transaction], existing: &[Transact
 mod tests {
     use super::*;
     use hledger_parser::csv_rules::parse_csv_rules;
+
+    #[test]
+    fn amounts_are_read_like_hledger_with_commodities_from_the_cell() {
+        // hledger print on the same CSV: 1.234,56 / 12 EUR / €12 / $1,000.50.
+        let rules = parse_csv_rules("fields date,description,amount\n").unwrap();
+        let csv = "2024-01-01,foo,\"1.234,56\"\n2024-01-02,bar,12 EUR\n2024-01-03,baz,€12\n2024-01-04,qux,\"$1,000.50\"\n2024-01-05,neg,(12.34)\n";
+        let result = convert_csv(csv, &rules).unwrap();
+        let first = |t: &Transaction| {
+            let a = t.postings[0].amount.as_ref().unwrap();
+            (a.quantity, a.commodity.clone())
+        };
+        let got: Vec<_> = result.transactions.iter().map(first).collect();
+        assert_eq!(
+            got,
+            vec![
+                (Decimal::new(123456, 2), String::new()),
+                (Decimal::new(12, 0), "EUR".to_string()),
+                (Decimal::new(12, 0), "€".to_string()),
+                (Decimal::new(100050, 2), "$".to_string()),
+                (Decimal::new(-1234, 2), String::new()),
+            ]
+        );
+        // The commodity's style came from the cell too.
+        let euro = result.transactions[2].postings[0].amount.as_ref().unwrap();
+        assert_eq!(euro.style.commodity_side, hledger_parser::ast::Side::Left);
+        // The inferred second posting carries the same commodity.
+        assert!(result.transactions[1].postings[1].amount.is_none());
+
+        // A `currency` rule still wins over what the cell says.
+        let rules = parse_csv_rules("fields date,description,amount\ncurrency USD\n").unwrap();
+        let result = convert_csv("2024-01-02,bar,12 EUR\n", &rules).unwrap();
+        assert_eq!(result.transactions[0].postings[0].amount.as_ref().unwrap().commodity, "USD");
+
+        // A decimal-mark rule is honoured.
+        let rules = parse_csv_rules("fields date,description,amount\ndecimal-mark ,\n").unwrap();
+        let result = convert_csv("2024-01-02,bar,\"1.234\"\n", &rules).unwrap();
+        assert_eq!(result.transactions[0].postings[0].amount.as_ref().unwrap().quantity, Decimal::new(1234, 0));
+    }
+
+    #[test]
+    fn non_ascii_separator_is_an_error_not_a_truncation() {
+        let rules = parse_csv_rules("separator §\nfields date,description,amount\n").unwrap();
+        let err = convert_csv("2024-01-01§x§1\n", &rules).unwrap_err();
+        assert!(err.contains("separator"), "{}", err);
+    }
 
     #[test]
     fn convert_simple_csv() {

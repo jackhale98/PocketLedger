@@ -1,0 +1,6 @@
+# Pinned so local builds, CI and the cached iOS/Android staticlibs all use the
+# same compiler. Bump deliberately (and bump the swatinem/rust-cache keys in
+# .github/workflows if a cached staticlib stops linking).
+[toolchain]
+channel = "1.98.0"
+components = ["clippy", "rustfmt"]

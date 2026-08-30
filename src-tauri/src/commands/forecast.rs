@@ -29,20 +29,29 @@ pub struct SaveForecastPosting {
 pub async fn get_forecast_rules(
     state: State<'_, Mutex<crate::AppState>>,
 ) -> Result<Vec<forecast::ForecastRule>, String> {
-    let app_state = state.lock().map_err(|e| e.to_string())?;
+    let app_state = crate::lock_or_recover(&state);
     let loaded = app_state.journal.as_ref().ok_or("No journal loaded")?;
-    Ok(forecast::extract_rules(&loaded.journal))
+    Ok(forecast::extract_rules_with_files(
+        &loaded.journal,
+        &loaded.item_files,
+    ))
 }
 
-/// Find a periodic transaction by source line; returns its span and file index.
-fn find_periodic_by_line(
+/// Find a periodic transaction by (file, source line); returns its span and
+/// file index. Line numbers alone are ambiguous in a split journal — every
+/// included file has its own line 1 — and matching the first one across all
+/// files patched the wrong rule. `file_index` defaults to the main file, which
+/// is what older frontends (that never sent it) were addressing anyway.
+pub(crate) fn find_periodic(
     loaded: &super::journal::LoadedJournal,
+    file_index: Option<usize>,
     line: usize,
 ) -> Option<(hledger_parser::ast::SourceSpan, usize)> {
+    let wanted_file = file_index.unwrap_or(0);
     for (idx, item) in loaded.journal.items.iter().enumerate() {
         if let JournalItem::PeriodicTransaction(pt) = item {
-            if pt.span.line == line {
-                return Some((pt.span.clone(), loaded.item_files[idx]));
+            if pt.span.line == line && loaded.item_files[idx] == wanted_file {
+                return Some((pt.span.clone(), wanted_file));
             }
         }
     }
@@ -55,8 +64,9 @@ pub async fn save_forecast_rule(
     description: String,
     postings: Vec<SaveForecastPosting>,
     replace_line: Option<usize>,
-    // Which journal file to append a new rule to. Ignored when replacing,
-    // since an existing rule is rewritten wherever it already lives.
+    // For a new rule: which journal file to append it to. When replacing:
+    // the file the existing rule lives in (its `fileIndex`), since line
+    // numbers repeat across files. Defaults to the main file either way.
     file_index: Option<usize>,
     state: State<'_, Mutex<crate::AppState>>,
 ) -> Result<super::journal::JournalSummary, String> {
@@ -110,7 +120,7 @@ pub async fn save_forecast_rule(
         );
     }
 
-    let mut app_state = state.lock().map_err(|e| e.to_string())?;
+    let mut app_state = crate::lock_or_recover(&state);
 
     let (text, target) = {
         let loaded = app_state.journal.as_ref().ok_or("No journal loaded")?;
@@ -123,7 +133,7 @@ pub async fn save_forecast_rule(
 
         let target = match replace_line {
             Some(line) => {
-                let (span, file_idx) = find_periodic_by_line(loaded, line)
+                let (span, file_idx) = find_periodic(loaded, file_index, line)
                     .ok_or("The rule to replace was not found (journal changed?)")?;
                 let file_text = &loaded.files[file_idx].text;
                 let patched = writer::patch_journal(file_text, &[(span, text.clone())])?;
@@ -143,13 +153,15 @@ pub async fn save_forecast_rule(
 #[tauri::command]
 pub async fn delete_forecast_rule(
     line: usize,
+    // The file the rule lives in (`ForecastRule.fileIndex`); main file if absent.
+    file_index: Option<usize>,
     state: State<'_, Mutex<crate::AppState>>,
 ) -> Result<super::journal::JournalSummary, String> {
-    let mut app_state = state.lock().map_err(|e| e.to_string())?;
+    let mut app_state = crate::lock_or_recover(&state);
 
     let (file_idx, patched) = {
         let loaded = app_state.journal.as_ref().ok_or("No journal loaded")?;
-        let (span, file_idx) = find_periodic_by_line(loaded, line)
+        let (span, file_idx) = find_periodic(loaded, file_index, line)
             .ok_or("Rule not found (journal changed?)")?;
         let file_text = &loaded.files[file_idx].text;
         let patched = writer::delete_from_journal(file_text, &span)?;
@@ -191,7 +203,7 @@ pub async fn forecast_projection(
     params: ReportParams,
     state: State<'_, Mutex<crate::AppState>>,
 ) -> Result<ForecastProjection, String> {
-    let app_state = state.lock().map_err(|e| e.to_string())?;
+    let app_state = crate::lock_or_recover(&state);
     let loaded = app_state.journal.as_ref().ok_or("No journal loaded")?;
 
     let commodity = resolve_target_commodity(loaded, params.target_commodity.as_deref());
@@ -289,6 +301,11 @@ pub async fn forecast_projection(
 /// Months of recorded history shown before the projection starts, for context.
 const CONTEXT_MONTHS: u32 = 3;
 
+/// Most upcoming transactions ever returned. A daily rule over a long horizon
+/// generates thousands of rows the list can't usefully show; callers wanting
+/// more pass an explicit `limit`, still clamped here.
+const MAX_UPCOMING: usize = 500;
+
 /// The generated transactions themselves, for an "upcoming" list.
 #[tauri::command]
 pub async fn upcoming_transactions(
@@ -296,7 +313,7 @@ pub async fn upcoming_transactions(
     limit: Option<usize>,
     state: State<'_, Mutex<crate::AppState>>,
 ) -> Result<Vec<super::transactions::TransactionSummary>, String> {
-    let app_state = state.lock().map_err(|e| e.to_string())?;
+    let app_state = crate::lock_or_recover(&state);
     let loaded = app_state.journal.as_ref().ok_or("No journal loaded")?;
 
     let real: Vec<_> = loaded.ledger.transactions().cloned().collect();
@@ -309,6 +326,34 @@ pub async fn upcoming_transactions(
     let generated = forecast::forecast_transactions(&loaded.journal, start, end);
     Ok(super::transactions::summarize_generated(
         &generated,
-        limit.unwrap_or(usize::MAX),
+        limit.unwrap_or(MAX_UPCOMING).min(MAX_UPCOMING),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::find_periodic;
+
+    #[test]
+    fn rules_are_addressed_by_file_and_line() {
+        let dir = std::env::temp_dir().join(format!("pockethledger-rules-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let main = dir.join("main.journal");
+        // Both files have a rule on line 1.
+        std::fs::write(dir.join("sub.journal"), "~ monthly  Sub rule\n    a  $1.00\n    b\n").unwrap();
+        std::fs::write(&main, "~ weekly  Main rule\n    a  $2.00\n    b\ninclude sub.journal\n").unwrap();
+        let loaded = crate::commands::journal::load_journal(&main.to_string_lossy()).unwrap();
+
+        let rules = hledger_core::forecast::extract_rules_with_files(&loaded.journal, &loaded.item_files);
+        assert_eq!(rules.len(), 2);
+        assert_eq!((rules[0].line, rules[0].file_index), (1, 0));
+        assert_eq!((rules[1].line, rules[1].file_index), (1, 1));
+
+        let (_, f) = find_periodic(&loaded, Some(1), 1).unwrap();
+        assert_eq!(f, 1);
+        let (_, f) = find_periodic(&loaded, None, 1).unwrap();
+        assert_eq!(f, 0, "no fileIndex means the main file");
+        assert!(find_periodic(&loaded, Some(1), 2).is_none());
+    }
 }

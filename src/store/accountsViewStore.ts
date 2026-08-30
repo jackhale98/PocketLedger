@@ -16,8 +16,8 @@ interface AccountsViewState {
   /** Hide accounts whose balance is zero — long-closed accounts otherwise
    *  crowd a small screen. */
   hideZero: boolean;
-  /** How balances are valued: what is held, what it cost, what it is worth, or
-   *  the unrealised gain between the last two. */
+  /** How balances are valued: what it cost, what it is worth, or the
+   *  unrealised gain between the two. */
   valuation: ValuationMode;
 
   setExpanded: (expanded: Set<string>) => void;
@@ -28,16 +28,22 @@ interface AccountsViewState {
   setValueCurrency: (valueCurrency: string) => void;
   setHideZero: (hideZero: boolean) => void;
   setValuation: (valuation: ValuationMode) => void;
+  /** Back to defaults: another journal has its own tree and currencies. */
+  reset: () => void;
 }
 
-export const useAccountsViewStore = create<AccountsViewState>((set) => ({
+const initial = {
   expanded: new Set<string>(),
   initialized: false,
   search: "",
   typeFilter: "",
   valueCurrency: "",
   hideZero: false,
-  valuation: "market",
+  valuation: "market" as ValuationMode,
+};
+
+export const useAccountsViewStore = create<AccountsViewState>((set) => ({
+  ...initial,
 
   setExpanded: (expanded) => set({ expanded }),
   initializeExpanded: (expanded) =>
@@ -47,4 +53,5 @@ export const useAccountsViewStore = create<AccountsViewState>((set) => ({
   setValueCurrency: (valueCurrency) => set({ valueCurrency }),
   setHideZero: (hideZero) => set({ hideZero }),
   setValuation: (valuation) => set({ valuation }),
+  reset: () => set({ ...initial, expanded: new Set<string>() }),
 }));

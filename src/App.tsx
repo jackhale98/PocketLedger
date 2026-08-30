@@ -11,8 +11,12 @@ import { useJournalStore } from "./store/journalStore";
 import { useNavStore } from "./store/navStore";
 import { useSwipeNavigation } from "./hooks/useSwipeNavigation";
 import { useSettingsStore } from "./store/settingsStore";
-import { getPlatformInfo, resolveJournalRef } from "./utils/platform";
+import { canGoBack, goBack, onBackStackChange } from "./store/backStore";
+import { getPlatformInfo, isAndroid, resolveJournalRef } from "./utils/platform";
 import * as api from "./api/commands";
+
+/** The backend's wording when a journal file has gone missing under it. */
+const FILE_GONE_RE = /can no longer be read|no such file|not found|os error 2\b/i;
 
 function App() {
   // Tab selection lives in a store so charts and lists can jump between tabs.
@@ -22,8 +26,9 @@ function App() {
   useSwipeNavigation(mainRef, TAB_ORDER, activeTab, (tab) =>
     setActiveTab(tab as typeof activeTab)
   );
-  const { isLoaded, isLoading, error, summary, openJournal, reloadFromDisk, clearError } =
+  const { isLoaded, isLoading, error, summary, openJournal, reloadFromDisk, recreateFromMemory, clearError } =
     useJournalStore();
+  const [recreating, setRecreating] = useState(false);
   const { defaultCurrency, lastJournalPath, loaded: settingsLoaded, loadSettings, setLastJournalPath } = useSettingsStore();
   const [isMobile, setIsMobile] = useState<boolean | null>(null);
   const [warningsExpanded, setWarningsExpanded] = useState(false);
@@ -51,23 +56,77 @@ function App() {
             setAutoOpenFailedPath(ref);
             setLastJournalPath("");
           }
+        })
+        .catch((err) => {
+          // resolveJournalRef itself failed (openJournal never throws).
+          console.error("Auto-open failed:", err);
+          setAutoOpenFailedPath(ref);
+          setLastJournalPath("");
         });
     }
   }, [settingsLoaded, isMobile, isLoaded, isLoading, lastJournalPath, openJournal, setLastJournalPath]);
 
   // Pick up outside changes when the app returns to the foreground: a git client
   // (Working Copy linked to the journal folder) may have pulled new commits.
+  //
+  // Not while an editor, detail view or reconciliation is open, though: a
+  // reload renumbers transactions, and a Save that follows would write onto
+  // whichever entry now sits at the old index. Anything open registers a
+  // back handler, so "back has somewhere to go" is the signal to wait; the
+  // reload runs as soon as the last one closes.
   useEffect(() => {
-    const onVisible = () => {
-      if (document.visibilityState === "visible") reloadFromDisk();
+    let pending = false;
+    const attempt = () => {
+      if (canGoBack()) {
+        pending = true;
+        return;
+      }
+      pending = false;
+      reloadFromDisk();
     };
+    const onVisible = () => {
+      if (document.visibilityState === "visible") attempt();
+    };
+    const unsubscribe = onBackStackChange(() => {
+      if (pending && !canGoBack()) attempt();
+    });
     document.addEventListener("visibilitychange", onVisible);
     window.addEventListener("focus", onVisible);
     return () => {
+      unsubscribe();
       document.removeEventListener("visibilitychange", onVisible);
       window.removeEventListener("focus", onVisible);
     };
   }, [reloadFromDisk]);
+
+  // Android's hardware / gesture back steps through whatever is open, the
+  // same as a swipe. With nothing to close it does nothing -- leaving the app
+  // by accident from a finance screen is worse than a dead button.
+  useEffect(() => {
+    if (!isAndroid()) return;
+    let unlisten: (() => void) | null = null;
+    let cancelled = false;
+    import("@tauri-apps/api/app")
+      .then((app) => app.onBackButtonPress(() => { goBack(); }))
+      .then((listener) => {
+        if (cancelled) listener.unregister();
+        else unlisten = () => listener.unregister();
+      })
+      .catch((err) => console.warn("Back button listener unavailable:", err));
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
+  const handleRecreate = async () => {
+    setRecreating(true);
+    try {
+      await recreateFromMemory();
+    } finally {
+      setRecreating(false);
+    }
+  };
 
   const handleOpenJournal = async () => {
     try {
@@ -186,7 +245,7 @@ function App() {
               <p className="break-words">{error}</p>
               <button
                 onClick={clearError}
-                className="mt-2 text-xs text-red-500 underline"
+                className="mt-2 text-xs text-red-500 underline min-h-[44px] px-3"
               >
                 Dismiss
               </button>
@@ -219,7 +278,8 @@ function App() {
           <div className="flex items-center justify-between gap-2">
             <button
               onClick={() => setWarningsExpanded((v) => !v)}
-              className="flex-1 min-w-0 text-left text-xs text-yellow-800 dark:text-yellow-300 font-medium"
+              aria-expanded={warningsExpanded}
+              className="flex-1 min-w-0 text-left text-xs text-yellow-800 dark:text-yellow-300 font-medium min-h-[44px] -my-2"
             >
               {otherWarnings.length} warning{otherWarnings.length === 1 ? "" : "s"}
               <span className="ml-1 text-yellow-600 dark:text-yellow-500">
@@ -228,7 +288,7 @@ function App() {
             </button>
             <button
               onClick={() => setDismissedWarnings(warningKey)}
-              className="text-xs text-yellow-700 dark:text-yellow-400 shrink-0 px-2 py-1"
+              className="text-xs text-yellow-700 dark:text-yellow-400 shrink-0 px-2 min-h-[44px] -my-2"
             >
               Dismiss
             </button>
@@ -245,14 +305,28 @@ function App() {
 
       {/* Error banner */}
       {error && (
-        <div className="bg-red-50 dark:bg-red-900/30 px-4 py-2 flex items-start justify-between gap-2">
-          <span className="text-sm text-red-600 dark:text-red-400 min-w-0 break-words max-h-32 overflow-y-auto">{error}</span>
-          <button
-            onClick={clearError}
-            className="text-xs text-red-500 ml-2 shrink-0"
-          >
-            Dismiss
-          </button>
+        <div className="bg-red-50 dark:bg-red-900/30 px-4 py-2 space-y-1" role="alert">
+          <div className="flex items-start justify-between gap-2">
+            <span className="text-sm text-red-600 dark:text-red-400 min-w-0 break-words max-h-32 overflow-y-auto selectable">{error}</span>
+            <button
+              onClick={clearError}
+              className="text-xs text-red-500 ml-2 shrink-0 min-h-[44px] px-2 -mr-2 -my-2"
+            >
+              Dismiss
+            </button>
+          </div>
+          {/* The file vanished under the app (sync client, git checkout).
+              What is loaded in memory is the latest state, so offer to write
+              it back rather than leave the user with an unsaveable journal. */}
+          {FILE_GONE_RE.test(error) && (
+            <button
+              onClick={handleRecreate}
+              disabled={recreating}
+              className="w-full min-h-[44px] bg-red-600 text-white text-sm font-medium rounded-lg disabled:opacity-50"
+            >
+              {recreating ? "Writing..." : "Re-create file from what's loaded"}
+            </button>
+          )}
         </div>
       )}
 

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import * as api from "../../api/commands";
+import { importPickedJournal } from "../../utils/importJournal";
 import type { StoredJournal } from "../../api/types";
 import { useJournalStore } from "../../store/journalStore";
 import { useSettingsStore } from "../../store/settingsStore";
@@ -69,7 +70,7 @@ export function MobileJournalPicker({
       setBusy(true);
       const imported = [];
       for (const path of paths) {
-        imported.push(await api.importJournalFile(path));
+        imported.push(await importPickedJournal(path));
       }
 
       const renamed = imported.filter((r) => r.renamed);

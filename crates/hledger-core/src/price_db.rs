@@ -38,8 +38,19 @@ impl PriceDb {
         }
     }
 
-    /// Build a PriceDb from a parsed journal's P directives and transaction costs.
+    /// Build a PriceDb from a parsed journal's P directives and transaction
+    /// costs — hledger's `--infer-market-prices` behaviour, kept as the
+    /// default for callers that relied on it. See
+    /// [`from_journal_with`](Self::from_journal_with) to choose.
     pub fn from_journal(journal: &Journal) -> Self {
+        Self::from_journal_with(journal, true)
+    }
+
+    /// Build a PriceDb from a parsed journal's P directives, and — when
+    /// `infer_from_costs` is set, like hledger's `--infer-market-prices` —
+    /// from transaction costs (`@` / `@@`) as well. hledger's default is
+    /// `false`: only declared `P` prices value reports.
+    pub fn from_journal_with(journal: &Journal, infer_from_costs: bool) -> Self {
         let mut db = Self::new();
 
         // Costs first, `P` directives second. `add_price` is last-write-wins,
@@ -48,6 +59,9 @@ impl PriceDb {
         // printing the declared `P 2021-03-08 VLXVX 27.97 USD` rather than the
         // 27.9704839345... implied by that day's `@@` exchange.
         for item in &journal.items {
+            if !infer_from_costs {
+                break;
+            }
             if let JournalItem::Transaction(txn) = item {
                 for posting in &txn.postings {
                     let Some(ref amt) = posting.amount else { continue };
@@ -58,8 +72,9 @@ impl PriceDb {
                         }
                         Cost::TotalCost(c) => {
                             if !amt.quantity.is_zero() {
-                                let rate = c.quantity / amt.quantity;
-                                db.add_price(txn.date, &amt.commodity, &c.commodity, rate.abs());
+                                if let Some(rate) = c.quantity.checked_div(amt.quantity) {
+                                    db.add_price(txn.date, &amt.commodity, &c.commodity, rate.abs());
+                                }
                             }
                         }
                     }
@@ -99,8 +114,8 @@ impl PriceDb {
 
         // Reverse lookup (if we know EUR->USD, we can derive USD->EUR)
         if let Some(rate) = self.lookup_direct(to, from, date) {
-            if !rate.is_zero() {
-                return Some(Decimal::ONE / rate);
+            if let Some(inverse) = Decimal::ONE.checked_div(rate) {
+                return Some(inverse);
             }
         }
 
@@ -122,12 +137,12 @@ impl PriceDb {
         let mut edges: HashMap<&str, Vec<(&str, Decimal)>> = HashMap::new();
         for (fc, tc) in self.prices.keys() {
             if let Some(rate) = self.lookup_direct(fc, tc, date) {
-                if !rate.is_zero() {
+                if let Some(inverse) = Decimal::ONE.checked_div(rate) {
                     edges.entry(fc.as_str()).or_default().push((tc.as_str(), rate));
                     edges
                         .entry(tc.as_str())
                         .or_default()
-                        .push((fc.as_str(), Decimal::ONE / rate));
+                        .push((fc.as_str(), inverse));
                 }
             }
         }
@@ -146,7 +161,9 @@ impl PriceDb {
                     if !visited.insert(next) {
                         continue;
                     }
-                    let next_rate = rate * edge_rate;
+                    let Some(next_rate) = rate.checked_mul(*edge_rate) else {
+                        continue;
+                    };
                     if *next == to {
                         return Some(next_rate);
                     }
@@ -199,7 +216,9 @@ impl PriceDb {
         set.into_iter().collect()
     }
 
-    /// Convert a quantity from one commodity to another using the price on or before `date`.
+    /// Convert a quantity from one commodity to another using the price on or
+    /// before `date`. `None` when no price is known — or when the product
+    /// does not fit a Decimal, which is an unconvertible amount, not a crash.
     pub fn convert(
         &self,
         quantity: Decimal,
@@ -211,7 +230,7 @@ impl PriceDb {
             return Some(quantity);
         }
         let rate = self.get_price(from, to, date)?;
-        Some(quantity * rate)
+        quantity.checked_mul(rate)
     }
 
     /// Get the number of price entries.
@@ -320,6 +339,17 @@ mod tests {
         let db = PriceDb::from_journal(&journal);
 
         assert_eq!(db.get_price("EUR", "$", d(2024, 1, 15)), Some(dec!(1.10)));
+
+        // hledger's default ignores costs unless --infer-market-prices.
+        let db = PriceDb::from_journal_with(&journal, false);
+        assert_eq!(db.get_price("EUR", "$", d(2024, 1, 15)), None);
+    }
+
+    #[test]
+    fn conversion_overflow_is_unconvertible_not_a_panic() {
+        let mut db = PriceDb::new();
+        db.add_price(d(2024, 1, 1), "FOO", "USD", dec!(1000));
+        assert_eq!(db.convert(Decimal::MAX, "FOO", "USD", d(2024, 1, 2)), None);
     }
 }
 

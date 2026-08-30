@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import * as api from "../../api/commands";
+import { importPickedJournal } from "../../utils/importJournal";
 import { useJournalStore } from "../../store/journalStore";
 
 /** Shown when a journal's `include` lines point at files the app can't see.
@@ -26,7 +26,7 @@ export function MissingIncludesBanner({
 
       setBusy(true);
       for (const path of paths) {
-        await api.importJournalFile(path);
+        await importPickedJournal(path);
       }
       // Re-open so the includes resolve against the now-complete folder.
       if (currentPath) await openJournal(currentPath);

@@ -11,7 +11,7 @@ pub async fn budget_vs_actual(
     params: ReportParams,
     state: State<'_, Mutex<crate::AppState>>,
 ) -> Result<budget::BudgetComparison, String> {
-    let app_state = state.lock().map_err(|e| e.to_string())?;
+    let app_state = crate::lock_or_recover(&state);
     let loaded = app_state.journal.as_ref().ok_or("No journal loaded")?;
 
     let budgets = budget::extract_budgets(&loaded.journal);
@@ -34,7 +34,7 @@ pub async fn budget_summary_chart(
     params: ReportParams,
     state: State<'_, Mutex<crate::AppState>>,
 ) -> Result<Vec<budget::BudgetSummaryPoint>, String> {
-    let app_state = state.lock().map_err(|e| e.to_string())?;
+    let app_state = crate::lock_or_recover(&state);
     let loaded = app_state.journal.as_ref().ok_or("No journal loaded")?;
 
     let budgets = budget::extract_budgets(&loaded.journal);

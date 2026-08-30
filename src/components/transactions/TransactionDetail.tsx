@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { TransactionSummary } from "../../api/types";
 import { AmountDisplay } from "../common/AmountDisplay";
+import { postingAmounts } from "./postingAmounts";
 import { StatusBadge } from "../common/StatusBadge";
 import { useBackHandler } from "../../store/backStore";
 
@@ -48,7 +49,7 @@ export function TransactionDetail({
       <div className="flex items-center gap-2 px-4 py-3 border-b border-gray-200 dark:border-gray-700">
         <button
           onClick={onBack}
-          className="p-2 -ml-2 text-gray-600 dark:text-gray-400"
+          className="p-2 -ml-2 min-w-[44px] min-h-[44px] text-gray-600 dark:text-gray-400"
           aria-label="Back"
         >
           &larr;
@@ -59,21 +60,21 @@ export function TransactionDetail({
         {onDuplicate && (
           <button
             onClick={onDuplicate}
-            className="text-blue-600 text-sm font-medium px-2"
+            className="text-blue-600 text-sm font-medium px-2 min-h-[44px]"
           >
             Duplicate
           </button>
         )}
         <button
           onClick={onEdit}
-          className="text-blue-600 text-sm font-medium px-2"
+          className="text-blue-600 text-sm font-medium px-2 min-h-[44px]"
         >
           Edit
         </button>
       </div>
 
       {/* Content */}
-      <div className="flex-1 overflow-y-auto overflow-x-hidden p-4 space-y-4">
+      <div className="flex-1 overflow-y-auto overflow-x-hidden p-4 space-y-4 selectable">
         {/* Metadata */}
         <div className="flex items-center gap-3">
           <StatusBadge status={transaction.status} />
@@ -96,15 +97,21 @@ export function TransactionDetail({
           <div className="bg-gray-50 dark:bg-gray-800 rounded-lg divide-y divide-gray-200 dark:divide-gray-700">
             {transaction.postings.map((posting, i) => (
               <div key={i} className="px-4 py-3">
-                <div className="flex justify-between items-center">
-                  <span className="text-sm text-gray-900 dark:text-gray-100 font-mono">
+                <div className="flex justify-between items-start gap-2">
+                  <span className="text-sm text-gray-900 dark:text-gray-100 font-mono break-all min-w-0">
                     {posting.account}
                   </span>
-                  <AmountDisplay
-                    amount={posting.amount}
-                    commodity={posting.commodity}
-                    className="text-sm"
-                  />
+                  {/* One line per commodity when the posting carries several. */}
+                  <span className="flex flex-col items-end shrink-0">
+                    {postingAmounts(posting).map((a, ai) => (
+                      <AmountDisplay
+                        key={ai}
+                        amount={a.quantity}
+                        commodity={a.commodity}
+                        className="text-sm"
+                      />
+                    ))}
+                  </span>
                 </div>
                 {posting.comment && (
                   <p className="text-xs text-gray-500 dark:text-gray-400 mt-1 italic">

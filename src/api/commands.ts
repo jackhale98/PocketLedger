@@ -47,8 +47,10 @@ export async function journalChangedOnDisk(): Promise<boolean> {
   return invoke<boolean>("journal_changed_on_disk");
 }
 
-export async function saveJournal(): Promise<void> {
-  return invoke<void>("save_journal");
+/** Rewrite the loaded journal to disk after the file vanished underneath
+ *  the app (a sync client or git checkout removed it). */
+export async function recreateJournalFromMemory(): Promise<JournalSummary> {
+  return invoke<JournalSummary>("recreate_journal_from_memory");
 }
 
 export async function createJournal(
@@ -127,25 +129,11 @@ export async function accountsForDescription(
   return invoke<string[]>("accounts_for_description", { description });
 }
 
-export async function suggestPayees(prefix: string): Promise<string[]> {
-  return invoke<string[]>("suggest_payees", { prefix });
-}
-
 // ─── Reports ───
 
-/** "units" | "cost" | "market" | "gain" — hledger's balance calculation
- *  modes. Omit for market value. */
-export type ValuationMode = "units" | "cost" | "market" | "gain";
-
-export async function balanceReport(
-  params: ReportParams = {},
-  valuation?: ValuationMode
-): Promise<BalanceRow[]> {
-  return invoke<BalanceRow[]>("balance_report", {
-    params,
-    valuation: valuation ?? null,
-  });
-}
+/** "cost" | "market" | "gain" — hledger's balance calculation modes. Omit
+ *  for market value. */
+export type ValuationMode = "cost" | "market" | "gain";
 
 export async function registerReport(
   account: string,
@@ -299,6 +287,16 @@ export async function importJournalFile(
   return invoke<ImportedJournal>("import_journal_file", { path });
 }
 
+/** Import journal text read on the frontend. Android's picker returns
+ *  content:// URIs the backend can't open, so the file is read through the
+ *  fs plugin and handed over as text. */
+export async function importJournalText(
+  name: string,
+  text: string
+): Promise<ImportedJournal> {
+  return invoke<ImportedJournal>("import_journal_text", { name, text });
+}
+
 /** Remove a journal (and its .bak) from app storage. */
 export async function deleteStoredJournal(name: string): Promise<void> {
   return invoke<void>("delete_stored_journal", { name });
@@ -361,11 +359,23 @@ export async function toggleReconciliationPosting(
 }
 
 export async function finishReconciliation(
-  force?: boolean
+  force?: boolean,
+  addAssertion?: boolean
 ): Promise<JournalSummary> {
   return invoke<JournalSummary>("finish_reconciliation", {
     force: force ?? null,
+    addAssertion: addAssertion ?? null,
   });
+}
+
+// ─── Engine options ───
+
+/** Apply engine settings; reloads the open journal so they take effect.
+ *  Resolves to the new summary, or null when no journal is open. */
+export async function setEngineOptions(options: {
+  inferMarketPrices: boolean;
+}): Promise<JournalSummary | null> {
+  return invoke<JournalSummary | null>("set_engine_options", { options });
 }
 
 // ─── Valuation ───
@@ -418,9 +428,13 @@ export async function saveForecastRule(
 }
 
 export async function deleteForecastRule(
-  line: number
+  line: number,
+  fileIndex?: number
 ): Promise<JournalSummary> {
-  return invoke<JournalSummary>("delete_forecast_rule", { line });
+  return invoke<JournalSummary>("delete_forecast_rule", {
+    line,
+    fileIndex: fileIndex ?? null,
+  });
 }
 
 export async function forecastProjection(

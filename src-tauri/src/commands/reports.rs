@@ -99,7 +99,7 @@ pub async fn balance_report(
     params: ReportParams,
     state: State<'_, Mutex<crate::AppState>>,
 ) -> Result<Vec<reports::BalanceRow>, String> {
-    let app_state = state.lock().map_err(|e| e.to_string())?;
+    let app_state = crate::lock_or_recover(&state);
     let loaded = app_state.journal.as_ref().ok_or("No journal loaded")?;
 
     let txns = transactions_for(loaded, &params)?;
@@ -130,7 +130,7 @@ pub async fn register_report(
     params: ReportParams,
     state: State<'_, Mutex<crate::AppState>>,
 ) -> Result<Vec<reports::RegisterRow>, String> {
-    let app_state = state.lock().map_err(|e| e.to_string())?;
+    let app_state = crate::lock_or_recover(&state);
     let loaded = app_state.journal.as_ref().ok_or("No journal loaded")?;
 
     let txns = transactions_for(loaded, &params)?;
@@ -157,7 +157,7 @@ pub async fn periodic_balance(
 ) -> Result<hledger_core::periodic_report::PeriodicBalanceReport, String> {
     use hledger_core::periodic_report::{AccumulationMode, ReportInterval};
 
-    let app_state = state.lock().map_err(|e| e.to_string())?;
+    let app_state = crate::lock_or_recover(&state);
     let loaded = app_state.journal.as_ref().ok_or("No journal loaded")?;
 
     let interval = match interval.as_str() {
@@ -219,7 +219,7 @@ pub async fn balance_sheet_report(
     params: ReportParams,
     state: State<'_, Mutex<crate::AppState>>,
 ) -> Result<reports::FinancialStatement, String> {
-    let app_state = state.lock().map_err(|e| e.to_string())?;
+    let app_state = crate::lock_or_recover(&state);
     let loaded = app_state.journal.as_ref().ok_or("No journal loaded")?;
 
     let commodity = resolve_target_commodity(loaded, params.target_commodity.as_deref());
@@ -241,7 +241,7 @@ pub async fn income_statement_report(
     params: ReportParams,
     state: State<'_, Mutex<crate::AppState>>,
 ) -> Result<reports::FinancialStatement, String> {
-    let app_state = state.lock().map_err(|e| e.to_string())?;
+    let app_state = crate::lock_or_recover(&state);
     let loaded = app_state.journal.as_ref().ok_or("No journal loaded")?;
 
     let commodity = resolve_target_commodity(loaded, params.target_commodity.as_deref());
@@ -263,7 +263,7 @@ pub async fn cash_flow_report(
     params: ReportParams,
     state: State<'_, Mutex<crate::AppState>>,
 ) -> Result<reports::FinancialStatement, String> {
-    let app_state = state.lock().map_err(|e| e.to_string())?;
+    let app_state = crate::lock_or_recover(&state);
     let loaded = app_state.journal.as_ref().ok_or("No journal loaded")?;
 
     let commodity = resolve_target_commodity(loaded, params.target_commodity.as_deref());
@@ -286,7 +286,7 @@ pub async fn net_worth_series(
     params: ReportParams,
     state: State<'_, Mutex<crate::AppState>>,
 ) -> Result<Vec<reports::TimeSeriesPoint>, String> {
-    let app_state = state.lock().map_err(|e| e.to_string())?;
+    let app_state = crate::lock_or_recover(&state);
     let loaded = app_state.journal.as_ref().ok_or("No journal loaded")?;
 
     let commodity = resolve_target_commodity(loaded, params.target_commodity.as_deref());
@@ -312,7 +312,7 @@ pub async fn account_balance_series(
     params: ReportParams,
     state: State<'_, Mutex<crate::AppState>>,
 ) -> Result<Vec<reports::TimeSeriesPoint>, String> {
-    let app_state = state.lock().map_err(|e| e.to_string())?;
+    let app_state = crate::lock_or_recover(&state);
     let loaded = app_state.journal.as_ref().ok_or("No journal loaded")?;
 
     let commodity = resolve_target_commodity(loaded, params.target_commodity.as_deref());
@@ -337,7 +337,7 @@ pub async fn income_expense_chart(
     params: ReportParams,
     state: State<'_, Mutex<crate::AppState>>,
 ) -> Result<Vec<reports::IncomeExpensePoint>, String> {
-    let app_state = state.lock().map_err(|e| e.to_string())?;
+    let app_state = crate::lock_or_recover(&state);
     let loaded = app_state.journal.as_ref().ok_or("No journal loaded")?;
 
     let commodity = resolve_target_commodity(loaded, params.target_commodity.as_deref());
@@ -362,7 +362,7 @@ pub async fn expense_breakdown_chart(
     parent_prefix: Option<String>,
     state: State<'_, Mutex<crate::AppState>>,
 ) -> Result<Vec<reports::PieSlice>, String> {
-    let app_state = state.lock().map_err(|e| e.to_string())?;
+    let app_state = crate::lock_or_recover(&state);
     let loaded = app_state.journal.as_ref().ok_or("No journal loaded")?;
 
     let commodity = resolve_target_commodity(loaded, params.target_commodity.as_deref());
@@ -394,7 +394,7 @@ pub async fn valuation_info(
     params: ReportParams,
     state: State<'_, Mutex<crate::AppState>>,
 ) -> Result<ValuationInfo, String> {
-    let app_state = state.lock().map_err(|e| e.to_string())?;
+    let app_state = crate::lock_or_recover(&state);
     let loaded = app_state.journal.as_ref().ok_or("No journal loaded")?;
 
     let commodity = resolve_target_commodity(loaded, params.target_commodity.as_deref());
@@ -418,7 +418,7 @@ pub async fn list_accounts_with_balances(
     params: Option<ReportParams>,
     state: State<'_, Mutex<crate::AppState>>,
 ) -> Result<Vec<reports::BalanceRow>, String> {
-    let app_state = state.lock().map_err(|e| e.to_string())?;
+    let app_state = crate::lock_or_recover(&state);
     let loaded = app_state.journal.as_ref().ok_or("No journal loaded")?;
 
     let effective = params.clone().unwrap_or_default();
@@ -460,7 +460,7 @@ pub async fn list_accounts_with_balances(
 pub async fn commodity_prices(
     state: State<'_, Mutex<crate::AppState>>,
 ) -> Result<Vec<hledger_core::price_db::PriceSeries>, String> {
-    let app_state = state.lock().map_err(|e| e.to_string())?;
+    let app_state = crate::lock_or_recover(&state);
     let loaded = app_state.journal.as_ref().ok_or("No journal loaded")?;
     let mut series = loaded.ledger.price_db().series();
     hledger_core::styles::apply::prices(&mut series, loaded.ledger.styles());
@@ -472,7 +472,7 @@ pub async fn journal_statistics(
     params: ReportParams,
     state: State<'_, Mutex<crate::AppState>>,
 ) -> Result<reports::JournalStatistics, String> {
-    let app_state = state.lock().map_err(|e| e.to_string())?;
+    let app_state = crate::lock_or_recover(&state);
     let loaded = app_state.journal.as_ref().ok_or("No journal loaded")?;
     let txns = transactions_for(loaded, &params)?;
     Ok(reports::journal_statistics(&txns))
@@ -482,7 +482,7 @@ pub async fn journal_statistics(
 pub async fn list_commodities(
     state: State<'_, Mutex<crate::AppState>>,
 ) -> Result<Vec<String>, String> {
-    let app_state = state.lock().map_err(|e| e.to_string())?;
+    let app_state = crate::lock_or_recover(&state);
     let loaded = app_state.journal.as_ref().ok_or("No journal loaded")?;
 
     let mut commodities = std::collections::BTreeSet::new();
@@ -512,7 +512,7 @@ pub async fn roi_report(
     params: ReportParams,
     state: State<'_, Mutex<crate::AppState>>,
 ) -> Result<hledger_core::roi::RoiReport, String> {
-    let app_state = state.lock().map_err(|e| e.to_string())?;
+    let app_state = crate::lock_or_recover(&state);
     let loaded = app_state.journal.as_ref().ok_or("No journal loaded")?;
 
     if investment.trim().is_empty() {

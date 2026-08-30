@@ -15,6 +15,19 @@ pub struct AppState {
     /// generation mismatch means those indices are stale and must not be
     /// used to patch the file.
     pub generation: u64,
+    /// Use transaction costs as market prices when valuing (hledger's
+    /// `--infer-market-prices`). Off by default so the app's numbers match
+    /// the CLI's; applied to every (re)load.
+    pub infer_market_prices: bool,
+}
+
+/// Lock a mutex, recovering from poisoning. Every piece of state behind these
+/// mutexes is swapped in whole (a validated `LoadedJournal`, a whole
+/// reconciliation session), so a panic mid-command cannot leave it half
+/// updated — and refusing every later command because of one panic would
+/// brick the session until restart.
+pub fn lock_or_recover<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 impl Default for AppState {
@@ -23,6 +36,7 @@ impl Default for AppState {
             journal: None,
             backup_dir: None,
             generation: 0,
+            infer_market_prices: false,
         }
     }
 }
@@ -40,16 +54,16 @@ pub fn run() {
             if let Some(dir) = &dir {
                 let _ = std::fs::create_dir_all(dir);
             }
-            if let Ok(mut state) = app.state::<Mutex<AppState>>().lock() {
-                state.backup_dir = dir;
-            }
+            lock_or_recover(&app.state::<Mutex<AppState>>()).backup_dir = dir;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             commands::journal::open_journal,
+            commands::journal::set_engine_options,
             commands::journal::get_journal_info,
             commands::journal::journal_changed_on_disk,
-            commands::journal::save_journal,
+            commands::journal::journal_missing_on_disk,
+            commands::journal::recreate_journal_from_memory,
             commands::journal::create_journal,
             commands::journal::add_transaction,
             commands::journal::list_journal_files,
@@ -97,6 +111,7 @@ pub fn run() {
             commands::storage::resolve_journal_ref,
             commands::storage::list_stored_journals,
             commands::storage::import_journal_file,
+            commands::storage::import_journal_text,
             commands::storage::delete_stored_journal,
             commands::storage::create_stored_journal,
             commands::storage::stash_picked_file,

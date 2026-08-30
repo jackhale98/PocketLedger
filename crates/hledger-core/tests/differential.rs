@@ -147,6 +147,7 @@ fn all_fixtures() -> Vec<PathBuf> {
      "edge_cases.journal",
      "multicurrency.journal",
      "sample-with-budget.journal",
+     "comma_decimal.journal",
      "example.hledger"]
         .iter()
         .map(|n| fixture(n))
@@ -2225,3 +2226,190 @@ fn multi_commodity_parents_roll_up_every_commodity() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A comma-decimal journal with `P` lines: the parser used to force '.' as
+/// EUR's decimal mark on seeing `P ... EUR`, reading `3,50 EUR` as 350.
+#[test]
+fn comma_decimal_journal_with_price_lines_matches_hledger() {
+    if !hledger_available() {
+        eprintln!("skipping: hledger not installed");
+        return;
+    }
+    let file = fixture("comma_decimal.journal");
+    assert_balances_match(&file);
+
+    let ours = engine_balances(&file);
+    assert_eq!(ours["expenses:food"]["EUR"], Decimal::new(350, 2));
+    assert_eq!(ours["expenses:rent"]["EUR"], Decimal::new(123456, 2));
+}
+
+/// Parse -> write -> hledger: a rewritten comma-mark journal must still mean
+/// the same thing to hledger. Writing '.' under `decimal-mark ,` turned
+/// 1.234,56 into 1234.56, which hledger then read as 123456.
+#[test]
+fn comma_mark_round_trip_through_the_writer_stays_hledger_valid() {
+    if !hledger_available() {
+        eprintln!("skipping: hledger not installed");
+        return;
+    }
+    let file = fixture("comma_decimal.journal");
+    let text = std::fs::read_to_string(&file).unwrap();
+    let journal = hledger_parser::parse(&text).unwrap();
+    let config = hledger_parser::writer::infer_config(&text);
+
+    // Rebuild the file: directives verbatim, every transaction rewritten.
+    let mut rewritten = String::new();
+    for item in &journal.items {
+        use hledger_parser::ast::JournalItem;
+        match item {
+            JournalItem::Transaction(t) => {
+                rewritten.push_str(&hledger_parser::writer::write_transaction(t, &config));
+                rewritten.push('\n');
+            }
+            JournalItem::DecimalMarkDirective(d) => {
+                rewritten.push_str(&format!("decimal-mark {}\n", d.mark));
+            }
+            JournalItem::CommodityDirective(_) => {
+                rewritten.push_str("commodity 1.000,00 EUR\n");
+            }
+            _ => {}
+        }
+    }
+    assert!(rewritten.contains("1.234,56 EUR"), "grouping and mark preserved:\n{}", rewritten);
+
+    let dir = std::env::temp_dir().join(format!("hledger-comma-rt-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("rewritten.journal");
+    std::fs::write(&path, &rewritten).unwrap();
+
+    let original = hledger_balances(&file);
+    let after = hledger_balances(&path);
+    assert_eq!(after, original, "hledger reads the rewritten file differently:\n{}", rewritten);
+
+    // And our own reading of the rewritten file agrees.
+    assert_eq!(engine_balances(&path), original);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// hledger applies auto posting rules to virtual postings too:
+/// `= expenses:food` fires on `(expenses:food) $7`.
+#[test]
+fn virtual_auto_postings_match_hledger() {
+    if !hledger_available() {
+        eprintln!("skipping: hledger not installed");
+        return;
+    }
+    let text = concat!(
+        "= expenses:food\n    (budget:food)   *-1\n\n",
+        "2024-01-01 virtual spend\n    (expenses:food)   $7\n\n",
+        "2024-01-02 real spend\n    expenses:food   $3\n    assets:cash\n",
+    );
+    let dir = std::env::temp_dir().join(format!("hledger-vauto-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("virtual-auto.journal");
+    std::fs::write(&path, text).unwrap();
+
+    let expected = hledger_balances_with(&path, &["--auto"]).expect("hledger accepts the journal");
+    let journal = hledger_parser::parse(text).unwrap();
+    let txns = hledger_core::balance::resolve_transactions(&journal).unwrap();
+    assert_eq!(engine_balances_filtered(&txns), expected);
+    assert_eq!(expected["budget:food"]["$"], Decimal::new(-10, 0));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Balance assertions are checked in posting-date order: a posting with a
+/// later `date:` tag is not part of an earlier assertion's balance.
+#[test]
+fn posting_date_assertions_match_hledger() {
+    if !hledger_available() {
+        eprintln!("skipping: hledger not installed");
+        return;
+    }
+    let passes = concat!(
+        "2024-01-10 a\n    x  $10 ; date:2024-01-20\n    y\n\n",
+        "2024-01-15 b\n    x  $5 = $5\n    y\n",
+    );
+    let fails = concat!(
+        "2024-01-10 a\n    x  $10 ; date:2024-01-20\n    y\n\n",
+        "2024-01-15 b\n    x  $5 = $15\n    y\n",
+    );
+    let dir = std::env::temp_dir().join(format!("hledger-pdate-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    for (name, text, hledger_accepts) in [("passes", passes, true), ("fails", fails, false)] {
+        let path = dir.join(format!("{name}.journal"));
+        std::fs::write(&path, text).unwrap();
+        let status = Command::new("hledger")
+            .args(["-f", &path.to_string_lossy(), "bal"])
+            .output()
+            .unwrap()
+            .status
+            .success();
+        assert_eq!(status, hledger_accepts, "{name}: hledger's verdict changed");
+
+        let journal = hledger_parser::parse(text).unwrap();
+        let result = hledger_core::balance::resolve_journal(&journal).unwrap();
+        let failed = result.warnings.iter().any(|w| w.message.contains("assertion failed"));
+        assert_eq!(!failed, hledger_accepts, "{name}: warnings {:?}", result.warnings);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// CSV amounts are read with the journal amount parser, like hledger's CSV
+/// reader: `1.234,56` is 1234.56 with no decimal-mark rule, and a commodity
+/// written in the cell is kept.
+#[test]
+fn csv_comma_amounts_match_hledger() {
+    if !hledger_available() {
+        eprintln!("skipping: hledger not installed");
+        return;
+    }
+    let rules_text = "fields date,description,amount\n";
+    let csv_text = "2024-01-01,foo,\"1.234,56\"\n2024-01-02,bar,12 EUR\n2024-01-03,baz,€12\n2024-01-04,qux,\"$1,000.50\"\n";
+
+    let dir = std::env::temp_dir().join(format!("hledger-csv-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let csv_path = dir.join("bank.csv");
+    let rules_path = dir.join("bank.rules");
+    std::fs::write(&csv_path, csv_text).unwrap();
+    std::fs::write(&rules_path, rules_text).unwrap();
+
+    let output = Command::new("hledger")
+        .args([
+            "-f",
+            &csv_path.to_string_lossy(),
+            "--rules-file",
+            &rules_path.to_string_lossy(),
+            "print",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let theirs = hledger_parser::parse(&String::from_utf8_lossy(&output.stdout)).unwrap();
+    let their_amounts: Vec<(Decimal, String)> = theirs
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            hledger_parser::ast::JournalItem::Transaction(t) => {
+                t.postings[0].amount.as_ref().map(|a| (a.quantity, a.commodity.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+
+    let rules = hledger_parser::csv_rules::parse_csv_rules(rules_text).unwrap();
+    let ours = hledger_core::csv_import::convert_csv(csv_text, &rules).unwrap();
+    let our_amounts: Vec<(Decimal, String)> = ours
+        .transactions
+        .iter()
+        .map(|t| {
+            let a = t.postings[0].amount.as_ref().unwrap();
+            (a.quantity, a.commodity.clone())
+        })
+        .collect();
+
+    assert_eq!(our_amounts, their_amounts);
+    assert_eq!(our_amounts[0].0, Decimal::new(123456, 2));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+

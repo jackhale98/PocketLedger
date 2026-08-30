@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Merged by `tauri ios build` / `tauri ios dev` into the generated
+  src-tauri/gen/apple/PocketHLedger_iOS/Info.plist (tauri-cli looks for
+  Info.plist and Info.ios.plist next to tauri.conf.json; later sources win).
+  Keeping these here instead of patching the generated plist in CI means local
+  builds get them too. build-ios.yml asserts they survived the merge.
+-->
+<plist version="1.0">
+<dict>
+  <!-- Makes Documents visible and editable in place under
+       "On My iPhone > PocketHLedger" in Files, so a git client can track the
+       journals. UISupportsDocumentBrowser is deliberately NOT set: it adds no
+       access, but declares a document-browser app (we are not one) and adds a
+       misleading "Document Storage" row to iOS Settings. -->
+  <key>UIFileSharingEnabled</key>
+  <true/>
+  <key>LSSupportsOpeningDocumentsInPlace</key>
+  <true/>
+
+  <!-- Without this every upload lands in TestFlight as "Missing Compliance".
+       The app uses only standard system crypto, which is exempt. -->
+  <key>ITSAppUsesNonExemptEncryption</key>
+  <false/>
+
+  <!-- "Open in PocketHLedger" for journal files. Handling the incoming URL
+       (application(_:open:options:) -> frontend) is a follow-up; until then
+       the app simply launches. -->
+  <key>CFBundleDocumentTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleTypeName</key>
+      <string>hledger journal</string>
+      <key>CFBundleTypeRole</key>
+      <string>Editor</string>
+      <key>LSHandlerRank</key>
+      <string>Owner</string>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>org.hledger.journal</string>
+      </array>
+    </dict>
+  </array>
+  <key>UTImportedTypeDeclarations</key>
+  <array>
+    <dict>
+      <key>UTTypeIdentifier</key>
+      <string>org.hledger.journal</string>
+      <key>UTTypeDescription</key>
+      <string>hledger journal</string>
+      <key>UTTypeConformsTo</key>
+      <array>
+        <string>public.plain-text</string>
+      </array>
+      <key>UTTypeTagSpecification</key>
+      <dict>
+        <key>public.filename-extension</key>
+        <array>
+          <string>journal</string>
+          <string>hledger</string>
+          <string>ledger</string>
+        </array>
+        <key>public.mime-type</key>
+        <array>
+          <string>text/plain</string>
+        </array>
+      </dict>
+    </dict>
+  </array>
+</dict>
+</plist>

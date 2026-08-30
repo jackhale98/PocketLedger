@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use chrono::Datelike;
 
 use crate::amount::{parse_amount_ctx, parse_style_example, AmountContext};
@@ -5,9 +7,136 @@ use crate::ast::*;
 use crate::date::parse_date_with_year;
 use crate::error::ParseError;
 
-/// Parse a journal file from a string.
+/// Parse a journal file from a string, with no inherited directives.
 pub fn parse(input: &str) -> Result<Journal, ParseError> {
-    Parser::new(input).run()
+    parse_with_context(input, &ParseContext::default())
+}
+
+/// Parse a journal file that was `include`d from another: `ctx` carries the
+/// directives in effect at the include point (hledger semantics: `D`, `Y`,
+/// `alias`, `apply account`, `decimal-mark` and `commodity` all flow into the
+/// included file).
+pub fn parse_with_context(input: &str, ctx: &ParseContext) -> Result<Journal, ParseError> {
+    parse_with_context_result(input, ctx).map(|(journal, _)| journal)
+}
+
+/// Like [`parse_with_context`], also returning the context as it stands at
+/// the end of the file. The caller that follows `include` directives uses it
+/// two ways:
+///
+/// * pass a clone of the *current* context into each included file (it sees
+///   everything declared before the `include` line);
+/// * after the include returns, fold the child's global declarations back
+///   with [`ParseContext::absorb_global`] — `commodity` directives are
+///   journal-wide in hledger, while `D`, `Y`, `alias`, `apply account` and
+///   `decimal-mark` stay scoped to the file that set them.
+pub fn parse_with_context_result(
+    input: &str,
+    ctx: &ParseContext,
+) -> Result<(Journal, ParseContext), ParseError> {
+    let parsed = parse_file_with_context(input, ctx)?;
+    Ok((parsed.journal, parsed.context))
+}
+
+/// One parsed file plus the directive state it produced.
+#[derive(Debug, Clone)]
+pub struct ParsedFile {
+    pub journal: Journal,
+    /// State at the end of the file.
+    pub context: ParseContext,
+    /// State at each `include` directive, in order of appearance. An
+    /// included file inherits the state in force *where it is included*
+    /// (an `apply account` closed later in the file still applies to it),
+    /// so the loader must not use the end-of-file context for that.
+    pub include_contexts: Vec<ParseContext>,
+}
+
+/// Parse a file with inherited directive state; see [`ParsedFile`].
+pub fn parse_file_with_context(input: &str, ctx: &ParseContext) -> Result<ParsedFile, ParseError> {
+    Parser::new(input, ctx.clone()).run()
+}
+
+/// Directive state that flows between files and out to the application.
+///
+/// Everything the parser learns from directives lives here so that included
+/// files can inherit it and so the application can format amounts the way
+/// the journal writes them (see [`ParseContext::style_for`]).
+#[derive(Debug, Clone, Default)]
+pub struct ParseContext {
+    /// Number-format context: `decimal-mark`, per-commodity decimal marks
+    /// (from `commodity`/`D`), and the `D` default commodity.
+    pub amount_ctx: AmountContext,
+    /// Aliases in effect, in declaration order (`end aliases` clears them).
+    pub aliases: Vec<AliasDirective>,
+    /// Open `apply account` prefixes, outermost first.
+    pub account_prefix: Vec<String>,
+    /// `Y`/`year` default year for partial dates.
+    pub default_year: Option<i32>,
+    /// Styles declared by `commodity` directives (journal-wide in hledger).
+    pub declared_styles: BTreeMap<String, AmountStyle>,
+    /// Styles observed on posting amounts, merged per commodity the way
+    /// hledger builds a canonical style: first-seen side/spacing/mark, the
+    /// highest precision, and the first digit grouping seen.
+    pub observed_styles: BTreeMap<String, AmountStyle>,
+}
+
+impl ParseContext {
+    /// Fold the journal-wide parts of a child (included) file's resulting
+    /// context back into this one. `commodity` declarations and observed
+    /// amount styles are global; everything else stays with the child.
+    pub fn absorb_global(&mut self, child: &ParseContext) {
+        for (commodity, style) in &child.declared_styles {
+            self.declared_styles.insert(commodity.clone(), style.clone());
+            self.amount_ctx
+                .commodity_marks
+                .insert(commodity.clone(), style.decimal_mark);
+        }
+        for (commodity, style) in &child.observed_styles {
+            self.observed_styles
+                .entry(commodity.clone())
+                .and_modify(|existing| existing.absorb(style))
+                .or_insert_with(|| style.clone());
+        }
+    }
+
+    /// The style a commodity is written in: a `commodity` directive's format
+    /// if declared, otherwise the merged style of the amounts seen (the `D`
+    /// directive's style for its commodity when nothing else is known).
+    /// `None` for a commodity the journal has never written.
+    pub fn style_for(&self, commodity: &str) -> Option<AmountStyle> {
+        if let Some(style) = self.declared_styles.get(commodity) {
+            return Some(style.clone());
+        }
+        if let Some(style) = self.observed_styles.get(commodity) {
+            return Some(style.clone());
+        }
+        match &self.amount_ctx.default_commodity {
+            Some((c, style)) if c == commodity => Some(style.clone()),
+            _ => None,
+        }
+    }
+
+    /// The number-format context, for parsing amounts typed by the user the
+    /// way the journal would read them (`decimal-mark`, `D`, commodity marks).
+    pub fn amount_context(&self) -> &AmountContext {
+        &self.amount_ctx
+    }
+
+    /// Every commodity with a known style, declared or observed.
+    pub fn known_commodities(&self) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .declared_styles
+            .keys()
+            .chain(self.observed_styles.keys())
+            .cloned()
+            .collect();
+        if let Some((c, _)) = &self.amount_ctx.default_commodity {
+            out.push(c.clone());
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
 }
 
 struct CompiledAlias {
@@ -22,6 +151,18 @@ enum AliasMatcher {
     Regex(regex::Regex),
 }
 
+fn compile_alias(directive: &AliasDirective) -> Option<CompiledAlias> {
+    let matcher = if directive.regex {
+        AliasMatcher::Regex(regex::Regex::new(&directive.from).ok()?)
+    } else {
+        AliasMatcher::Prefix(directive.from.clone())
+    };
+    Some(CompiledAlias {
+        to: directive.to.clone(),
+        matcher,
+    })
+}
+
 struct Parser<'a> {
     input: &'a str,
     /// Lines with any trailing '\r' stripped.
@@ -31,15 +172,16 @@ struct Parser<'a> {
     items: Vec<JournalItem>,
     warnings: Vec<ParseWarning>,
 
-    // File-scoped parse state from directives.
-    default_year: Option<i32>,
-    amount_ctx: AmountContext,
-    account_prefix: Vec<String>,
+    // Parse state from directives: inherited from the including file, and
+    // handed back at the end so the caller can propagate it.
+    ctx: ParseContext,
     aliases: Vec<CompiledAlias>,
+    /// Snapshot of `ctx` at each `include` directive, in order.
+    include_contexts: Vec<ParseContext>,
 }
 
 impl<'a> Parser<'a> {
-    fn new(input: &'a str) -> Self {
+    fn new(input: &'a str, ctx: ParseContext) -> Self {
         let mut lines = Vec::new();
         let mut line_starts = Vec::new();
         let mut offset = 0usize;
@@ -56,16 +198,16 @@ impl<'a> Parser<'a> {
             line_starts.pop();
         }
 
+        let aliases = ctx.aliases.iter().filter_map(compile_alias).collect();
         Self {
             input,
             lines,
             line_starts,
             items: Vec::new(),
             warnings: Vec::new(),
-            default_year: None,
-            amount_ctx: AmountContext::default(),
-            account_prefix: Vec::new(),
-            aliases: Vec::new(),
+            ctx,
+            aliases,
+            include_contexts: Vec::new(),
         }
     }
 
@@ -84,12 +226,16 @@ impl<'a> Parser<'a> {
         });
     }
 
-    fn run(mut self) -> Result<Journal, ParseError> {
+    fn run(mut self) -> Result<ParsedFile, ParseError> {
         if self.input.trim().is_empty() {
-            return Ok(Journal {
-                items: vec![],
-                source_path: None,
-                warnings: vec![],
+            return Ok(ParsedFile {
+                journal: Journal {
+                    items: vec![],
+                    source_path: None,
+                    warnings: vec![],
+                },
+                context: self.ctx,
+                include_contexts: vec![],
             });
         }
 
@@ -98,11 +244,25 @@ impl<'a> Parser<'a> {
             i = self.parse_item(i)?;
         }
 
-        Ok(Journal {
-            items: self.items,
-            source_path: None,
-            warnings: self.warnings,
+        Ok(ParsedFile {
+            journal: Journal {
+                items: self.items,
+                source_path: None,
+                warnings: self.warnings,
+            },
+            context: self.ctx,
+            include_contexts: self.include_contexts,
         })
+    }
+
+    /// Remember how an amount was written, so the journal's style for its
+    /// commodity can be reproduced later.
+    fn observe_style(&mut self, commodity: &str, style: &AmountStyle) {
+        self.ctx
+            .observed_styles
+            .entry(commodity.to_string())
+            .and_modify(|existing| existing.absorb(style))
+            .or_insert_with(|| style.clone());
     }
 
     /// Parse the item starting at line `i`; return the index of the next line.
@@ -205,12 +365,11 @@ impl<'a> Parser<'a> {
             return self.parse_commodity_directive(rest, i).map(Some);
         }
         if let Some(_rest) = line.strip_prefix("P ") {
+            // A price directive says nothing about how the priced commodity's
+            // numbers are written: forcing '.' here made `3,50 EUR` read as
+            // 350 EUR after a `P ... EUR` line.
             match self.parse_price_directive(line) {
                 Some(pd) => {
-                    self.amount_ctx
-                        .commodity_marks
-                        .entry(pd.commodity.clone())
-                        .or_insert('.');
                     self.items.push(JournalItem::PriceDirective(pd));
                 }
                 None => {
@@ -226,6 +385,7 @@ impl<'a> Parser<'a> {
             self.items.push(JournalItem::IncludeDirective(IncludeDirective {
                 path: strip_inline_comment(rest).trim().to_string(),
             }));
+            self.include_contexts.push(self.ctx.clone());
             return Ok(Some(i + 1));
         }
         if let Some(rest) = line.strip_prefix("alias ") {
@@ -234,12 +394,13 @@ impl<'a> Parser<'a> {
         }
         if line.trim() == "end aliases" {
             self.aliases.clear();
+            self.ctx.aliases.clear();
             self.items.push(JournalItem::OtherDirective(line.to_string()));
             return Ok(Some(i + 1));
         }
         if let Some(rest) = line.strip_prefix("decimal-mark ") {
             if let Some(ch) = rest.trim().chars().next() {
-                self.amount_ctx.decimal_mark = Some(ch);
+                self.ctx.amount_ctx.decimal_mark = Some(ch);
                 self.items
                     .push(JournalItem::DecimalMarkDirective(DecimalMarkDirective {
                         mark: ch,
@@ -255,10 +416,11 @@ impl<'a> Parser<'a> {
         if let Some(rest) = line.strip_prefix("D ") {
             match parse_style_example(strip_inline_comment(rest).trim()) {
                 Some((commodity, style)) if !commodity.is_empty() => {
-                    self.amount_ctx
+                    self.ctx
+                        .amount_ctx
                         .commodity_marks
                         .insert(commodity.clone(), style.decimal_mark);
-                    self.amount_ctx.default_commodity = Some((commodity, style));
+                    self.ctx.amount_ctx.default_commodity = Some((commodity, style));
                 }
                 _ => self.warn(i + 1, format!("malformed D directive: {}", line)),
             }
@@ -272,20 +434,21 @@ impl<'a> Parser<'a> {
             .or_else(|| if line.starts_with('Y') && line[1..].trim().chars().all(|c| c.is_ascii_digit()) && !line[1..].trim().is_empty() { Some(&line[1..]) } else { None });
         if let Some(rest) = year_rest {
             match strip_inline_comment(rest).trim().parse::<i32>() {
-                Ok(y) => self.default_year = Some(y),
+                Ok(y) => self.ctx.default_year = Some(y),
                 Err(_) => self.warn(i + 1, format!("malformed year directive: {}", line)),
             }
             self.items.push(JournalItem::OtherDirective(line.to_string()));
             return Ok(Some(i + 1));
         }
         if let Some(rest) = line.strip_prefix("apply account ") {
-            self.account_prefix
+            self.ctx
+                .account_prefix
                 .push(strip_inline_comment(rest).trim().to_string());
             self.items.push(JournalItem::OtherDirective(line.to_string()));
             return Ok(Some(i + 1));
         }
         if line.trim() == "end apply account" {
-            if self.account_prefix.pop().is_none() {
+            if self.ctx.account_prefix.pop().is_none() {
                 self.warn(i + 1, "end apply account without matching apply account");
             }
             self.items.push(JournalItem::OtherDirective(line.to_string()));
@@ -307,7 +470,10 @@ impl<'a> Parser<'a> {
             .as_ref()
             .map(|c| parse_tags(&c.text))
             .unwrap_or_default();
-        let name = AccountName::new(name_part.trim());
+        // hledger applies the current `apply account` prefix and aliases to
+        // declared names too (`modifiedaccountnamep`), so `alias /^foo/ =
+        // bar` followed by `account foo:x` declares `bar:x`.
+        let name = self.resolve_account(name_part.trim());
 
         // Consume indented subdirective lines (comments carry tags like type:).
         let mut j = i + 1;
@@ -399,9 +565,13 @@ impl<'a> Parser<'a> {
         }
 
         if let Some(ref style) = format {
-            self.amount_ctx
+            self.ctx
+                .amount_ctx
                 .commodity_marks
                 .insert(commodity.clone(), style.decimal_mark);
+            self.ctx
+                .declared_styles
+                .insert(commodity.clone(), style.clone());
         }
 
         self.items
@@ -427,11 +597,13 @@ impl<'a> Parser<'a> {
                                 to: repl.to_string(),
                                 matcher: AliasMatcher::Regex(re),
                             });
-                            self.items.push(JournalItem::AliasDirective(AliasDirective {
+                            let directive = AliasDirective {
                                 from: pattern.to_string(),
                                 to: repl.to_string(),
                                 regex: true,
-                            }));
+                            };
+                            self.ctx.aliases.push(directive.clone());
+                            self.items.push(JournalItem::AliasDirective(directive));
                         }
                         Err(e) => self.warn(i + 1, format!("invalid alias regex: {}", e)),
                     }
@@ -453,8 +625,9 @@ impl<'a> Parser<'a> {
                 to: to.clone(),
                 matcher: AliasMatcher::Prefix(from.clone()),
             });
-            self.items
-                .push(JournalItem::AliasDirective(AliasDirective { from, to, regex: false }));
+            let directive = AliasDirective { from, to, regex: false };
+            self.ctx.aliases.push(directive.clone());
+            self.items.push(JournalItem::AliasDirective(directive));
         } else {
             self.warn(i + 1, format!("malformed alias directive: alias {}", rest));
         }
@@ -462,10 +635,10 @@ impl<'a> Parser<'a> {
 
     /// Apply `apply account` prefix and aliases to an account name.
     fn resolve_account(&self, raw: &str) -> AccountName {
-        let mut name = if self.account_prefix.is_empty() {
+        let mut name = if self.ctx.account_prefix.is_empty() {
             raw.to_string()
         } else {
-            format!("{}:{}", self.account_prefix.join(":"), raw)
+            format!("{}:{}", self.ctx.account_prefix.join(":"), raw)
         };
 
         for alias in &self.aliases {
@@ -481,7 +654,8 @@ impl<'a> Parser<'a> {
                 }
                 AliasMatcher::Regex(re) => {
                     if re.is_match(&name) {
-                        name = re.replace(&name, alias.to.as_str()).into_owned();
+                        // hledger replaces every match, not just the first.
+                        name = re.replace_all(&name, alias.to.as_str()).into_owned();
                     }
                 }
             }
@@ -574,7 +748,10 @@ impl<'a> Parser<'a> {
         let line_number = i + 1;
 
         let header = self.lines[i].trim();
-        let (header, mut comment) = split_inline_comment(header);
+        // hledger reads the header up to the first ';' with no quote
+        // handling: a description like `Bob's "thing` must not swallow the
+        // comment and its tags.
+        let (header, mut comment) = split_header_comment(header);
         let mut tags = comment
             .as_ref()
             .map(|c| parse_tags(&c.text))
@@ -589,7 +766,7 @@ impl<'a> Parser<'a> {
             None => (first_word, None),
         };
 
-        let date = parse_date_with_year(date_str, self.default_year).map_err(|e| {
+        let date = parse_date_with_year(date_str, self.ctx.default_year).map_err(|e| {
             ParseError::Syntax {
                 line: line_number,
                 message: e.to_string(),
@@ -766,12 +943,7 @@ impl<'a> Parser<'a> {
             Some(PostingAmount {
                 quantity: q.value,
                 commodity: String::new(),
-                style: AmountStyle {
-                    commodity_side: Side::Left,
-                    commodity_spaced: false,
-                    decimal_mark: q.decimal_mark,
-                    precision: q.precision,
-                },
+                style: q.style(Side::Left, false),
                 cost: None,
                 multiplier: true,
             })
@@ -784,13 +956,16 @@ impl<'a> Parser<'a> {
                 None
             } else {
                 let mut parsed =
-                    parse_amount_ctx(amt_part, &self.amount_ctx).map_err(|_| {
+                    parse_amount_ctx(amt_part, &self.ctx.amount_ctx).map_err(|_| {
                         ParseError::Syntax {
                             line: line_number,
                             message: format!("invalid amount: {}", amount_str),
                         }
                     })?;
                 parsed.cost = cost;
+                if !parsed.commodity.is_empty() {
+                    self.observe_style(&parsed.commodity.clone(), &parsed.style.clone());
+                }
                 Some(parsed)
             }
         };
@@ -850,7 +1025,7 @@ impl<'a> Parser<'a> {
             });
         }
 
-        let amt = parse_amount_ctx(assertion_str, &self.amount_ctx).map_err(|_| {
+        let amt = parse_amount_ctx(assertion_str, &self.ctx.amount_ctx).map_err(|_| {
             ParseError::Syntax {
                 line: line_number,
                 message: format!("invalid balance assertion amount: {}", assertion_str),
@@ -887,7 +1062,7 @@ impl<'a> Parser<'a> {
                     let inner = s[open + open_len..open + rel_close].trim();
                     let inner = inner.strip_prefix('=').unwrap_or(inner).trim();
                     let cost_amt =
-                        parse_amount_ctx(inner, &self.amount_ctx).map_err(|_| {
+                        parse_amount_ctx(inner, &self.ctx.amount_ctx).map_err(|_| {
                             ParseError::Syntax {
                                 line: line_number,
                                 message: format!("invalid lot price: {}", inner),
@@ -928,7 +1103,7 @@ impl<'a> Parser<'a> {
         if let Some(pos) = without_lot.find("@@") {
             let amt = without_lot[..pos].trim().to_string();
             let cost_str = without_lot[pos + 2..].trim();
-            let cost_amt = parse_amount_ctx(cost_str, &self.amount_ctx).map_err(|_| {
+            let cost_amt = parse_amount_ctx(cost_str, &self.ctx.amount_ctx).map_err(|_| {
                 ParseError::Syntax {
                     line: line_number,
                     message: format!("invalid cost amount: {}", cost_str),
@@ -946,7 +1121,7 @@ impl<'a> Parser<'a> {
         if let Some(pos) = without_lot.find('@') {
             let amt = without_lot[..pos].trim().to_string();
             let cost_str = without_lot[pos + 1..].trim();
-            let cost_amt = parse_amount_ctx(cost_str, &self.amount_ctx).map_err(|_| {
+            let cost_amt = parse_amount_ctx(cost_str, &self.ctx.amount_ctx).map_err(|_| {
                 ParseError::Syntax {
                     line: line_number,
                     message: format!("invalid cost amount: {}", cost_str),
@@ -969,7 +1144,7 @@ impl<'a> Parser<'a> {
         // P DATE [TIME] COMMODITY PRICE
         let rest = line.strip_prefix("P ")?.trim();
         let (date_str, rest) = split_first_word(rest);
-        let date = parse_date_with_year(date_str, self.default_year).ok()?;
+        let date = parse_date_with_year(date_str, self.ctx.default_year).ok()?;
         let rest = rest.trim();
 
         // Skip optional time component (HH:MM[:SS]).
@@ -1007,7 +1182,7 @@ impl<'a> Parser<'a> {
             return None;
         }
 
-        let price = parse_amount_ctx(price_str, &self.amount_ctx).ok()?;
+        let price = parse_amount_ctx(price_str, &self.ctx.amount_ctx).ok()?;
 
         Some(PriceDirective {
             date,
@@ -1101,6 +1276,21 @@ fn split_account_amount(s: &str) -> (&str, &str) {
     (s, "")
 }
 
+/// Split a transaction header at its first ';'. Unlike posting lines, the
+/// header has no quoted commodities, and hledger does no quote handling
+/// there.
+fn split_header_comment(s: &str) -> (&str, Option<Comment>) {
+    match s.find(';') {
+        Some(pos) => (
+            &s[..pos],
+            Some(Comment {
+                text: s[pos + 1..].trim().to_string(),
+            }),
+        ),
+        None => (s, None),
+    }
+}
+
 /// Split inline comment from text (a ';' outside double quotes).
 fn split_inline_comment(s: &str) -> (&str, Option<Comment>) {
     match find_outside_delims(s, ';') {
@@ -1192,6 +1382,7 @@ fn split_double_space(s: &str) -> (&str, &str) {
 mod tests {
     use super::*;
     use chrono::NaiveDate;
+    use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
 
     fn first_txn(journal: &Journal) -> &Transaction {
@@ -1211,6 +1402,128 @@ mod tests {
             .iter()
             .filter(|i| matches!(i, JournalItem::Transaction(_)))
             .count()
+    }
+
+    fn amounts(journal: &Journal) -> Vec<Decimal> {
+        journal
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                JournalItem::Transaction(t) => t.postings[0].amount.as_ref().map(|a| a.quantity),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn price_directive_does_not_force_a_decimal_mark() {
+        // hledger 1.50.3 reads these as 3.50 and 1234.56 EUR; forcing '.'
+        // after the P line made `3,50 EUR` into 350.
+        let journal = parse(concat!(
+            "P 2024-01-01 EUR $1.10\n\n",
+            "2024-01-02 a\n    x  3,50 EUR\n    y\n\n",
+            "2024-01-03 b\n    x  1.234,56 EUR\n    y\n",
+        ))
+        .unwrap();
+        assert_eq!(amounts(&journal), vec![dec!(3.50), dec!(1234.56)]);
+    }
+
+    #[test]
+    fn included_file_inherits_directives_and_commodities_flow_back() {
+        // Verified against hledger 1.50.3 with an `include`: the child sees
+        // the parent's D, Y, alias and apply account; the child's commodity
+        // directive styles the parent's amounts.
+        let (_, parent_ctx) = parse_with_context_result(
+            "D 1.000,00 EUR\nY 2023\nalias foo = bar\napply account top\n",
+            &ParseContext::default(),
+        )
+        .unwrap();
+        assert_eq!(parent_ctx.default_year, Some(2023));
+        assert_eq!(parent_ctx.account_prefix, vec!["top".to_string()]);
+
+        let (child, child_ctx) = parse_with_context_result(
+            "commodity 1,000.000 XYZ\n01-05 c\n    foo  1,5\n    y\n",
+            &parent_ctx,
+        )
+        .unwrap();
+        let txn = first_txn(&child);
+        assert_eq!(txn.date, NaiveDate::from_ymd_opt(2023, 1, 5).unwrap());
+        // hledger applies the prefix first, then aliases: `foo` becomes
+        // `top:foo`, which a basic alias anchored at the start does not match.
+        assert_eq!(txn.postings[0].account.full, "top:foo");
+        assert_eq!(txn.postings[1].account.full, "top:y");
+        let amt = txn.postings[0].amount.as_ref().unwrap();
+        assert_eq!(amt.commodity, "EUR");
+        assert_eq!(amt.quantity, dec!(1.5));
+
+        // The parent folds the child's global declarations back in.
+        let mut merged = parent_ctx.clone();
+        merged.absorb_global(&child_ctx);
+        assert_eq!(merged.style_for("XYZ").unwrap().precision, 3);
+        assert_eq!(merged.amount_ctx.commodity_marks.get("XYZ"), Some(&'.'));
+        // But not the child's file-scoped state.
+        assert_eq!(merged.account_prefix, vec!["top".to_string()]);
+
+        // With a decimal-mark in the parent, the child reads numbers that way.
+        let (_, ctx) =
+            parse_with_context_result("decimal-mark ,\n", &ParseContext::default()).unwrap();
+        let child = parse_with_context("2024-01-01 c\n    a  1.234 EUR\n    b\n", &ctx).unwrap();
+        assert_eq!(amounts(&child), vec![dec!(1234)]);
+    }
+
+    #[test]
+    fn context_reports_the_journals_style_for_each_commodity() {
+        let (_, ctx) = parse_with_context_result(
+            concat!(
+                "commodity 1.000,00 EUR\n\n",
+                "2024-01-01 a\n    x  $1,000.5\n    y\n\n",
+                "2024-01-02 b\n    x  $2.25\n    y\n\n",
+                "2024-01-03 c\n    x  10 AAPL\n    y\n",
+            ),
+            &ParseContext::default(),
+        )
+        .unwrap();
+        let usd = ctx.style_for("$").unwrap();
+        assert_eq!(usd.commodity_side, Side::Left);
+        assert_eq!(usd.precision, 2, "the highest precision seen");
+        assert_eq!(usd.digit_group_mark, Some(','));
+        let eur = ctx.style_for("EUR").unwrap();
+        assert_eq!(eur.decimal_mark, ',');
+        assert_eq!(eur.digit_group_mark, Some('.'));
+        assert_eq!(ctx.style_for("AAPL").unwrap().precision, 0);
+        assert!(ctx.style_for("BTC").is_none());
+        assert_eq!(ctx.known_commodities(), vec!["$", "AAPL", "EUR"]);
+    }
+
+    #[test]
+    fn regex_alias_replaces_every_match_and_applies_to_account_directives() {
+        // hledger: `alias /^foo/ = bar` + `account foo:x` declares bar:x.
+        let journal = parse("alias /o/ = 0\naccount foo:x\n2024-01-01 t\n    foo  $1\n    y\n").unwrap();
+        let declared = journal
+            .items
+            .iter()
+            .find_map(|i| match i {
+                JournalItem::AccountDirective(a) => Some(a.name.full.clone()),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(declared, "f00:x");
+        assert_eq!(first_txn(&journal).postings[0].account.full, "f00");
+    }
+
+    #[test]
+    fn unmatched_quote_in_description_does_not_swallow_the_comment() {
+        // hledger has no quote handling on the header line.
+        let journal = parse("2024-01-01 Bob's \"thing ; tag:val\n    a  $1\n    b\n").unwrap();
+        let txn = first_txn(&journal);
+        assert_eq!(txn.description, "Bob's \"thing");
+        assert_eq!(txn.tags, vec![Tag { name: "tag".into(), value: Some("val".into()) }]);
+
+        // Quoted commodities on posting lines still protect their ';'.
+        let journal = parse("2024-01-01 x\n    a  1 \"A;B\" ; note:n\n    b\n").unwrap();
+        let p = &first_txn(&journal).postings[0];
+        assert_eq!(p.amount.as_ref().unwrap().commodity, "A;B");
+        assert_eq!(p.tags[0].name, "note");
     }
 
     #[test]

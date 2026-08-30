@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { format } from "date-fns";
 import * as api from "../../api/commands";
 import type { TransactionSummary } from "../../api/types";
 import { TransactionDetail } from "./TransactionDetail";
@@ -57,7 +58,7 @@ export function TransactionEditorSheet({
     return (
       <div className="flex flex-col h-full">
         <div className="flex items-center gap-2 px-4 py-3 border-b border-gray-200 dark:border-gray-700">
-          <button onClick={onClose} className="p-2 -ml-2 text-gray-600 dark:text-gray-300">
+          <button onClick={onClose} aria-label="Back" className="p-2 -ml-2 min-w-[44px] min-h-[44px] text-gray-600 dark:text-gray-300">
             &larr;
           </button>
           <h2 className="text-base font-semibold text-gray-900 dark:text-gray-100">
@@ -84,7 +85,9 @@ export function TransactionEditorSheet({
         title={duplicating ? "Duplicate Transaction" : "Edit Transaction"}
         chooseFile={duplicating}
         prefill={{
-          date: txn.date,
+          // A copy is a new entry, so it happens today rather than whenever
+          // the original did.
+          date: duplicating ? format(new Date(), "yyyy-MM-dd") : txn.date,
           status: txn.status,
           description: txn.description,
           comment: txn.comment ?? "",

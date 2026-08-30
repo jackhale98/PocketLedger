@@ -3,6 +3,8 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::fmt;
 
+use crate::error::LedgerError;
+
 /// A multi-commodity amount. Each commodity is tracked independently.
 /// This is the fundamental building block for all balance calculations.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -27,14 +29,47 @@ impl MixedAmount {
         Self { amounts }
     }
 
-    /// Add a quantity of a commodity.
-    pub fn add(&mut self, commodity: &str, quantity: Decimal) {
+    /// Add a quantity of a commodity, reporting overflow instead of
+    /// panicking: a journal is user data, and a 29-digit amount must produce
+    /// a warning, not a crash. On overflow the entry is left unchanged.
+    pub fn try_add(&mut self, commodity: &str, quantity: Decimal) -> Result<(), LedgerError> {
         let entry = self.amounts.entry(commodity.to_string()).or_insert(Decimal::ZERO);
-        *entry += quantity;
-        // Remove zero entries to keep the map clean
-        if entry.is_zero() {
-            self.amounts.remove(commodity);
+        match entry.checked_add(quantity) {
+            Some(sum) => {
+                *entry = sum;
+                // Remove zero entries to keep the map clean
+                if sum.is_zero() {
+                    self.amounts.remove(commodity);
+                }
+                Ok(())
+            }
+            None => {
+                if entry.is_zero() {
+                    self.amounts.remove(commodity);
+                }
+                Err(LedgerError::Overflow {
+                    message: format!("adding {} {} overflows", quantity, commodity),
+                })
+            }
         }
+    }
+
+    /// Add a quantity of a commodity. On overflow the total saturates at the
+    /// representable limit; use [`try_add`](Self::try_add) where the caller
+    /// can report the problem.
+    pub fn add(&mut self, commodity: &str, quantity: Decimal) {
+        if self.try_add(commodity, quantity).is_err() {
+            let limit = if quantity.is_sign_negative() { Decimal::MIN } else { Decimal::MAX };
+            self.amounts.insert(commodity.to_string(), limit);
+        }
+    }
+
+    /// Add another MixedAmount, reporting overflow.
+    pub fn try_add_mixed(&mut self, other: &MixedAmount) -> Result<(), LedgerError> {
+        for (commodity, quantity) in &other.amounts {
+            self.try_add(commodity, *quantity)?;
+        }
+        Ok(())
     }
 
     /// Add another MixedAmount.
@@ -49,6 +84,18 @@ impl MixedAmount {
         for (commodity, quantity) in &other.amounts {
             self.add(commodity, -*quantity);
         }
+    }
+
+    /// Scale every quantity, reporting overflow.
+    pub fn try_scale(&self, factor: Decimal) -> Result<MixedAmount, LedgerError> {
+        let mut out = MixedAmount::zero();
+        for (commodity, quantity) in &self.amounts {
+            let scaled = quantity.checked_mul(factor).ok_or_else(|| LedgerError::Overflow {
+                message: format!("{} {} * {} overflows", quantity, commodity, factor),
+            })?;
+            out.try_add(commodity, scaled)?;
+        }
+        Ok(out)
     }
 
     /// Negate all amounts.
@@ -184,6 +231,19 @@ mod tests {
     fn display_zero() {
         let amt = MixedAmount::zero();
         assert_eq!(format!("{}", amt), "0");
+    }
+
+    #[test]
+    fn overflow_is_an_error_not_a_panic() {
+        let huge = Decimal::MAX;
+        let mut amt = MixedAmount::single("FOO", huge);
+        assert!(amt.try_add("FOO", huge).is_err());
+        // The failed addition left the total untouched.
+        assert_eq!(amt.get("FOO"), huge);
+        // The infallible variant saturates instead of panicking.
+        amt.add("FOO", huge);
+        assert_eq!(amt.get("FOO"), Decimal::MAX);
+        assert!(MixedAmount::single("FOO", huge).try_scale(dec!(2)).is_err());
     }
 
     #[test]

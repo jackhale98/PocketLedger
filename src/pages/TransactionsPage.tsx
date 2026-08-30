@@ -1,4 +1,5 @@
-import { useState, useMemo, useEffect, useRef, useCallback } from "react";
+import { useState, useMemo, useEffect, useRef, useCallback, useLayoutEffect } from "react";
+import { format } from "date-fns";
 import { useJournalStore } from "../store/journalStore";
 import { useSettingsStore } from "../store/settingsStore";
 import { TransactionList } from "../components/transactions/TransactionList";
@@ -14,8 +15,15 @@ const QUERY_PREFIX_RE =
 
 const PAGE_SIZE = 100;
 
+const headerButton = (active: boolean) =>
+  `text-xs font-medium px-2 min-h-[44px] min-w-[44px] rounded ${
+    active
+      ? "bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400"
+      : "text-gray-500 dark:text-gray-400"
+  }`;
+
 export function TransactionsPage() {
-  const { transactions, addTransaction, refresh } = useJournalStore();
+  const { transactions, addTransaction, refresh, loadGeneration } = useJournalStore();
   const { defaultCurrency } = useSettingsStore();
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
   // Prefill for a new transaction copied from an existing one.
@@ -35,6 +43,10 @@ export function TransactionsPage() {
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
   const searchSeq = useRef(0);
   const observerRef = useRef<IntersectionObserver | null>(null);
+  // Where the list was scrolled to before a detail view replaced it, so
+  // coming back lands on the same row instead of at the top.
+  const listRef = useRef<HTMLDivElement>(null);
+  const savedScrollTop = useRef(0);
 
   const isBackendQuery =
     (advancedSearch || QUERY_PREFIX_RE.test(searchQuery)) && !!searchQuery.trim();
@@ -89,10 +101,27 @@ export function TransactionsPage() {
     return result;
   }, [transactions, searchResults, isBackendQuery, searchQuery, dateFrom, dateTo, sortNewestFirst]);
 
-  // Reset the render window whenever the filtered set changes.
+  // Reset the render window when the filter changes -- not when the list
+  // merely refreshed after a save, which used to snap a long scroll back to
+  // the top.
   useEffect(() => {
     setVisibleCount(PAGE_SIZE);
-  }, [filteredTransactions]);
+  }, [searchQuery, isBackendQuery, dateFrom, dateTo, sortNewestFirst]);
+
+  // A reload from disk (a git pull, say) can renumber transactions. If the
+  // count moved while a detail or editor was open, the index it holds may now
+  // name a different entry, so close it rather than save over the wrong one.
+  const lastCount = useRef(transactions.length);
+  useEffect(() => {
+    const changed = transactions.length !== lastCount.current;
+    lastCount.current = transactions.length;
+    if (!changed) return;
+    setSelectedIndex(null);
+    setEditIndex(null);
+    setDuplicateOf(null);
+    // loadGeneration is the trigger: every backend refresh bumps it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loadGeneration]);
 
   // Sentinel at the list bottom grows the window when it scrolls into view.
   const sentinelRef = useCallback((node: HTMLDivElement | null) => {
@@ -131,11 +160,32 @@ export function TransactionsPage() {
       ? transactions.find((t) => t.index === duplicateOf) ?? null
       : null;
 
+  const listShown = !(showForm || editTransaction || duplicateSource || selectedTransaction);
+
+  // Restore the scroll offset once the list is back on screen.
+  useLayoutEffect(() => {
+    if (listShown && listRef.current) {
+      listRef.current.scrollTop = savedScrollTop.current;
+    }
+  }, [listShown]);
+
+  const openDetail = (index: number) => {
+    savedScrollTop.current = listRef.current?.scrollTop ?? 0;
+    setSelectedIndex(index);
+  };
+
+  const openForm = () => {
+    savedScrollTop.current = listRef.current?.scrollTop ?? 0;
+    setShowForm(true);
+  };
+
   if (showForm || editTransaction || duplicateSource) {
     const source = editTransaction ?? duplicateSource;
     const prefill = source
       ? {
-          date: source.date,
+          // A copy is a new entry, so it happens today rather than whenever
+          // the original did.
+          date: duplicateSource ? format(new Date(), "yyyy-MM-dd") : source.date,
           status: source.status,
           description: source.description,
           comment: source.comment ?? "",
@@ -194,37 +244,32 @@ export function TransactionsPage() {
     );
   }
 
-  const hasActiveFilters = dateFrom || dateTo;
+  const hasActiveFilters = Boolean(dateFrom || dateTo);
 
   return (
     <div className="flex flex-col h-full relative">
-      <div className="px-4 py-3 border-b border-gray-200 dark:border-gray-700 space-y-2">
+      <div className="px-4 py-2 border-b border-gray-200 dark:border-gray-700 space-y-2">
         <div className="flex items-center justify-between">
           <h1 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Transactions</h1>
-          <div className="flex gap-2">
+          <div className="flex gap-1 -mr-2">
             <button
               onClick={() => setSortNewestFirst(!sortNewestFirst)}
-              className="text-xs font-medium px-2 py-1 rounded text-gray-500 dark:text-gray-400"
+              aria-label={sortNewestFirst ? "Sorted newest first; switch to oldest first" : "Sorted oldest first; switch to newest first"}
+              className={headerButton(false)}
             >
-              {sortNewestFirst ? "New \u2193" : "Old \u2191"}
+              {sortNewestFirst ? "New ↓" : "Old ↑"}
             </button>
             <button
               onClick={() => setAdvancedSearch(!advancedSearch)}
-              className={`text-xs font-medium px-2 py-1 rounded ${
-                advancedSearch
-                  ? "bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400"
-                  : "text-gray-500 dark:text-gray-400"
-              }`}
+              aria-pressed={advancedSearch}
+              className={headerButton(advancedSearch)}
             >
               Query
             </button>
             <button
               onClick={() => setShowFilters(!showFilters)}
-              className={`text-xs font-medium px-2 py-1 rounded ${
-                hasActiveFilters
-                  ? "bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400"
-                  : "text-gray-500 dark:text-gray-400"
-              }`}
+              aria-pressed={showFilters}
+              className={headerButton(hasActiveFilters)}
             >
               {showFilters ? "Hide" : "Filter"}
             </button>
@@ -240,7 +285,12 @@ export function TransactionsPage() {
               ? "Query: acct:food amt:>100 not:rent..."
               : "Search transactions..."
           }
-          className="w-full px-3 py-2 bg-gray-100 dark:bg-gray-800 rounded-lg text-sm text-gray-900 dark:text-gray-100 placeholder-gray-500 dark:placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
+          aria-label="Search transactions"
+          autoCapitalize="none"
+          autoCorrect="off"
+          spellCheck={false}
+          enterKeyHint="search"
+          className="w-full px-3 py-2 min-h-[44px] bg-gray-100 dark:bg-gray-800 rounded-lg text-sm text-gray-900 dark:text-gray-100 placeholder-gray-500 dark:placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
         />
 
         {searchError && (
@@ -262,7 +312,7 @@ export function TransactionsPage() {
             </span>
             <button
               onClick={() => setHintDismissed(true)}
-              className="shrink-0 text-gray-400 dark:text-gray-500"
+              className="shrink-0 text-gray-400 dark:text-gray-500 min-w-[32px] min-h-[32px] -my-1 -mr-1"
               aria-label="Dismiss hint"
             >
               &times;
@@ -279,7 +329,7 @@ export function TransactionsPage() {
         )}
 
         {(searchQuery || hasActiveFilters) && (
-          <div className="text-xs text-gray-500 dark:text-gray-400">
+          <div className="text-xs text-gray-500 dark:text-gray-400" aria-live="polite">
             {searching
               ? "Searching..."
               : `${filteredTransactions.length} of ${transactions.length} transactions`}
@@ -287,8 +337,8 @@ export function TransactionsPage() {
         )}
       </div>
 
-      <div className="flex-1 overflow-y-auto overflow-x-hidden">
-        <TransactionList transactions={visibleTransactions} onSelect={setSelectedIndex} />
+      <div ref={listRef} className="flex-1 overflow-y-auto overflow-x-hidden">
+        <TransactionList transactions={visibleTransactions} onSelect={openDetail} />
         {filteredTransactions.length > visibleCount && (
           <div
             ref={sentinelRef}
@@ -300,7 +350,7 @@ export function TransactionsPage() {
       </div>
 
       <button
-        onClick={() => setShowForm(true)}
+        onClick={openForm}
         className="absolute bottom-4 right-4 w-14 h-14 bg-blue-600 text-white rounded-full shadow-lg flex items-center justify-center text-2xl font-light active:bg-blue-700"
         aria-label="Add transaction"
       >

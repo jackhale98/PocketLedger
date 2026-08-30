@@ -130,12 +130,21 @@ pub fn valued_quantity(
     let mut total = Decimal::ZERO;
     let mut unconvertible = BTreeSet::new();
     for (commodity, quantity) in &m.amounts {
-        if commodity == target || commodity.is_empty() {
-            total += *quantity;
-        } else if let Some(converted) = price_db.convert(*quantity, commodity, target, date) {
-            total += converted;
+        // A bare number is its own commodity, not a synonym for the target:
+        // hledger keeps `100` and `$100` apart. (A `D` directive assigns a
+        // commodity at parse time, so it never reaches here empty.)
+        let converted = if commodity == target {
+            Some(*quantity)
+        } else if commodity.is_empty() {
+            None
         } else {
-            unconvertible.insert(commodity.clone());
+            price_db.convert(*quantity, commodity, target, date)
+        };
+        match converted.and_then(|c| total.checked_add(c)) {
+            Some(sum) => total = sum,
+            None => {
+                unconvertible.insert(commodity.clone());
+            }
         }
     }
     (total, unconvertible)
@@ -467,6 +476,21 @@ pub fn cash_flow(
     }
 }
 
+/// The postings that pass `keep`, in posting-date order (stable, so parse
+/// order is preserved within a day), for running-balance series.
+fn postings_by_date<'a>(
+    transactions: &'a [ResolvedTransaction],
+    keep: impl Fn(&crate::balance::ResolvedPosting) -> bool,
+) -> Vec<&'a crate::balance::ResolvedPosting> {
+    let mut postings: Vec<&crate::balance::ResolvedPosting> = transactions
+        .iter()
+        .flat_map(|t| t.postings.iter())
+        .filter(|p| keep(p))
+        .collect();
+    postings.sort_by_key(|p| p.date);
+    postings
+}
+
 /// Net worth over time: assets + liabilities valued in the target commodity at
 /// the end of each month (market prices; unpriceable holdings excluded from
 /// the number — see `unconvertible_commodities` for the warning list).
@@ -489,19 +513,21 @@ pub fn net_worth_series(
 
     let mut points = Vec::new();
     let mut balance = MixedAmount::zero();
-    let mut txn_idx = 0;
+    let mut posting_idx = 0;
+
+    // Like every other report, bucket by posting date (a `date:` tag moves a
+    // posting), not by the transaction's date.
+    let postings = postings_by_date(transactions, |p| {
+        let t = classifier.classify(&p.account.full);
+        t.is_asset() || t == AccountType::Liability
+    });
 
     let step = step.unwrap_or_else(|| series_step(first_date, last_date));
     let mut current = period_end(first_date, step);
     while current <= period_end(last_date, step) {
-        while txn_idx < transactions.len() && transactions[txn_idx].date <= current {
-            for posting in &transactions[txn_idx].postings {
-                let t = classifier.classify(&posting.account.full);
-                if t.is_asset() || t == AccountType::Liability {
-                    balance.add_mixed(&posting.amount);
-                }
-            }
-            txn_idx += 1;
+        while posting_idx < postings.len() && postings[posting_idx].date <= current {
+            balance.add_mixed(&postings[posting_idx].amount);
+            posting_idx += 1;
         }
 
         let (net_worth, _skipped) =
@@ -538,18 +564,18 @@ pub fn account_series(
 
     let mut points = Vec::new();
     let mut balance = MixedAmount::zero();
-    let mut txn_idx = 0;
+    let mut posting_idx = 0;
+
+    let postings = postings_by_date(transactions, |p| {
+        account_matches_prefix(&p.account.full, account_prefix)
+    });
 
     let step = step.unwrap_or_else(|| series_step(first_date, last_date));
     let mut current = period_end(first_date, step);
     while current <= period_end(last_date, step) {
-        while txn_idx < transactions.len() && transactions[txn_idx].date <= current {
-            for posting in &transactions[txn_idx].postings {
-                if account_matches_prefix(&posting.account.full, account_prefix) {
-                    balance.add_mixed(&posting.amount);
-                }
-            }
-            txn_idx += 1;
+        while posting_idx < postings.len() && postings[posting_idx].date <= current {
+            balance.add_mixed(&postings[posting_idx].amount);
+            posting_idx += 1;
         }
 
         let (value, _skipped) = valued_quantity(&balance, target_commodity, price_db, current);
@@ -955,6 +981,41 @@ mod tests {
 
     fn no_prices() -> PriceDb {
         PriceDb::new()
+    }
+
+    fn d(y: i32, m: u32, day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, day).unwrap()
+    }
+
+    #[test]
+    fn bare_numbers_are_not_folded_into_the_target_commodity() {
+        let mut m = MixedAmount::zero();
+        m.add("$", dec!(100));
+        m.add("", dec!(7));
+        let (total, skipped) = valued_quantity(&m, "$", &no_prices(), d(2024, 1, 1));
+        assert_eq!(total, dec!(100));
+        assert_eq!(skipped.into_iter().collect::<Vec<_>>(), vec![String::new()]);
+        // Asking for the empty commodity itself gets only the bare numbers.
+        let (total, _) = valued_quantity(&m, "", &no_prices(), d(2024, 1, 1));
+        assert_eq!(total, dec!(7));
+    }
+
+    #[test]
+    fn net_worth_buckets_by_posting_date() {
+        // The $100 posting is dated in February by its tag, so January's net
+        // worth must not include it (every other report already used the
+        // posting date).
+        let txns = resolve(
+            "2024-01-10 a\n    assets:bank  $100 ; date:2024-02-05\n    income:job\n\n\
+             2024-01-20 b\n    assets:bank  $10\n    income:job\n\n\
+             2024-03-01 c\n    assets:bank  $1\n    income:job\n",
+        );
+        let points = net_worth_series(
+            &txns, &classifier(), &no_prices(), "$",
+            Some(d(2024, 1, 1)), Some(d(2024, 3, 31)), Some(SeriesStep::Month),
+        );
+        let values: Vec<&str> = points.iter().map(|p| p.value.as_str()).collect();
+        assert_eq!(values, vec!["10", "110", "111"]);
     }
 
     #[test]

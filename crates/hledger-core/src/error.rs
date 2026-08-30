@@ -15,6 +15,9 @@ pub enum LedgerError {
     #[error("Multiple postings without amounts in transaction at line {line}")]
     MultipleInferredAmounts { line: usize },
 
+    #[error("Amount too large: {message}")]
+    Overflow { message: String },
+
     #[error("{0}")]
     Other(String),
 }

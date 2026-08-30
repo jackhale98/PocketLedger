@@ -50,6 +50,9 @@ pub fn storage_dir(app: &AppHandle) -> Result<PathBuf, String> {
 /// iOS only lists an app's Documents folder in the Files app once it holds at
 /// least one file — an empty folder simply doesn't appear, which looks like
 /// the file-sharing keys are broken. Drop a README so it's always there.
+/// The placeholder `ensure_visible_in_files` drops; never listed as a journal.
+const README_NAME: &str = "README.txt";
+
 fn ensure_visible_in_files(dir: &std::path::Path) {
     let Ok(mut entries) = fs::read_dir(dir) else {
         return;
@@ -58,7 +61,7 @@ fn ensure_visible_in_files(dir: &std::path::Path) {
         return;
     }
     let _ = fs::write(
-        dir.join("README.txt"),
+        dir.join(README_NAME),
         "PocketHLedger keeps your journals in this folder.\n\n         Files you add here appear in the app. Journals that use `include`\n         need the included files here too, alongside the main journal.\n\n         To version these files with git, use an iOS git client that can work\n         on a folder in place and point it at this folder.\n",
     );
 }
@@ -174,6 +177,10 @@ fn scan_dir(
         if !JOURNAL_EXTENSIONS.contains(&ext.as_str()) {
             continue;
         }
+        // Our own placeholder (README.txt) has a journal extension but isn't one.
+        if depth == 0 && name == README_NAME {
+            continue;
+        }
         let meta = entry.metadata().ok();
         let modified = meta
             .as_ref()
@@ -201,7 +208,11 @@ fn scan_dir(
 /// from `list_stored_journals`; anything that escapes the storage directory
 /// is refused rather than trusted.
 #[tauri::command]
-pub async fn delete_stored_journal(name: String, app: AppHandle) -> Result<(), String> {
+pub async fn delete_stored_journal(
+    name: String,
+    app: AppHandle,
+    state: State<'_, Mutex<crate::AppState>>,
+) -> Result<(), String> {
     let dir = storage_dir(&app)?;
     let target = dir.join(&name);
 
@@ -217,7 +228,14 @@ pub async fn delete_stored_journal(name: String, app: AppHandle) -> Result<(), S
 
     fs::remove_file(&canonical_target).map_err(|e| format!("Cannot remove '{name}': {e}"))?;
     // Its backup is ours too, and leaving it behind would strand the data.
-    let _ = fs::remove_file(canonical_target.with_extension("bak"));
+    // Backups live in the backup dir under a path-hashed name (see
+    // journal::backup_path), keyed by the path the journal was loaded from.
+    let backup_dir = crate::lock_or_recover(&state).backup_dir.clone();
+    if let Some(bdir) = backup_dir {
+        for candidate in [&target, &canonical_target] {
+            let _ = fs::remove_file(super::journal::backup_path(&bdir, candidate));
+        }
+    }
     Ok(())
 }
 
@@ -264,6 +282,26 @@ pub async fn import_journal_file(path: String, app: AppHandle) -> Result<Importe
     import_into_storage(&normalize_path(&path), &app)
 }
 
+/// Store journal text the frontend already read itself. Android's document
+/// picker yields `content://` URIs that `std::fs` can't open, but the fs
+/// plugin's `readTextFile` can; the frontend reads the file and hands us the
+/// text plus the display name, and it lands in storage exactly as a picked
+/// file would. The text must be a parseable journal so a mis-picked file is
+/// refused before it's stored.
+#[tauri::command]
+pub async fn import_journal_text(
+    name: String,
+    text: String,
+    app: AppHandle,
+) -> Result<ImportedJournal, String> {
+    let file_name = sanitize_journal_name(&name)?;
+    if text.trim().is_empty() {
+        return Err(format!("'{file_name}' is empty — nothing to import."));
+    }
+    hledger_parser::parse(&text).map_err(|e| format!("'{file_name}' is not a journal: {e}"))?;
+    store_bytes(None, &file_name, text.as_bytes(), &app)
+}
+
 fn import_into_storage(
     src: &std::path::Path,
     app: &AppHandle,
@@ -279,17 +317,35 @@ fn import_into_storage(
         ));
     }
 
-    let dir = storage_dir(app)?;
     let file_name = src
         .file_name()
         .and_then(|n| n.to_str())
         .filter(|n| !n.is_empty())
         .unwrap_or("imported.journal")
         .to_string();
+    store_bytes(Some(src), &file_name, &bytes, app)
+}
+
+/// The shared tail of importing: place `bytes` under `file_name` in storage.
+/// `src` is the picked file when there is one (for the self-copy check and
+/// Inbox cleanup); None when the bytes came from the frontend.
+fn store_bytes(
+    src: Option<&std::path::Path>,
+    file_name: &str,
+    bytes: &[u8],
+    app: &AppHandle,
+) -> Result<ImportedJournal, String> {
+    let dir = storage_dir(app)?;
+    let file_name = file_name.to_string();
+    let cleanup = |src: Option<&std::path::Path>| {
+        if let Some(src) = src {
+            cleanup_inbox_copy(src);
+        }
+    };
 
     let dest = dir.join(&file_name);
     // Refuse to copy a file onto itself (already stored).
-    if src == dest {
+    if src == Some(dest.as_path()) {
         return Ok(ImportedJournal {
             path: dest.to_string_lossy().into_owned(),
             file_name,
@@ -301,7 +357,7 @@ fn import_into_storage(
     if dest.exists() {
         match fs::read(&dest) {
             Ok(existing) if existing == bytes => {
-                cleanup_inbox_copy(src);
+                cleanup(src);
                 return Ok(ImportedJournal {
                     path: dest.to_string_lossy().into_owned(),
                     file_name,
@@ -319,9 +375,9 @@ fn import_into_storage(
                     };
                     let candidate = dir.join(&candidate_name);
                     if !candidate.exists() {
-                        fs::write(&candidate, &bytes)
+                        fs::write(&candidate, bytes)
                             .map_err(|e| format!("Cannot write {}: {e}", candidate.display()))?;
-                        cleanup_inbox_copy(src);
+                        cleanup(src);
                         return Ok(ImportedJournal {
                             path: candidate.to_string_lossy().into_owned(),
                             file_name: candidate_name,
@@ -335,8 +391,8 @@ fn import_into_storage(
         }
     }
 
-    fs::write(&dest, &bytes).map_err(|e| format!("Cannot write {}: {e}", dest.display()))?;
-    cleanup_inbox_copy(src);
+    fs::write(&dest, bytes).map_err(|e| format!("Cannot write {}: {e}", dest.display()))?;
+    cleanup(src);
     Ok(ImportedJournal {
         path: dest.to_string_lossy().into_owned(),
         file_name,
@@ -448,7 +504,22 @@ fn split_name(name: &str) -> (String, String) {
 
 #[cfg(test)]
 mod tests {
-    use super::{looks_transient, sanitize_journal_name, split_name};
+    use super::{looks_transient, sanitize_journal_name, scan_dir, split_name, README_NAME};
+
+    #[test]
+    fn readme_placeholder_is_not_listed_as_a_journal() {
+        let dir = std::env::temp_dir().join(format!("pockethledger-scan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(README_NAME), "hello").unwrap();
+        std::fs::write(dir.join("notes.txt"), "2024-01-01 T\n").unwrap();
+        std::fs::write(dir.join("main.journal"), "").unwrap();
+        let mut out = Vec::new();
+        scan_dir(&dir, &dir, 0, &mut out).unwrap();
+        let mut names: Vec<_> = out.iter().map(|j| j.name.clone()).collect();
+        names.sort();
+        assert_eq!(names, vec!["main.journal".to_string(), "notes.txt".to_string()]);
+    }
 
     #[test]
     fn split_name_handles_extensions() {

@@ -31,7 +31,9 @@ export function normalizeAmountInput(raw: string): string | null {
   }
 
   // Strip grouping spaces/apostrophes (e.g. "1 234,56" or "1'234.56")
-  s = s.replace(/[\s  ']/g, "");
+  // \u00a0 no-break, \u202f narrow no-break and \u2009 thin spaces all
+  // appear as grouping marks in locale-formatted numbers.
+  s = s.replace(/[\s\u00a0\u202f\u2009']/g, "");
   if (s === "" || !/^[\d.,]+$/.test(s)) return null;
 
   const lastDot = s.lastIndexOf(".");
@@ -101,4 +103,29 @@ export function exactDecimalSum(amounts: string[]): string | null {
 /** True when the dot-decimal string represents exactly zero. */
 export function isDecimalZero(value: string): boolean {
   return /^-?0*(\.0*)?$/.test(value.trim());
+}
+
+/** Sum quantities exactly and return the result with the widest scale seen
+ *  among the inputs, so "1.5" + "2.25" is "3.75", never "3.75000000000001".
+ *  Falls back to "0" when nothing valid was given. */
+export function sumQuantities(quantities: string[]): string {
+  return exactDecimalSum(quantities) ?? "0";
+}
+
+/** Negate a dot-decimal string without going through a float. */
+export function negateDecimal(value: string): string {
+  const s = value.trim();
+  if (s === "") return s;
+  if (s.startsWith("-")) return s.slice(1);
+  if (s.startsWith("+")) return `-${s.slice(1)}`;
+  return `-${s}`;
+}
+
+/** Flip the sign of whatever the user has typed so far. Keeps the text as
+ *  typed (grouping and comma decimals included); an empty field gets "-" so
+ *  the next digits come out negative. */
+export function toggleSignInput(raw: string): string {
+  const s = raw.trim();
+  if (s === "" || s === "-") return s === "-" ? "" : "-";
+  return negateDecimal(s);
 }

@@ -103,9 +103,10 @@ The Budget tab shows progress bars comparing actual spending to targets, with a 
 
 ### Prerequisites
 
-- Rust stable with `aarch64-apple-ios` target (for iOS)
+- Rust 1.98.0 (pinned in `rust-toolchain.toml`; rustup picks it up automatically) with the `aarch64-apple-ios` / `aarch64-linux-android` targets for mobile
 - Node.js 20+
 - Tauri CLI (`npm install @tauri-apps/cli`)
+- Android: JDK 17, Android SDK with NDK r28+ (`NDK_HOME` set) for 16 KB page-size compliance
 
 ### Development
 
@@ -126,8 +127,14 @@ npx tauri ios dev
 ```bash
 npx tauri build                              # Desktop
 npx tauri ios build --export-method app-store-connect  # iOS
-npx tauri android build                      # Android
+npx tauri android build --aab --apk          # Android (release AAB for Play + APK for sideloading)
 ```
+
+`src-tauri/Info.ios.plist` (file sharing, export compliance, `.journal`
+document types) is merged into the generated Info.plist by the Tauri CLI, so
+local iOS builds get it without any CI step. Android release builds also get
+signing, system-bar insets and a network-free manifest from the patch scripts
+in `scripts/ci/` (see [docs/android-release-setup.md](docs/android-release-setup.md)).
 
 ## CI/CD
 
@@ -136,11 +143,32 @@ GitHub Actions workflows in `.github/workflows/`:
 | Workflow | Trigger | What it does |
 |----------|---------|-------------|
 | `ci.yml` | Push to main | Rust tests, cargo check, TypeScript check, Vite build |
-| `build-ios.yml` | Tag `v*` | Build IPA, sign, upload to TestFlight |
-| `build-android.yml` | Tag `v*` | Build debug APK |
-| `build-desktop.yml` | Tag `v*` | Build for macOS, Linux, Windows |
+| `build-ios.yml` | Tag `v*` | Build IPA (Xcode 26.x pinned, privacy manifest, iPhone-only), sign, upload to TestFlight, keep dSYMs |
+| `build-android.yml` | Tag `v*` | Build release AAB + APK (arm64, NDK r28, 16 KB pages, no INTERNET permission), signed when the `ANDROID_*` secrets exist |
+| `build-desktop.yml` | Tag `v*` | Build dmg / deb + AppImage / nsis for macOS, Linux, Windows |
 
-See [docs/ios-testflight-setup.md](docs/ios-testflight-setup.md) for Apple signing setup.
+All workflows pin Rust to the version in `rust-toolchain.toml`.
+
+See [docs/ios-testflight-setup.md](docs/ios-testflight-setup.md) for Apple
+signing setup and [docs/android-release-setup.md](docs/android-release-setup.md)
+for the Play upload keystore, Play App Signing, the API 36 target and 16 KB
+page-size requirements.
+
+## Releasing
+
+The version lives in `package.json`, `src-tauri/Cargo.toml`,
+`src-tauri/tauri.conf.json` and `Cargo.lock`. Change all of them at once:
+
+```bash
+scripts/bump-version.sh 0.2.21          # edit the files
+scripts/bump-version.sh 0.2.21 --tag    # edit, commit "Release 0.2.21", tag v0.2.21
+git push origin main v0.2.21            # the tag triggers the three build workflows
+```
+
+Each workflow attaches its artifacts to a single draft GitHub release for the
+tag. iOS builds get `CFBundleVersion = <version>.<run number>` and Android
+builds get `versionCode = <run number>`, so re-running a tag never produces a
+duplicate the stores reject.
 
 ## Testing
 
