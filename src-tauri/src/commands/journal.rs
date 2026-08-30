@@ -953,12 +953,11 @@ fn merge_with_original(
     edited.tags = original.tags.clone();
     edited.comment = merge_comment(edited.comment.as_ref(), original.comment.as_ref());
 
-    let aligned = edited.postings.len() == original.postings.len()
-        && edited
-            .postings
-            .iter()
-            .zip(original.postings.iter())
-            .all(|(new, old)| new.account.full == old.account.full);
+    // The form shows the postings in file order and cannot reorder them, so
+    // an unchanged count means row i is still posting i — even when its
+    // account was renamed. Matching on account names here refused a plain
+    // account correction on any transaction with a cost or assertion.
+    let aligned = edited.postings.len() == original.postings.len();
 
     if aligned {
         for (i, new_p) in edited.postings.iter_mut().enumerate() {
@@ -974,13 +973,21 @@ fn merge_with_original(
 
             match (&mut new_p.amount, &old_p.amount) {
                 (Some(new_amt), Some(old_amt)) => {
-                    // Carry the cost and the original display style; keep the
-                    // higher precision so values never truncate.
-                    new_amt.cost = old_amt.cost.clone();
                     if new_amt.commodity == old_amt.commodity {
+                        // Carry the cost and the original display style; keep
+                        // the higher precision so values never truncate.
+                        new_amt.cost = old_amt.cost.clone();
                         let precision = new_amt.style.precision.max(old_amt.style.precision);
                         new_amt.style = old_amt.style.clone();
                         new_amt.style.precision = precision;
+                    } else if old_amt.cost.is_some() {
+                        // A cost prices the old commodity; attaching it to a
+                        // different one would write nonsense.
+                        return Err(format!(
+                            "Posting {} has a cost (@) on its {} amount, which the editor cannot carry over to a different commodity. Keep the commodity, or edit the journal file in a text editor.",
+                            i + 1,
+                            old_amt.commodity
+                        ));
                     }
                 }
                 (new_amt @ Some(_), None) => {
@@ -1007,7 +1014,7 @@ fn merge_with_original(
     let original_has_extras = original.postings.iter().any(posting_has_extras);
     if original_has_extras {
         return Err(
-            "This transaction contains costs, balance assertions, tags, posting statuses or virtual postings that the editor cannot preserve when postings are added, removed or reordered. Keep the original posting structure, or edit the journal file in a text editor."
+            "This transaction contains costs, balance assertions, tags, posting statuses or virtual postings that the editor cannot preserve when postings are added or removed. Keep the same number of postings, or edit the journal file in a text editor."
                 .to_string(),
         );
     }
@@ -1651,14 +1658,24 @@ mod tests {
         let mut state = state_with(&main);
         let before = std::fs::read_to_string(&main).unwrap();
 
-        // Different account structure → must refuse, not silently strip the cost.
+        // Changing the commodity under a cost → must refuse, not write
+        // "expenses:food $150.00 @ $150.00".
         let txn = simple_txn("Restructured", "150.00");
         let err = update(&mut state, 0, &txn).unwrap_err();
-        assert!(
-            err.contains("cannot preserve") || err.contains("costs"),
-            "refusal message: {}",
-            err
-        );
+        assert!(err.contains("cost"), "refusal message: {}", err);
+        assert_eq!(before, std::fs::read_to_string(&main).unwrap());
+
+        // Adding a posting → must refuse, not silently strip the cost.
+        let mut three = simple_txn("Restructured", "150.00");
+        three.postings[0].commodity = Some("AAPL".to_string());
+        three.postings.push(NewPosting {
+            account: "expenses:fees".to_string(),
+            amount: Some("1".to_string()),
+            commodity: Some("$".to_string()),
+            comment: None,
+        });
+        let err = update(&mut state, 0, &three).unwrap_err();
+        assert!(err.contains("cannot preserve"), "refusal message: {}", err);
         assert_eq!(before, std::fs::read_to_string(&main).unwrap());
     }
 
@@ -1815,6 +1832,47 @@ mod tests {
         let loaded = load_journal(&main.to_string_lossy()).unwrap();
         assert_eq!(loaded.ledger.transactions().count(), 2);
         assert!(loaded.all_warnings().iter().any(|w| w.to_lowercase().contains("balance")), "{:?}", loaded.all_warnings());
+    }
+
+
+    #[test]
+    fn renaming_an_account_keeps_cost_and_assertion() {
+        // Correcting an account on a posting that carries a cost or an
+        // assertion is the most common edit there is; it must not be
+        // refused as a restructure.
+        let dir = temp_dir("rename-account");
+        let main = dir.join("main.journal");
+        std::fs::write(
+            &main,
+            "2024-03-01 Buy\n    assets:brokerage   10 AAPL @ $150.00\n    assets:checking   $-1500.00 = $500.00\n",
+        )
+        .unwrap();
+        let mut state = state_with(&main);
+        let txn = NewTransaction {
+            date: "2024-03-01".to_string(),
+            status: "Unmarked".to_string(),
+            description: "Buy".to_string(),
+            comment: None,
+            postings: vec![
+                NewPosting {
+                    account: "assets:investments:brokerage".to_string(),
+                    amount: Some("10".to_string()),
+                    commodity: Some("AAPL".to_string()),
+                    comment: None,
+                },
+                NewPosting {
+                    account: "assets:bank:checking".to_string(),
+                    amount: Some("-1500.00".to_string()),
+                    commodity: Some("$".to_string()),
+                    comment: None,
+                },
+            ],
+        };
+        update(&mut state, 0, &txn).unwrap();
+        let text = std::fs::read_to_string(&main).unwrap();
+        assert!(text.contains("assets:investments:brokerage"), "{text}");
+        assert!(text.contains("@ $150.00"), "cost kept: {text}");
+        assert!(text.contains("assets:bank:checking") && text.contains("= $500.00"), "assertion kept: {text}");
     }
 
     #[test]
