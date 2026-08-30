@@ -197,8 +197,8 @@ jobs:
         id: out
         run: |
           set -euo pipefail
-          AAB=$(find src-tauri/gen/android -path "*/release/*" -name "*.aab" -type f | head -1)
-          APK=$(find src-tauri/gen/android -path "*/release/*" -name "*.apk" -type f | head -1)
+          AAB=$(find src-tauri/gen/android -ipath "*release*" -name "*.aab" -type f | head -1)
+          APK=$(find src-tauri/gen/android -ipath "*release*" -name "*.apk" -type f | head -1)
           if [ -z "$AAB" ]; then
             echo "::error::No release AAB found"
             exit 1
